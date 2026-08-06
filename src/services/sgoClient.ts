@@ -1,6 +1,6 @@
 import axios, { type AxiosInstance, AxiosError } from "axios";
 import { SGO_BASE_URL, SPORT_CONFIG, type SportKey } from "../constants.js";
-import type { SGOEventsResponse } from "../types.js";
+import type { SGOEventsResponse, SGOTeam } from "../types.js";
 
 /**
  * SportsGameOdds API client.
@@ -86,6 +86,24 @@ export class SGOClient {
   /** Convenience: resolve our internal sport key to SGO's leagueID */
   leagueIDFor(sport: SportKey): string {
     return SPORT_CONFIG[sport].sgoLeagueID;
+  }
+
+  /**
+   * Fetch team data including real standings (wins/losses/record/streak) directly
+   * from SGO - confirmed via their OpenAPI spec to be a real field, not something
+   * we need to compute ourselves from event tallying. Use this for overall
+   * team record; event-tallying is still needed for home/road or opponent-specific
+   * splits since standings doesn't break those out separately.
+   */
+  async getTeam(teamID: string): Promise<SGOTeam | null> {
+    try {
+      const response = await this.http.get<{ data: SGOTeam[] }>("/teams", {
+        params: { teamID },
+      });
+      return response.data.data[0] ?? null;
+    } catch (err) {
+      throw formatSGOError(err, `team ${teamID}`);
+    }
   }
 }
 

@@ -37,13 +37,28 @@ export async function getPlayerHitRate(
   const lookback = params.lookbackGames ?? 10;
   const leagueID = sgo.leagueIDFor(params.sport);
 
-  // Pull recent finalized events for this team. We over-fetch (limit higher than
-  // lookback) because some will be excluded as DNP games for this specific player.
+  // Pull recent finalized events for this team. CRITICAL: must bound by date -
+  // a live test showed that fetching finalized=true with no date bound and a
+  // small limit can return games from a much earlier season (the underlying API's
+  // default ordering for finalized events is not guaranteed to be most-recent-first,
+  // and was confirmed NOT to be during testing - it returned Sept 2024 games when
+  // today's date is Aug 2026). Explicitly bound to "before now" and pull a wider
+  // window, relying on our own sort (below) rather than trusting API ordering.
+  const now = new Date();
+  const startsBefore = now.toISOString();
+  // 220 days back is roughly a full MLB season's worth of games for one team;
+  // generous enough to always find `lookback` real games even for a team with
+  // many DNPs for this player, without pulling multiple seasons of history.
+  const lookbackWindowStart = new Date(now);
+  lookbackWindowStart.setDate(lookbackWindowStart.getDate() - 220);
+
   const events = await sgo.getAllEvents({
     leagueID,
     teamID: params.teamID,
     finalized: true,
-    limit: Math.max(lookback * 2, 20),
+    startsAfter: lookbackWindowStart.toISOString(),
+    startsBefore,
+    limit: Math.max(lookback * 3, 30),
   });
 
   // Events should already come back most-recent-first from the API, but sort

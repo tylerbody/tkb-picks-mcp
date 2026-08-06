@@ -16,16 +16,22 @@ export async function getHomeRoadSplit(
     teamID: string;
     teamName: string;
     location: "home" | "road";
-    seasonStartsAfter?: string; // ISO date - defaults to a broad lookback if omitted
+    seasonStartsAfter?: string; // ISO date - defaults to a ~220-day lookback if omitted
   }
 ): Promise<TeamSplitRecord> {
   const leagueID = sgo.leagueIDFor(params.sport);
+
+  // CRITICAL: always bound by date, same root-cause fix as hitRateAggregator -
+  // fetching finalized=true with no date bound is confirmed (via live testing)
+  // to potentially return games from a much earlier season, not recent ones.
+  const startsAfter = params.seasonStartsAfter ?? defaultLookbackStart();
 
   const events = await sgo.getAllEvents({
     leagueID,
     teamID: params.teamID,
     finalized: true,
-    startsAfter: params.seasonStartsAfter,
+    startsAfter,
+    startsBefore: new Date().toISOString(),
     limit: 100,
   });
 
@@ -69,11 +75,14 @@ export async function getOpponentSplit(
 ): Promise<TeamSplitRecord> {
   const leagueID = sgo.leagueIDFor(params.sport);
 
+  const startsAfter = params.startsAfter ?? defaultLookbackStart();
+
   const events = await sgo.getAllEvents({
     leagueID,
     teamID: params.teamID,
     finalized: true,
-    startsAfter: params.startsAfter,
+    startsAfter,
+    startsBefore: new Date().toISOString(),
     limit: 100,
   });
 
@@ -111,4 +120,15 @@ function getWinLoss(event: SGOEvent, teamID: string): "win" | "loss" | "unknown"
 
   if (teamScore === oppScore) return "unknown"; // tie - sport-dependent, exclude
   return teamScore > oppScore ? "win" : "loss";
+}
+
+/**
+ * Default lookback window when no explicit seasonStartsAfter/startsAfter is given -
+ * roughly one full MLB season's worth of days back from now. Prevents the
+ * "unbounded query returns ancient history" bug found via live testing.
+ */
+function defaultLookbackStart(): string {
+  const d = new Date();
+  d.setDate(d.getDate() - 220);
+  return d.toISOString();
 }

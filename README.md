@@ -2,62 +2,65 @@
 
 Wraps SportsGameOdds (odds/schedule/stats) and BALLDONTLIE (injuries) into MCP tools for Claude to use when building TKB Picks threads.
 
-## Tools
+## Tools (9)
 
 - `tkb_get_schedule` - game schedule, date/team/conference filtering
 - `tkb_get_odds` - moneyline/spread/total, or an individual player's over/under prop
-- `tkb_get_player_hit_rate` - real recent-game-log hit-rate check (not a fixed window)
+- `tkb_get_player_hit_rate` - real recent-game-log hit-rate check
 - `tkb_get_injuries` - structured injury status from BALLDONTLIE
-- `tkb_get_team_split` - home/road/opponent-specific win-loss records
-- `tkb_get_yes_no_prop` - milestone-style bets (first TD, any home run, double-double, etc.)
-- `tkb_get_period_odds` - period-specific lines (1st half, 1st 5 innings, quarters, etc.)
-- `tkb_debug_raw_event` - diagnostic tool, dumps raw SGO event JSON (odds capped to first 5 markets - a single event can have 1000+ markets)
+- `tkb_get_team_split` - home/road/opponent-specific win-loss records (computed from event tallying)
+- `tkb_get_team_record` - **NEW** overall team record from SGO's real standings data (fast, no tallying)
+- `tkb_get_yes_no_prop` - milestone-style bets
+- `tkb_get_period_odds` - period-specific lines
+- `tkb_debug_raw_event` - diagnostic tool, dumps raw SGO event JSON
 
-## Live-test status (confirmed against real SportsGameOdds/BALLDONTLIE data)
+## This round's fixes (batched, from real API documentation - SGO's OpenAPI spec + BALLDONTLIE's official docs)
 
-**Confirmed working correctly:**
-- Schedule (with date), period odds, exact-eventID odds, injuries, Yes/No props
-- oddID construction pattern - confirmed exactly correct against real SGO responses
-- Start time field - fixed and confirmed correct: real field is `status.startsAt`, not `info.date`
+**1. BALLDONTLIE injuries `team: "unknown"` bug - fixed.**
+Root cause confirmed via BALLDONTLIE's own docs example (their stats endpoint response shape): `team` is a SIBLING field on the record, not nested inside `player`. Original code assumed `player.team`, which was always undefined. Fixed to check the sibling `team` field first, falling back to the nested path in case the injuries endpoint differs from stats (not independently confirmed for injuries specifically - flag if `team: "unknown"` still appears after this fix, since that would mean the injuries endpoint has a genuinely different shape).
 
-**Definitively answered:**
-- **No `lineups` field exists on SGO events.** Confirmed by inspecting a real event object - SGO doesn't expose probable/confirmed starting pitchers pre-game. Keep using web search for that.
+**2. New `tkb_get_team_record` tool.**
+SGO's official OpenAPI spec confirms teams have a real `standings` object (`wins`, `losses`, `record`, `last5`, `streak`) directly available via `/teams` - no need to fetch and tally every event ourselves for a simple overall record. Added as a new, separate tool rather than rewriting the existing (now-working) `tkb_get_team_split`, to avoid risking a working tool for an enhancement. Use `tkb_get_team_record` for "what's their record," `tkb_get_team_split` for home/road/opponent-specific splits (standings doesn't break those out).
 
-**Fixed this round (verified via live testing):**
-- `tkb_debug_raw_event` was hard-crashing on every call - a single event's `odds` object can contain 1000+ markets with full pricing, blowing past response size limits. Capped to a count + first 5 samples.
-- `tkb_get_yes_no_prop` was crashing - same root cause as above, resolved by the same fix.
-- `tkb_get_odds` teamName fallback (no eventID) was searching the entire season - added a date lower-bound.
-- `startTimeISO` always returned "unknown" - fixed across `tkb_get_schedule` and `tkb_get_player_hit_rate`.
-- **`tkb_get_schedule`'s `teamName`-only search (no date given) had NO date bound at all** - was returning multi-season history back to February 2024. Now defaults to a 45-day forward window from today when only `teamName` is given with no date.
-- **`tkb_get_odds` with `marketType: "moneyline"` or `"spread"` and no explicit `side` was fundamentally broken** - it computed `entity` once outside the per-side loop instead of per-side, building invalid oddIDs like `points-all-game-ml-home` (should be `points-home-game-ml-home`). Confirmed via live test: entity always equals side exactly for moneyline/spread bet types. Fixed to compute entity correctly inside the loop, per side.
+**3. Confirmed correct (no code change needed, but now certain rather than assumed):**
+- `periodID: "game"` for full-game stats - confirmed directly from SGO's OpenAPI spec example
+- oddID format `{statID}-{statEntityID}-{periodID}-{betTypeID}-{sideID}` - confirmed
+- Period codes `1h`, `2h`, `1q`, `2q`, `3q`, `4q` - confirmed via SGO's official AI context doc (previously only `1ix5` was independently confirmed)
 
-**Known data quality note (not fixable on our end):** SGO's own player records can have internal inconsistencies - e.g. one player's `firstName`/`lastName` fields didn't match their actual name in a live test. Existing roster/injury verification workflow (live web search cross-check) is still necessary.
+## Previously fixed (still in effect, from earlier rounds)
 
-**Still genuinely unverified:**
-- Player `teamID` update speed after a real trade
-- `periodID` for full-game stats in `results` (assumed `"game"` - couldn't confirm yet, test event was pre-game with empty `results: {}`)
-- BALLDONTLIE injuries always show `team: "unknown"` - separate provider/bug, not yet diagnosed. Would need a raw BALLDONTLIE response inspected (no debug tool for BALLDONTLIE yet).
+- Debug tool crash (oversized odds payload) - capped to first 5 markets
+- Yes/No prop crash - same root cause, same fix
+- `tkb_get_odds`/`tkb_get_schedule` teamName search pulling entire history instead of recent/upcoming - both now bounded
+- `startTimeISO` "unknown" - fixed, real field is `status.startsAt`
+- `tkb_get_odds` moneyline/spread broken without explicit `side` - entity/side computation fixed
+- `tkb_get_player_hit_rate` / `tkb_get_team_split` pulling unbounded non-recent history - both now bounded to a ~220-day trailing window
+
+## Still genuinely unverified
+
+- Player `teamID` update speed after a real trade - can only be tested live against an actual trade
+- Whether the `team` sibling-field fix (item 1 above) is fully correct for the injuries endpoint specifically, vs. only confirmed for stats
 
 ## Operational notes
 
-**Render free tier cold starts:** if idle, the first request can be slow/fail while spinning up. Check Render's Logs tab to distinguish a cold-start hiccup (no error in logs) from a real crash (stack trace present).
+**Render free tier cold starts:** first request after idle can be slow/fail. Check Logs tab to distinguish cold-start from a real crash.
 
-**MCP connector tool list caching:** if new tools don't show up after a redeploy, remove and re-add the connector to force a clean refresh - this has been an intermittent issue during development.
+**MCP connector caching:** if new tools/behavior don't show up after redeploy, remove and re-add the connector.
 
-**Start Command must be exactly `npm start`** - if it ever reverts to `npm install` only, the service will build successfully but immediately exit ("Application exited early") since nothing binds to a port.
+**Start Command must be exactly `npm start`.**
 
 ## Deploy to Render
 
-1. Push this folder's contents to the GitHub repo (upload via web UI is fine - drag the contents of this folder into the repo, not the folder itself)
-2. Render should auto-redeploy if already connected
-3. Verify: `https://YOUR-SERVICE.onrender.com/health` should return `{"status":"ok",...}`
-4. If tools seem stale/missing, remove and re-add the MCP connector
+1. Upload this folder's contents to the GitHub repo (overwrite existing files)
+2. Render auto-redeploys if connected
+3. Verify: `https://YOUR-SERVICE.onrender.com/health`
+4. Remove/re-add the MCP connector if tools seem stale
 
 ## Adding NBA/NHL later
 
-1. Get a BALLDONTLIE subscription for that sport (same key, new sport tier)
+1. Get a BALLDONTLIE subscription for that sport
 2. Add one entry to `SPORT_CONFIG` in `src/constants.ts`
-3. Push to GitHub - Render auto-redeploys
+3. Push to GitHub
 
 ## Local development
 

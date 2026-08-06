@@ -10,6 +10,19 @@ export interface SGOTeam {
   teamID: string;
   name: string;
   city?: string;
+  // CONFIRMED via SGO's official OpenAPI spec: teams have a real standings
+  // object with wins/losses/record directly available - no need to compute
+  // this ourselves by fetching and tallying every event.
+  standings?: {
+    position?: string;
+    wins?: number;
+    losses?: number;
+    ties?: number;
+    record?: string;
+    played?: number;
+    last5?: string;
+    streak?: number;
+  };
 }
 
 export interface SGOPlayer {
@@ -93,6 +106,12 @@ export interface BDLPlayer {
 
 export interface BDLInjury {
   player: BDLPlayer;
+  // CONFIRMED via BALLDONTLIE's own docs example (stats endpoint) that `team` is
+  // a SIBLING field on the record, not nested inside `player`. Our original code
+  // assumed `player.team`, which produced "unknown" for every injury record.
+  // Kept both shapes here since this hasn't been independently confirmed for the
+  // injuries endpoint specifically (only shown for stats) - the tool checks both.
+  team?: BDLTeam;
   return_date: string | null;
   description: string;
   status: string; // e.g. "Out", "Questionable", "Doubtful"
