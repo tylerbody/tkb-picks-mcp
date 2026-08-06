@@ -184,12 +184,6 @@ Error Handling:
         }
 
         const betTypeCode = MARKET_TYPE_CODE[params.marketType];
-        const entity =
-          params.marketType === "player_prop"
-            ? params.playerID!
-            : params.side === "home" || params.side === "away"
-              ? params.side
-              : "all";
 
         const sidesToFetch: string[] = params.side
           ? [params.side]
@@ -199,6 +193,18 @@ Error Handling:
 
         const lines: NormalizedOddsLine[] = [];
         for (const side of sidesToFetch) {
+          // Confirmed via live test against real SGO data: for moneyline/spread,
+          // entity always matches side exactly (home->home, away->away) - there is
+          // no separate "all" entity for these bet types. For total, entity is
+          // always "all" regardless of over/under side. For player_prop, entity
+          // is always the playerID regardless of side.
+          const entity =
+            params.marketType === "player_prop"
+              ? params.playerID!
+              : params.marketType === "moneyline" || params.marketType === "spread"
+                ? side // "home" or "away" - matches side exactly for these bet types
+                : "all"; // total: entity is always "all", side carries over/under
+
           const oddID = buildOddID({
             statID,
             entity,

@@ -5,74 +5,53 @@ Wraps SportsGameOdds (odds/schedule/stats) and BALLDONTLIE (injuries) into MCP t
 ## Tools
 
 - `tkb_get_schedule` - game schedule, date/team/conference filtering
-- `tkb_get_odds` - moneyline/spread/total, or an individual player's over/under prop (exact market construction, not fuzzy matching)
+- `tkb_get_odds` - moneyline/spread/total, or an individual player's over/under prop
 - `tkb_get_player_hit_rate` - real recent-game-log hit-rate check (not a fixed window)
 - `tkb_get_injuries` - structured injury status from BALLDONTLIE
 - `tkb_get_team_split` - home/road/opponent-specific win-loss records
-- `tkb_get_yes_no_prop` - milestone-style bets (first TD, any home run, double-double, pitching win, etc.)
+- `tkb_get_yes_no_prop` - milestone-style bets (first TD, any home run, double-double, etc.)
 - `tkb_get_period_odds` - period-specific lines (1st half, 1st 5 innings, quarters, etc.)
-- `tkb_debug_raw_event` - TEMPORARY diagnostic tool, dumps raw SGO event JSON (odds section capped to first 5 markets to avoid oversized responses). Remove once schema is confirmed.
+- `tkb_debug_raw_event` - diagnostic tool, dumps raw SGO event JSON (odds capped to first 5 markets - a single event can have 1000+ markets)
 
-## Live test findings (as of this build)
+## Live-test status (confirmed against real SportsGameOdds/BALLDONTLIE data)
 
-**Confirmed working:**
-- Schedule pulls, live game status, scores - real data confirmed
-- Period odds construction - 1st 5 innings moneyline confirmed correct against a real price
-- Full-game odds with an exact `eventID` - confirmed correct
-- Injuries tool - confirmed working, pulled 214 real live BALLDONTLIE records
+**Confirmed working correctly:**
+- Schedule (with date), period odds, exact-eventID odds, injuries, Yes/No props
+- oddID construction pattern - confirmed exactly correct against real SGO responses
+- Start time field - fixed and confirmed correct: real field is `status.startsAt`, not `info.date`
 
-**Fixed in this build:**
-1. **`tkb_get_odds` teamName fallback searched the entire season** instead of just today/upcoming - added an explicit `startsAfter` date bound so it can't surface old finished games again. (Root cause of `finalized: false` not being sufficient on its own is not fully confirmed - this fix is a belt-and-suspenders bound, not a diagnosed root cause fix.)
-2. **`tkb_debug_raw_event` was hard-failing on every call** - root cause: no size cap on the `odds` object, which can contain hundreds of markets with full per-bookmaker pricing, likely blowing past a response size limit. Fixed by capping the odds section to a count + first 5 markets. Also added defensive JSON.stringify error handling and fuller error messages.
+**Definitively answered:**
+- **No `lineups` field exists on SGO events.** Confirmed by inspecting a real event object - SGO doesn't expose probable/confirmed starting pitchers pre-game. Keep using web search for that.
 
-**Still broken, needs the debug tool's next real output to fix properly:**
-3. **`startTimeISO` always returns "unknown"** - the assumed field path (`event.info?.date`) is wrong. Now that the debug tool works, run it against a real event and find the actual field, then fix in `src/tools/schedule.ts`.
-4. **`tkb_get_yes_no_prop` threw a hard error** on "Any Score" (MLB) - likely the assumed oddID pattern for team/game-wide Yes/No markets doesn't match reality. Confirm via `tkb_debug_raw_event`'s odds sample and fix the oddID construction in `src/tools/yesNoProps.ts` or `src/services/oddIdBuilder.ts`.
-5. **BALLDONTLIE injuries always show `team: "unknown"`** - the assumed field path (`i.player.team?.full_name`) doesn't match BALLDONTLIE's real response shape for this endpoint. Needs inspecting a raw BALLDONTLIE injuries response (no debug tool for this yet - consider adding one, or log the raw shape temporarily) and fixing in `src/tools/injuries.ts`.
+**Fixed this round (verified via live testing):**
+- `tkb_debug_raw_event` was hard-crashing on every call - a single event's `odds` object can contain 1000+ markets with full pricing, blowing past response size limits. Capped to a count + first 5 samples.
+- `tkb_get_yes_no_prop` was crashing - same root cause as above, resolved by the same fix.
+- `tkb_get_odds` teamName fallback (no eventID) was searching the entire season - added a date lower-bound.
+- `startTimeISO` always returned "unknown" - fixed across `tkb_get_schedule` and `tkb_get_player_hit_rate`.
+- **`tkb_get_schedule`'s `teamName`-only search (no date given) had NO date bound at all** - was returning multi-season history back to February 2024. Now defaults to a 45-day forward window from today when only `teamName` is given with no date.
+- **`tkb_get_odds` with `marketType: "moneyline"` or `"spread"` and no explicit `side` was fundamentally broken** - it computed `entity` once outside the per-side loop instead of per-side, building invalid oddIDs like `points-all-game-ml-home` (should be `points-home-game-ml-home`). Confirmed via live test: entity always equals side exactly for moneyline/spread bet types. Fixed to compute entity correctly inside the loop, per side.
 
-**Still unverified (not yet tested):**
-6. `lineups` field on SGO events - probable starting pitchers?
-7. Player `teamID` update speed after a trade
-8. `periodID` for full-game stats (assumed `"game"`)
-9. BALLDONTLIE path convention for sports other than the one tested
-10. CFB conference/Top-25 filtering
-11. Period codes beyond 1st_5_innings
+**Known data quality note (not fixable on our end):** SGO's own player records can have internal inconsistencies - e.g. one player's `firstName`/`lastName` fields didn't match their actual name in a live test. Existing roster/injury verification workflow (live web search cross-check) is still necessary.
 
-## Operational note: Render free tier cold starts
+**Still genuinely unverified:**
+- Player `teamID` update speed after a real trade
+- `periodID` for full-game stats in `results` (assumed `"game"` - couldn't confirm yet, test event was pre-game with empty `results: {}`)
+- BALLDONTLIE injuries always show `team: "unknown"` - separate provider/bug, not yet diagnosed. Would need a raw BALLDONTLIE response inspected (no debug tool for BALLDONTLIE yet).
 
-If the service has been idle, the first request after a while can be slow or intermittently fail while it spins back up. If a tool call fails right after a period of inactivity, try again once before assuming it's a real bug - check Render's Logs tab for actual error output to tell the difference between "cold start hiccup" (no error in logs) and "real crash" (stack trace in logs).
+## Operational notes
+
+**Render free tier cold starts:** if idle, the first request can be slow/fail while spinning up. Check Render's Logs tab to distinguish a cold-start hiccup (no error in logs) from a real crash (stack trace present).
+
+**MCP connector tool list caching:** if new tools don't show up after a redeploy, remove and re-add the connector to force a clean refresh - this has been an intermittent issue during development.
+
+**Start Command must be exactly `npm start`** - if it ever reverts to `npm install` only, the service will build successfully but immediately exit ("Application exited early") since nothing binds to a port.
 
 ## Deploy to Render
 
-### 1. Push to GitHub
-
-Unzip this package, then from inside the folder:
-
-```bash
-git init
-git add .
-git commit -m "Fix debug tool response size, add date bound to odds teamName search"
-git remote add origin https://github.com/YOUR_USERNAME/tkb-picks-mcp-server.git
-git branch -M main
-git push -u origin main
-```
-
-If pushing to an existing repo that's out of sync, either force-push (`git push -f origin main`, if you're sure the remote history doesn't matter) or delete and recreate the GitHub repo, then upload this folder's contents fresh via GitHub's web upload (drag the *contents* of this folder, not the folder itself).
-
-### 2. Render
-
-Same service settings as before:
-- **Runtime**: Node
-- **Build Command**: `npm install && npm run build`
-- **Start Command**: `npm start`
-- **Environment variables**: `SGO_API_KEY`, `BDL_API_KEY` (same values as before)
-
-Render will auto-redeploy on push if already connected to this repo.
-
-### 3. Re-verify
-
-- `https://YOUR-SERVICE.onrender.com/health` should return `{"status":"ok",...}`
-- If you removed/re-added the MCP connector before, you may need to do that again after this deploy to force a clean tool-list refresh.
+1. Push this folder's contents to the GitHub repo (upload via web UI is fine - drag the contents of this folder into the repo, not the folder itself)
+2. Render should auto-redeploy if already connected
+3. Verify: `https://YOUR-SERVICE.onrender.com/health` should return `{"status":"ok",...}`
+4. If tools seem stale/missing, remove and re-add the MCP connector
 
 ## Adding NBA/NHL later
 

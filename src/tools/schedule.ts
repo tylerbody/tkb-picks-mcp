@@ -88,6 +88,23 @@ Error Handling:
         if (params.date) {
           startsAfter = `${params.date}T00:00:00Z`;
           startsBefore = `${params.date}T23:59:59Z`;
+        } else if (!startsAfter && !startsBefore && !params.teamName) {
+          // No date given and no team filter either - default to "today onward"
+          // rather than pulling the entire multi-season history unbounded.
+          startsAfter = new Date().toISOString().slice(0, 10) + "T00:00:00Z";
+        }
+        // NOTE: when teamName is given with no date, we intentionally do NOT
+        // default-bound the date here, since "when does this team play next"
+        // is a valid use case that needs to search forward past just today.
+        // Instead, default to a reasonable forward window below.
+        if (params.teamName && !params.date && !startsAfter && !startsBefore) {
+          startsAfter = new Date().toISOString().slice(0, 10) + "T00:00:00Z";
+          // 45 days forward covers a full team schedule window without pulling
+          // multiple seasons of history (which was the actual bug - no upper
+          // or lower bound at all resulted in games from Feb 2024 being returned).
+          const bound = new Date();
+          bound.setDate(bound.getDate() + 45);
+          startsBefore = bound.toISOString();
         }
 
         const events = await sgo.getAllEvents({
