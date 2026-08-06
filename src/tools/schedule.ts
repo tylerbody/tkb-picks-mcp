@@ -130,7 +130,7 @@ Error Handling:
         const games: NormalizedGame[] = filtered.map((e) => ({
           eventID: e.eventID,
           sport: params.sport,
-          startTimeISO: e.info?.date ?? "unknown",
+          startTimeISO: e.status?.startsAt ?? "unknown",
           status: e.status?.displayShort ?? (e.status?.completed ? "Final" : "Scheduled"),
           homeTeam: e.teams.home.names?.long ?? e.teams.home.teamID,
           awayTeam: e.teams.away.names?.long ?? e.teams.away.teamID,

@@ -5,17 +5,17 @@ import type { SGOEventsResponse } from "../types.js";
 /**
  * SportsGameOdds API client.
  *
- * IMPORTANT - fields flagged as UNVERIFIED below have not been confirmed against
- * a live API response (this codebase was built without live network access to
- * SGO's API). Test these specifically on first real deployment:
+ * CONFIRMED via live test (see src/types.ts and README for details):
+ *   - Event start time is at `status.startsAt`, NOT `info.date` (that assumption was wrong, now fixed)
+ *   - oddID construction pattern (statID-entity-period-betType-side) is exactly correct
+ *   - No `lineups` field exists on the event object - SGO does not expose
+ *     probable/confirmed starting pitchers pre-game. Use web search for this.
+ *   - A single event's `odds` object can contain 1000+ markets - never dump this
+ *     raw in a response without capping/summarizing it first.
  *
- *   1. `lineups` field on the event object - does it include confirmed/probable
- *      starting pitchers pre-game, or only post-game? (relevant for MLB pitcher props)
- *   2. Player `teamID` update speed after a real trade - test against a recently
- *      traded player and compare to when the trade was actually reported.
- *
- * If either of these don't match what's assumed here, update this file and
- * the tools that depend on it (getSchedule, getPlayerHitRate) accordingly.
+ * STILL UNVERIFIED:
+ *   - Player `teamID` update speed after a real trade
+ *   - `periodID` for full-game stats results (assumed "game")
  */
 
 export class SGOClient {

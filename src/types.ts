@@ -45,9 +45,15 @@ export interface SGOEvent {
     completed?: boolean;
     live?: boolean;
     displayShort?: string;
+    displayLong?: string;
+    startsAt?: string; // ISO timestamp - CONFIRMED via live test, this is the real field (not info.date)
   };
   info?: {
-    date?: string; // ISO timestamp
+    venue?: {
+      name?: string;
+      city?: string;
+      regionCode?: string;
+    };
   };
   teams: {
     home: { teamID: string; names?: { long?: string }; score?: number };
@@ -57,7 +63,9 @@ export interface SGOEvent {
   // results holds final/live stat lines, keyed by periodID -> statEntityID -> statID
   results?: Record<string, Record<string, Record<string, number>>>;
   players?: Record<string, SGOPlayer>;
-  lineups?: unknown; // unverified field - confirm shape once live-tested
+  // NOTE: no `lineups` field exists on the event object - confirmed via live test
+  // against an upcoming game. SGO does not expose probable/confirmed starting
+  // pitchers or lineups pre-game. Starting pitcher info must come from web search.
   leagueID: string;
   sportID: string;
 }

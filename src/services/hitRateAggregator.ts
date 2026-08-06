@@ -49,8 +49,8 @@ export async function getPlayerHitRate(
   // Events should already come back most-recent-first from the API, but sort
   // defensively by start date descending in case that's not guaranteed.
   const sorted = [...events].sort((a, b) => {
-    const dateA = a.info?.date ? new Date(a.info.date).getTime() : 0;
-    const dateB = b.info?.date ? new Date(b.info.date).getTime() : 0;
+    const dateA = a.status?.startsAt ? new Date(a.status.startsAt).getTime() : 0;
+    const dateB = b.status?.startsAt ? new Date(b.status.startsAt).getTime() : 0;
     return dateB - dateA;
   });
 
@@ -72,7 +72,7 @@ export async function getPlayerHitRate(
       gamesExcludedDNP++;
       log.push({
         eventID: event.eventID,
-        date: event.info?.date ?? "unknown",
+        date: event.status?.startsAt ?? "unknown",
         opponent: opponentName,
         isHome,
         statValue: null,
@@ -86,7 +86,7 @@ export async function getPlayerHitRate(
 
     log.push({
       eventID: event.eventID,
-      date: event.info?.date ?? "unknown",
+      date: event.status?.startsAt ?? "unknown",
       opponent: opponentName,
       isHome,
       statValue,
