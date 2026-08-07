@@ -92,8 +92,14 @@ export interface SGOEventsResponse {
 
 export interface BDLTeam {
   id: number;
-  full_name: string;
+  display_name: string; // CONFIRMED real field name via live debug tool (not full_name)
+  name: string;
+  short_display_name?: string;
   abbreviation: string;
+  slug?: string;
+  location?: string;
+  league?: string;
+  division?: string;
 }
 
 export interface BDLPlayer {
@@ -105,16 +111,16 @@ export interface BDLPlayer {
 }
 
 export interface BDLInjury {
-  player: BDLPlayer;
-  // CONFIRMED via BALLDONTLIE's own docs example (stats endpoint) that `team` is
-  // a SIBLING field on the record, not nested inside `player`. Our original code
-  // assumed `player.team`, which produced "unknown" for every injury record.
-  // Kept both shapes here since this hasn't been independently confirmed for the
-  // injuries endpoint specifically (only shown for stats) - the tool checks both.
-  team?: BDLTeam;
+  player: BDLPlayer; // team info correctly lives nested here: player.team.display_name
   return_date: string | null;
-  description: string;
-  status: string; // e.g. "Out", "Questionable", "Doubtful"
+  status: string; // e.g. "15-Day-IL", "60-Day-IL", "Questionable"
+  type?: string; // e.g. "Lower Body", "Elbow"
+  detail?: string; // e.g. "Strain", "Surgery"
+  side?: string; // e.g. "Left", "Right"
+  date?: string; // when this injury update was logged
+  short_comment?: string; // brief sourced update
+  long_comment?: string; // fuller sourced update with context
+  description?: string; // some sports/endpoints may use this field instead of short_comment
 }
 
 export interface BDLInjuriesResponse {
@@ -162,10 +168,14 @@ export interface NormalizedOddsLine {
 }
 
 export interface NormalizedInjury {
+  [key: string]: unknown;
   playerName: string;
   team: string;
   status: string;
-  description: string;
+  type?: string;
+  detail?: string;
+  side?: string;
+  summary: string; // short_comment if available, falls back to description
   returnDate: string | null;
 }
 

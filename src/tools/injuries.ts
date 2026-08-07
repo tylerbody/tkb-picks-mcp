@@ -72,10 +72,9 @@ Error Handling:
         }
         if (params.teamName) {
           const needle = params.teamName.toLowerCase();
-          filtered = filtered.filter((i) => {
-            const teamName = i.team?.full_name ?? i.player.team?.full_name;
-            return teamName?.toLowerCase().includes(needle);
-          });
+          filtered = filtered.filter((i) =>
+            i.player.team?.display_name?.toLowerCase().includes(needle)
+          );
         }
 
         if (!filtered.length) {
@@ -91,13 +90,13 @@ Error Handling:
 
         const injuries: NormalizedInjury[] = filtered.map((i) => ({
           playerName: `${i.player.first_name} ${i.player.last_name}`,
-          // Check sibling `team` field first (confirmed real shape per BALLDONTLIE's
-          // own docs for their stats endpoint), fall back to nested player.team
-          // in case the injuries endpoint differs - avoids re-breaking this if
-          // the assumption is only half right.
-          team: i.team?.full_name ?? i.player.team?.full_name ?? "unknown",
+          // CONFIRMED via live debug tool: real path is player.team.display_name
+          team: i.player.team?.display_name ?? "unknown",
           status: i.status,
-          description: i.description,
+          type: i.type,
+          detail: i.detail,
+          side: i.side,
+          summary: i.short_comment ?? i.description ?? "no summary available",
           returnDate: i.return_date,
         }));
 
