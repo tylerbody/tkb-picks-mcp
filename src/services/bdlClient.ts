@@ -25,7 +25,7 @@ export class BDLClient {
     this.http = axios.create({
       baseURL: BDL_BASE_URL,
       headers: { Authorization: apiKey },
-      timeout: 15000,
+      timeout: 30000,
     });
   }
 

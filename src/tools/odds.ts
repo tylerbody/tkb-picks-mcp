@@ -43,6 +43,12 @@ const OddsInputSchema = z
       .describe(
         "For player_prop: 'over' or 'under'. For moneyline/spread: 'home' or 'away'. For total: 'over' or 'under'. Omit to get both sides."
       ),
+    preferredBookmakers: z
+      .string()
+      .optional()
+      .describe(
+        "Optional comma-separated bookmaker IDs to prefer (e.g. 'fanduel,draftkings'). If omitted, returns whichever bookmaker SGO includes by default. Narrowing this reduces response size and gives consistent book selection across calls."
+      ),
   })
   .strict();
 
@@ -61,9 +67,9 @@ export function registerOddsTool(server: McpServer, sgo: SGOClient) {
     {
       title: "Get Odds and Lines",
       description: `Get current odds/lines for a game - moneyline, spread, total, or an individual
-player's over/under prop. Uses exact market construction (not fuzzy text matching),
-so results are precise - e.g. asking for "Hits" won't accidentally also return
-"Hits Allowed" or "Hits + Runs + RBIs".
+player's over/under prop. Uses exact market construction (not fuzzy text matching)
+AND requests only the specific oddID(s) needed from the API directly (not the full
+event's 1000+ markets), so results are precise and fast.
 
 Args:
   - sport, and either eventID or teamName to identify the game
@@ -72,6 +78,8 @@ Args:
     Must match this sport's supported list, which the tool returns if the label doesn't match.
   - playerID: required for player_prop
   - side ('over'|'under'|'home'|'away'): omit to get both sides of the line
+  - preferredBookmakers: optional, comma-separated (e.g. "fanduel,draftkings") to narrow
+    which book's price is returned, for consistency across calls
 
 Returns: the odds line(s) with American odds and bookmaker.
 
@@ -121,49 +129,7 @@ Error Handling:
           };
         }
 
-        const leagueID = sgo.leagueIDFor(params.sport);
-
-        // For the teamName fallback (no explicit eventID), bound the search to
-        // "today onward" explicitly rather than relying solely on finalized=false -
-        // a live test showed a team-name-only search could surface a finished game
-        // from months ago, so don't trust finalized alone to exclude old games.
-        const todayISO = new Date().toISOString().slice(0, 10) + "T00:00:00Z";
-
-        const events = params.eventID
-          ? await sgo.getAllEvents({ leagueID, eventIDs: params.eventID, oddsAvailable: true })
-          : await sgo.getAllEvents({
-              leagueID,
-              oddsAvailable: true,
-              finalized: false,
-              startsAfter: todayISO,
-              limit: 50,
-            });
-
-        let matched = events;
-        if (params.teamName && !params.eventID) {
-          const needle = params.teamName.toLowerCase();
-          matched = events.filter(
-            (e) =>
-              e.teams.home.names?.long?.toLowerCase().includes(needle) ||
-              e.teams.away.names?.long?.toLowerCase().includes(needle)
-          );
-        }
-
-        if (!matched.length) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `No matching ${params.sport.toUpperCase()} game with available odds found.`,
-              },
-            ],
-          };
-        }
-
-        const event = matched[0];
-
-        // Resolve statID for player props from the catalog (exact match required)
-        let statID = "points"; // default for moneyline/spread/total ("points" is SGO's universal winner-stat)
+        let statID = "points";
         if (params.marketType === "player_prop") {
           const catalog = OU_PROP_MARKETS[params.sport];
           const market = catalog.find(
@@ -184,27 +150,73 @@ Error Handling:
         }
 
         const betTypeCode = MARKET_TYPE_CODE[params.marketType];
-
         const sidesToFetch: string[] = params.side
           ? [params.side]
           : params.marketType === "moneyline" || params.marketType === "spread"
             ? ["home", "away"]
             : ["over", "under"];
 
-        const lines: NormalizedOddsLine[] = [];
-        for (const side of sidesToFetch) {
-          // Confirmed via live test against real SGO data: for moneyline/spread,
-          // entity always matches side exactly (home->home, away->away) - there is
-          // no separate "all" entity for these bet types. For total, entity is
-          // always "all" regardless of over/under side. For player_prop, entity
-          // is always the playerID regardless of side.
+        const oddIDsToFetch = sidesToFetch.map((side) => {
           const entity =
             params.marketType === "player_prop"
               ? params.playerID!
               : params.marketType === "moneyline" || params.marketType === "spread"
-                ? side // "home" or "away" - matches side exactly for these bet types
-                : "all"; // total: entity is always "all", side carries over/under
+                ? side
+                : "all";
+          return buildOddID({ statID, entity, period: "full_game", betType: betTypeCode, side });
+        });
 
+        const leagueID = sgo.leagueIDFor(params.sport);
+        const todayISO = new Date().toISOString().slice(0, 10) + "T00:00:00Z";
+
+        const events = params.eventID
+          ? await sgo.getAllEvents({
+              leagueID,
+              eventIDs: params.eventID,
+              oddIDs: oddIDsToFetch.join(","),
+              bookmakerID: params.preferredBookmakers,
+            })
+          : await sgo.getAllEvents({
+              leagueID,
+              oddsAvailable: true,
+              finalized: false,
+              startsAfter: todayISO,
+              oddIDs: oddIDsToFetch.join(","),
+              bookmakerID: params.preferredBookmakers,
+              limit: 50,
+            });
+
+        let matched = events;
+        if (params.teamName && !params.eventID) {
+          const needle = params.teamName.toLowerCase();
+          matched = events.filter(
+            (e) =>
+              e.teams.home.names?.long?.toLowerCase().includes(needle) ||
+              e.teams.away.names?.long?.toLowerCase().includes(needle)
+          );
+        }
+
+        if (!matched.length) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `No matching ${params.sport.toUpperCase()} game found. This market may not be offered for this game yet, or confirm the team name / eventID is correct.`,
+              },
+            ],
+          };
+        }
+
+        const event = matched[0];
+        const lines: NormalizedOddsLine[] = [];
+
+        for (const side of sidesToFetch) {
+          const entity =
+            params.marketType === "player_prop"
+              ? params.playerID!
+              : params.marketType === "moneyline" || params.marketType === "spread"
+                ? side
+                : "all";
           const oddID = buildOddID({
             statID,
             entity,

@@ -58,6 +58,13 @@ export async function getPlayerHitRate(
     finalized: true,
     startsAfter: lookbackWindowStart.toISOString(),
     startsBefore,
+    // This function only reads event.results, never odds - but SGO always
+    // includes some odds data unless oddIDs is passed. Requesting a single,
+    // near-universal moneyline oddID here shrinks the odds payload down to
+    // (at most) one market instead of 1000+, since hit-rate checks don't need
+    // odds data at all. This is the real fix for response-size/OOM risk on
+    // this path, confirmed via SGO's own filtering docs.
+    oddIDs: "points-home-game-ml-home",
     limit: Math.max(lookback * 3, 30),
   });
 

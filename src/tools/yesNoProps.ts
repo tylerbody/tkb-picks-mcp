@@ -113,6 +113,9 @@ Error Handling:
           leagueID,
           eventIDs: params.eventID,
           oddsAvailable: true,
+          // Request only this exact market instead of the event's full 1000+
+          // markets - same fix applied to tkb_get_odds.
+          oddIDs: yesOddID,
         });
 
         if (!events.length) {

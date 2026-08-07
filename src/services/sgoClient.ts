@@ -12,6 +12,11 @@ import type { SGOEventsResponse, SGOTeam } from "../types.js";
  *     probable/confirmed starting pitchers pre-game. Use web search for this.
  *   - A single event's `odds` object can contain 1000+ markets - never dump this
  *     raw in a response without capping/summarizing it first.
+ *   - CONFIRMED via SGO's own docs/FAQ: request-level filtering (oddIDs, playerID,
+ *     bookmakerID) dramatically reduces response size vs. fetching the full event
+ *     and filtering client-side. This is the real fix for the earlier OOM crash -
+ *     tools now request only the specific line(s) needed instead of pulling 1000+
+ *     markets and discarding almost all of them after the fact.
  *
  * STILL UNVERIFIED:
  *   - Player `teamID` update speed after a real trade
@@ -42,6 +47,8 @@ export class SGOClient {
     teamID?: string;
     playerID?: string;
     oddIDs?: string;
+    bookmakerID?: string;
+    includeOpposingOdds?: boolean;
     startsAfter?: string;
     startsBefore?: string;
     oddsAvailable?: boolean;

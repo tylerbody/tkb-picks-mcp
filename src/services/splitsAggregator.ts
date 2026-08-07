@@ -32,6 +32,10 @@ export async function getHomeRoadSplit(
     finalized: true,
     startsAfter,
     startsBefore: new Date().toISOString(),
+    // Only win/loss (from scores) is needed here, never odds - narrow the odds
+    // payload to a single market to keep response size minimal. Same fix as
+    // hitRateAggregator.ts.
+    oddIDs: "points-home-game-ml-home",
     limit: 100,
   });
 
@@ -83,6 +87,7 @@ export async function getOpponentSplit(
     finalized: true,
     startsAfter,
     startsBefore: new Date().toISOString(),
+    oddIDs: "points-home-game-ml-home",
     limit: 100,
   });
 

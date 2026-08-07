@@ -99,6 +99,7 @@ Error Handling:
           leagueID,
           eventIDs: params.eventID,
           oddsAvailable: true,
+          oddIDs: oddID,
         });
 
         if (!events.length) {
