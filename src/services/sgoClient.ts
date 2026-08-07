@@ -25,7 +25,10 @@ export class SGOClient {
     this.http = axios.create({
       baseURL: SGO_BASE_URL,
       headers: { "x-api-key": apiKey },
-      timeout: 15000,
+      // Raised from 15s to 30s - wide lookbackGames requests (e.g. pitcher
+      // strikeout checks, which have to skip non-start games to find enough
+      // real starts) were timing out at 15s under real use.
+      timeout: 30000,
     });
   }
 
