@@ -89,6 +89,23 @@ export class BDLClient {
       throw formatBDLError(err, `${sport} games`, sport);
     }
   }
+
+  /**
+   * Debug helper: returns raw, unprocessed injuries JSON for direct field
+   * inspection. Used to diagnose the "team: unknown" bug - our assumption about
+   * where the team field lives (nested in player vs. sibling field) has been
+   * wrong twice; this lets us see the actual shape directly instead of guessing again.
+   */
+  async getRawInjuries(sport: SportKey): Promise<unknown> {
+    try {
+      const response = await this.http.get(this.buildPath(sport, "player_injuries"), {
+        params: { per_page: 3 },
+      });
+      return response.data;
+    } catch (err) {
+      throw formatBDLError(err, `${sport} raw injuries`, sport);
+    }
+  }
 }
 
 function formatBDLError(err: unknown, context: string, sport: SportKey): Error {

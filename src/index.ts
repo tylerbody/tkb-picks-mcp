@@ -12,6 +12,7 @@ import { registerSplitsTool } from "./tools/splits.js";
 import { registerYesNoPropsTool } from "./tools/yesNoProps.js";
 import { registerPeriodOddsTool } from "./tools/periodOdds.js";
 import { registerDebugEventTool } from "./tools/debugEvent.js";
+import { registerDebugInjuriesTool } from "./tools/debugInjuries.js";
 import { registerTeamRecordTool } from "./tools/teamRecord.js";
 
 // ---- Environment / config ----
@@ -50,6 +51,7 @@ function buildServer(): McpServer {
   registerYesNoPropsTool(server, sgo);
   registerPeriodOddsTool(server, sgo);
   registerDebugEventTool(server, sgo);
+  registerDebugInjuriesTool(server, bdl);
   registerTeamRecordTool(server, sgo);
 
   return server;
