@@ -1,51 +1,60 @@
 # TKB Picks MCP Server
 
-Wraps SportsGameOdds (odds/schedule/stats) and BALLDONTLIE (injuries) into MCP tools for TKB Picks thread-building.
+Wraps SportsGameOdds (odds/schedule/stats), BALLDONTLIE (injuries), and weather.gov (MLB stadium weather) into MCP tools for TKB Picks thread-building.
 
-## This round: response-size optimization (root-cause fix for the earlier OOM crash)
+## New this round: MLB stadium weather (`tkb_get_game_weather`)
 
-**What changed:** Every tool that fetches odds now requests the EXACT `oddID`(s) it needs directly from SGO's API, instead of pulling the full event (which can contain 1000+ markets) and filtering client-side afterward. Confirmed via SGO's own FAQ and docs that request-level filtering (`oddIDs`, `playerID`, `bookmakerID` params) is the correct, intended way to keep responses small - this was the real root cause of the earlier out-of-memory crash, more than raw traffic volume.
+**No env variable needed.** weather.gov is a free, public US government API - authentication is just a `User-Agent` string (hardcoded in `weatherClient.ts`), not a secret key, so nothing needs to be added to Render.
 
-**Files changed:**
-- `sgoClient.ts` - added `bookmakerID` and `includeOpposingOdds` to the request params (bookmakerID is wired through; includeOpposingOdds is available for future use but not yet used by any tool)
-- `odds.ts` - rewritten so `oddIDs` are built BEFORE the event lookup and passed on the very first request, even in the teamName-lookup case (since statID/entity/side are deterministic ahead of time, we never need to guess-then-filter)
-- `yesNoProps.ts`, `periodOdds.ts` - same fix: the already-known `oddID` is now passed via the `oddIDs` param on the fetch instead of being filtered out of the full response after the fact
-- `hitRateAggregator.ts`, `splitsAggregator.ts` - these never needed odds data at all (only `results` / `teams.score`), so they now pass a minimal single dummy `oddIDs` value to shrink the odds payload to near-zero instead of pulling the full odds object for every game in the lookback window
+**How it works:**
+1. `src/data/mlbStadiums.ts` - static table of all 30 MLB stadiums (coordinates + roof type: outdoor/dome/retractable). Team -> home stadium is a fixed relationship, so this never needs a dynamic lookup.
+2. `src/services/weatherClient.ts` - two-step weather.gov lookup: `/points/{lat},{lon}` resolves to a forecast URL, then that URL returns real forecast periods (temp, wind, precip chance).
+3. `src/tools/weather.ts` - the tool itself, which is deliberately conservative about what it calls "relevant":
+   - **Dome stadiums** (e.g. Tropicana Field) -> always returns `relevant: false`, weather is never a factor, don't even bother checking further
+   - **Retractable-roof stadiums** (Rogers Centre, Daikin Park, loanDepot park, American Family Field, Chase Field) -> returns `relevant: "unconfirmed"` with a note to verify roof status via live search, since same-day open/closed decisions aren't knowable from any API
+   - **Outdoor stadiums** -> real forecast returned, plus an `isNotable` flag (true only if wind ≥12mph, precip chance ≥40%, or temp ≥95°F/≤40°F) - ordinary/mild conditions return `isNotable: false` and should NOT be mentioned in a thread, per the standing style rule that weather only gets called out when it's a real factor
 
-**New param:** `tkb_get_odds` now accepts optional `preferredBookmakers` (comma-separated, e.g. `"fanduel,draftkings"`) to control which book's price is returned, instead of whatever happened to come back first.
+**Usage in thread-building:** call this once per game (pass the home team's teamID) before writing the opener. If `relevant: false` or `isNotable: false`, skip weather entirely - don't force a mention. Only use it in reasoning/opener when `isNotable: true`, or when a retractable-roof check confirms the roof is open and conditions are notable.
 
-**Practical effect:** faster responses, and this should meaningfully reduce (likely eliminate) the memory pressure that caused the earlier "Ran out of memory (used over 512MB)" crashes - independent of the Render instance upgrade, which was a workaround for the same underlying issue. Nothing about the tool names, parameters (aside from the one addition), or how threads get built has changed - this is purely a request-efficiency fix.
+**Known limitation:** stadium locations in the table reflect standard/primary venues - if a team is playing at a temporary home (renovation, relocation, disaster displacement), this table could be stale. Spot-check if something seems off, same discipline as roster/injury verification elsewhere in this connector.
 
-## Tools (10)
+## Tools (11)
 
 - `tkb_get_schedule` - game schedule, date/team/conference filtering
-- `tkb_get_odds` - moneyline/spread/total, or an individual player's over/under prop (now requests exact oddIDs directly)
-- `tkb_get_player_hit_rate` - real recent-game-log hit-rate check (now requests minimal odds payload)
-- `tkb_get_injuries` - structured injury status from BALLDONTLIE (team field confirmed fixed: `player.team.display_name`)
-- `tkb_get_team_split` - home/road/opponent-specific record (now requests minimal odds payload)
+- `tkb_get_odds` - moneyline/spread/total, or player prop (requests exact oddIDs directly, optional `preferredBookmakers`)
+- `tkb_get_player_hit_rate` - real recent-game-log hit-rate check
+- `tkb_get_injuries` - structured injury status from BALLDONTLIE
+- `tkb_get_team_split` - home/road/opponent-specific record
 - `tkb_get_team_record` - overall record from SGO's standings data
-- `tkb_get_yes_no_prop` - milestone-style bets (now requests exact oddID directly)
-- `tkb_get_period_odds` - period-specific lines (now requests exact oddID directly)
+- `tkb_get_yes_no_prop` - milestone-style bets
+- `tkb_get_period_odds` - period-specific lines
+- `tkb_get_game_weather` - **NEW** MLB stadium weather, dome/retractable-aware
 - `tkb_debug_raw_event` - dumps raw SGO event JSON
 - `tkb_debug_raw_injuries` - dumps raw BALLDONTLIE injuries JSON
 
 ## Confirmed working / fixed across all prior rounds (still in effect)
 
-- Start time field (`status.startsAt`)
-- Schedule/odds teamName searches properly date-bounded
-- Moneyline/spread odds correct with or without explicit `side`
-- Hit-rate and team-split date bounding (no more stale/ancient data)
+- Response-size optimization: all odds tools now request exact oddIDs/playerID/bookmakerID directly instead of fetching full events and filtering client-side (root-cause fix for the earlier OOM crash)
+- Start time field, schedule/odds teamName date-bounding, moneyline/spread odds with or without explicit side
+- Hit-rate and team-split date bounding (no stale/ancient data)
 - BALLDONTLIE injuries team field (`player.team.display_name`)
-- No `lineups` field exists on SGO events - starting pitcher confirmation is a permanent live-search requirement, not something this API can provide
+- No `lineups` field on SGO events - starting pitcher confirmation is a permanent live-search requirement
 
 ## Still genuinely unverified
 
-- Player `teamID` update speed after a real trade (though one real offseason trade - Semien to Mets - was confirmed correctly reflected)
-- `includeOpposingOdds` behavior (added to client, not yet used by any tool - worth adopting in a future round to cut requests further for two-sided markets)
+- Player `teamID` update speed after a real trade (one real offseason trade confirmed correctly reflected)
+- Retractable-roof status can never be confirmed by this connector alone - always requires a live-search cross-check when the tool flags `relevant: "unconfirmed"`
+
+## Future prospecting (not yet built)
+
+- Pitcher-vs-specific-opponent historical record (extension of existing splits logic, applied to individual pitchers rather than teams)
+- Weather for other sports (NFL/CFB are also outdoor-relevant; not yet scoped)
 
 ## Operational notes
 
-**Render instance:** currently on Standard (2GB RAM). This round's fix targets the root cause of the earlier OOM crashes directly, so the bigger instance should now have even more headroom than before.
+**Render instance:** Standard tier (2GB RAM).
+
+**No new environment variables this round** - weather.gov requires no key.
 
 **MCP connector caching:** remove/re-add if new tools/behavior don't show up after redeploy.
 

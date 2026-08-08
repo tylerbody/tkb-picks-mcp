@@ -4,6 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 
 import { SGOClient } from "./services/sgoClient.js";
 import { BDLClient } from "./services/bdlClient.js";
+import { WeatherClient } from "./services/weatherClient.js";
 import { registerScheduleTool } from "./tools/schedule.js";
 import { registerOddsTool } from "./tools/odds.js";
 import { registerHitRateTool } from "./tools/hitRate.js";
@@ -14,6 +15,7 @@ import { registerPeriodOddsTool } from "./tools/periodOdds.js";
 import { registerDebugEventTool } from "./tools/debugEvent.js";
 import { registerDebugInjuriesTool } from "./tools/debugInjuries.js";
 import { registerTeamRecordTool } from "./tools/teamRecord.js";
+import { registerWeatherTool } from "./tools/weather.js";
 
 // ---- Environment / config ----
 
@@ -34,6 +36,7 @@ if (!BDL_API_KEY) {
 
 const sgo = new SGOClient(SGO_API_KEY);
 const bdl = new BDLClient(BDL_API_KEY);
+const weather = new WeatherClient(); // no API key needed - free public NWS API
 
 // ---- Build MCP server and register tools ----
 
@@ -53,6 +56,7 @@ function buildServer(): McpServer {
   registerDebugEventTool(server, sgo);
   registerDebugInjuriesTool(server, bdl);
   registerTeamRecordTool(server, sgo);
+  registerWeatherTool(server, weather);
 
   return server;
 }
