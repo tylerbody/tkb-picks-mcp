@@ -1,62 +1,42 @@
 # TKB Picks MCP Server
 
-Wraps SportsGameOdds (odds/schedule/stats), BALLDONTLIE (injuries), and weather.gov (MLB stadium weather) into MCP tools for TKB Picks thread-building.
+Wraps SportsGameOdds, BALLDONTLIE, and weather.gov into MCP tools for TKB Picks thread-building.
 
-## New this round: MLB stadium weather (`tkb_get_game_weather`)
+## ⚠️ Real bug found and fixed via live test: precipitation chance was silently ignored
 
-**No env variable needed.** weather.gov is a free, public US government API - authentication is just a `User-Agent` string (hardcoded in `weatherClient.ts`), not a secret key, so nothing needs to be added to Render.
+First live test of `tkb_get_game_weather` (Phillies, real 60% thunderstorm chance) returned `isNotable: false` - completely wrong, since 60% rain chance should clearly be flagged. Root cause: weather.gov's real API returns `probabilityOfPrecipitation` as an OBJECT (`{ unitCode: "wmoUnit:percent", value: 60 }`), not a plain number like assumed. The `precipProb >= 40` check was comparing against the whole object, which never evaluates true, so real rain risk was silently never triggering the "notable" flag.
 
-**How it works:**
-1. `src/data/mlbStadiums.ts` - static table of all 30 MLB stadiums (coordinates + roof type: outdoor/dome/retractable). Team -> home stadium is a fixed relationship, so this never needs a dynamic lookup.
-2. `src/services/weatherClient.ts` - two-step weather.gov lookup: `/points/{lat},{lon}` resolves to a forecast URL, then that URL returns real forecast periods (temp, wind, precip chance).
-3. `src/tools/weather.ts` - the tool itself, which is deliberately conservative about what it calls "relevant":
-   - **Dome stadiums** (e.g. Tropicana Field) -> always returns `relevant: false`, weather is never a factor, don't even bother checking further
-   - **Retractable-roof stadiums** (Rogers Centre, Daikin Park, loanDepot park, American Family Field, Chase Field) -> returns `relevant: "unconfirmed"` with a note to verify roof status via live search, since same-day open/closed decisions aren't knowable from any API
-   - **Outdoor stadiums** -> real forecast returned, plus an `isNotable` flag (true only if wind ≥12mph, precip chance ≥40%, or temp ≥95°F/≤40°F) - ordinary/mild conditions return `isNotable: false` and should NOT be mentioned in a thread, per the standing style rule that weather only gets called out when it's a real factor
+**Fixed:** `WeatherPeriod.probabilityOfPrecipitation` type corrected to the real object shape, and the tool now extracts `.value` before comparing. Confirmed dome and retractable-roof logic both worked correctly on the same test pass - this bug was isolated to the precipitation check specifically.
 
-**Usage in thread-building:** call this once per game (pass the home team's teamID) before writing the opener. If `relevant: false` or `isNotable: false`, skip weather entirely - don't force a mention. Only use it in reasoning/opener when `isNotable: true`, or when a retractable-roof check confirms the roof is open and conditions are notable.
-
-**Known limitation:** stadium locations in the table reflect standard/primary venues - if a team is playing at a temporary home (renovation, relocation, disaster displacement), this table could be stale. Spot-check if something seems off, same discipline as roster/injury verification elsewhere in this connector.
+**Practical impact:** any weather check run before this fix could have missed real rain risk. Not used in any posted thread yet (this was caught on first live test), so no correction needed to past content.
 
 ## Tools (11)
 
-- `tkb_get_schedule` - game schedule, date/team/conference filtering
-- `tkb_get_odds` - moneyline/spread/total, or player prop (requests exact oddIDs directly, optional `preferredBookmakers`)
-- `tkb_get_player_hit_rate` - real recent-game-log hit-rate check
-- `tkb_get_injuries` - structured injury status from BALLDONTLIE
-- `tkb_get_team_split` - home/road/opponent-specific record
-- `tkb_get_team_record` - overall record from SGO's standings data
-- `tkb_get_yes_no_prop` - milestone-style bets
-- `tkb_get_period_odds` - period-specific lines
-- `tkb_get_game_weather` - **NEW** MLB stadium weather, dome/retractable-aware
-- `tkb_debug_raw_event` - dumps raw SGO event JSON
-- `tkb_debug_raw_injuries` - dumps raw BALLDONTLIE injuries JSON
+- `tkb_get_schedule`, `tkb_get_odds`, `tkb_get_player_hit_rate`, `tkb_get_injuries`, `tkb_get_team_split`, `tkb_get_team_record`, `tkb_get_yes_no_prop`, `tkb_get_period_odds` - all previously confirmed working
+- `tkb_get_game_weather` - MLB stadium weather, dome/retractable-aware, precipitation bug now fixed
+- `tkb_debug_raw_event`, `tkb_debug_raw_injuries` - diagnostic tools
 
-## Confirmed working / fixed across all prior rounds (still in effect)
+## Weather tool behavior (confirmed via live test)
 
-- Response-size optimization: all odds tools now request exact oddIDs/playerID/bookmakerID directly instead of fetching full events and filtering client-side (root-cause fix for the earlier OOM crash)
-- Start time field, schedule/odds teamName date-bounding, moneyline/spread odds with or without explicit side
-- Hit-rate and team-split date bounding (no stale/ancient data)
+- **Dome stadiums** (Tropicana Field) -> `relevant: false`, no API call needed, confirmed working
+- **Retractable-roof stadiums** (Rogers Centre, etc.) -> `relevant: "unconfirmed"`, flags need for live-search roof check, confirmed working
+- **Outdoor stadiums** -> real forecast pulled, `isNotable` flag now correctly reflects wind/precip/temp thresholds after the bug fix above
+
+## All prior fixes still in effect
+
+- Response-size optimization (exact oddIDs/playerID/bookmakerID requested directly)
+- Start time field, date-bounded searches, moneyline/spread odds correctness
+- Hit-rate and team-split date bounding
 - BALLDONTLIE injuries team field (`player.team.display_name`)
-- No `lineups` field on SGO events - starting pitcher confirmation is a permanent live-search requirement
-
-## Still genuinely unverified
-
-- Player `teamID` update speed after a real trade (one real offseason trade confirmed correctly reflected)
-- Retractable-roof status can never be confirmed by this connector alone - always requires a live-search cross-check when the tool flags `relevant: "unconfirmed"`
-
-## Future prospecting (not yet built)
-
-- Pitcher-vs-specific-opponent historical record (extension of existing splits logic, applied to individual pitchers rather than teams)
-- Weather for other sports (NFL/CFB are also outdoor-relevant; not yet scoped)
+- No `lineups` field on SGO events - starting pitcher confirmation stays a live-search task
 
 ## Operational notes
 
 **Render instance:** Standard tier (2GB RAM).
 
-**No new environment variables this round** - weather.gov requires no key.
+**No new environment variables** - weather.gov requires no key.
 
-**MCP connector caching:** remove/re-add if new tools/behavior don't show up after redeploy.
+**MCP connector caching / mid-deploy timing:** if a newly added tool doesn't show up immediately after upload, the deploy may still be in progress - wait a moment and re-check rather than assuming the upload failed. Confirmed this was the cause of an earlier "tool not found" false alarm this session.
 
 **Start Command must be exactly `npm start`.**
 
@@ -66,12 +46,6 @@ Wraps SportsGameOdds (odds/schedule/stats), BALLDONTLIE (injuries), and weather.
 2. Render auto-redeploys
 3. Verify: `https://YOUR-SERVICE.onrender.com/health`
 4. Remove/re-add the MCP connector if tools seem stale
-
-## Adding NBA/NHL later
-
-1. Get a BALLDONTLIE subscription for that sport
-2. Add one entry to `SPORT_CONFIG` in `src/constants.ts`
-3. Push to GitHub
 
 ## Local development
 

@@ -137,7 +137,9 @@ Error Handling:
         }
 
         const windMph = parseWindSpeedMph(period.windSpeed);
-        const precipProb = period.probabilityOfPrecipitation ?? 0;
+        // BUG FIX (found via live test): precipitationChance is an object
+        // { unitCode, value }, not a plain number - must extract .value.
+        const precipProb = period.probabilityOfPrecipitation?.value ?? 0;
         const notable = isNotable(windMph, precipProb, period.temperature);
 
         const output = {

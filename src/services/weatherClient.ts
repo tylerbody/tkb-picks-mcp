@@ -26,7 +26,9 @@ export interface WeatherPeriod {
   windSpeed: string;
   windDirection: string;
   shortForecast: string;
-  probabilityOfPrecipitation?: number | null;
+  // CONFIRMED via live test: this is NOT a plain number - real API returns
+  // { unitCode: "wmoUnit:percent", value: 60 }. Must extract .value.
+  probabilityOfPrecipitation?: { unitCode?: string; value: number | null } | null;
 }
 
 export class WeatherClient {
