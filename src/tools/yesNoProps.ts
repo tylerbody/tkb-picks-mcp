@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { YES_NO_MARKETS } from "../services/marketCatalog.js";
+import { extractPricedLine } from "../services/oddsPricing.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
 
 const YesNoInputSchema = z
@@ -130,32 +131,37 @@ Error Handling:
         }
 
         const event = events[0];
-        const yesOdd = event.odds?.[yesOddID];
 
-        if (!yesOdd) {
+        // GUARDRAIL: yes/no markets have no line by nature, but they still need a
+        // real book price - see services/oddsPricing.ts.
+        const pricing = extractPricedLine(event.odds?.[yesOddID], {
+          requireLine: false,
+          marketDescription: `"${market.label}"`,
+        });
+
+        if (!pricing.priced) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: `No odds currently available for "${market.label}" in this event. This can mean the market isn't offered for this game, or the exact oddID format used here doesn't match what SGO returns - if this keeps happening, flag it to double check the oddID construction against a live response.`,
+                text: `NO USABLE ODDS - do not post this pick.\n\n${pricing.reason}`,
               },
             ],
           };
         }
 
-        const firstBook = yesOdd.byBookmaker ? Object.entries(yesOdd.byBookmaker)[0] : undefined;
         const output = {
           market: market.label,
           eventID: event.eventID,
-          americanOdds: yesOdd.bookOdds ?? yesOdd.fairOdds ?? firstBook?.[1]?.odds,
-          bookmaker: firstBook?.[0],
+          americanOdds: pricing.value!.americanOdds,
+          bookmaker: pricing.value!.bookmaker,
         };
 
         return {
           content: [
             {
               type: "text" as const,
-              text: `${market.label}: ${output.americanOdds ?? "no price available"}\n\n${JSON.stringify(output, null, 2)}`,
+              text: `${market.label}: ${output.americanOdds}\n\n${JSON.stringify(output, null, 2)}`,
             },
           ],
           structuredContent: output,

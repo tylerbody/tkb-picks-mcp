@@ -8,7 +8,8 @@ import type { SportKey } from "./constants.js";
 
 export interface SGOTeam {
   teamID: string;
-  name: string;
+  // Not always populated by SGO - previously caused "undefined: 8-9" output.
+  name?: string;
   city?: string;
   // CONFIRMED via SGO's official OpenAPI spec: teams have a real standings
   // object with wins/losses/record directly available - no need to compute
@@ -30,12 +31,19 @@ export interface SGOPlayer {
   name: string;
   teamID: string;
   position?: string;
+  firstName?: string;
+  lastName?: string;
+  nickname?: string;
 }
 
 export interface SGOBookmakerOdds {
   odds: string; // American odds as string, e.g. "-110"
   spread?: string;
   overUnder?: string;
+  // CONFIRMED via live test: real per-bookmaker entries carry these.
+  available?: boolean;
+  lastUpdatedAt?: string;
+  deeplink?: string;
 }
 
 export interface SGOOdd {
@@ -48,6 +56,26 @@ export interface SGOOdd {
   sideID?: string;
   fairOdds?: string;
   bookOdds?: string;
+  // CONFIRMED via live test (8 Aug 2026): SGO exposes these two flags and they are
+  // the reliable way to tell a REAL, book-priced market from a market that merely
+  // exists in the catalog with only a model-derived "fair" estimate attached.
+  //
+  // This distinction matters enormously. An NFL Week 1 passing-yards prop pulled
+  // five weeks out returned odds of -137 on BOTH sides with no line and no
+  // bookmaker - no sportsbook had priced it yet, so what came back was SGO's own
+  // fair-value estimate. Real two-sided markets are never symmetric like that.
+  // Publishing that number would be publishing a placeholder, which is banned.
+  bookOddsAvailable?: boolean;
+  fairOddsAvailable?: boolean;
+  // Top-level line fields - more reliable than digging into byBookmaker, which is
+  // empty whenever no book has priced the market.
+  bookSpread?: string;
+  bookOverUnder?: string;
+  fairSpread?: string;
+  fairOverUnder?: string;
+  marketName?: string;
+  statEntityID?: string;
+  cancelled?: boolean;
   byBookmaker?: Record<string, SGOBookmakerOdds>;
 }
 
@@ -66,8 +94,15 @@ export interface SGOEvent {
       name?: string;
       city?: string;
       regionCode?: string;
+      regionName?: string;
+      countryCode?: string;
+      address?: string;
+      capacity?: number;
     };
+    seasonWeek?: string;
   };
+  /** "match" for games. Futures/outright markets use a different type. */
+  type?: string;
   teams: {
     home: { teamID: string; names?: { long?: string }; score?: number };
     away: { teamID: string; names?: { long?: string }; score?: number };
@@ -92,7 +127,12 @@ export interface SGOEventsResponse {
 
 export interface BDLTeam {
   id: number;
-  display_name: string; // CONFIRMED real field name via live debug tool (not full_name)
+  // FIELD NAME VARIES BY SPORT - confirmed via live debug tool on 8 Aug 2026.
+  // MLB/WNBA return `display_name`; NFL returns `full_name` (plus location/name).
+  // Neither is guaranteed present, so resolveTeamName() in tools/injuries.ts
+  // checks all of them in order rather than assuming one shape.
+  display_name?: string;
+  full_name?: string;
   name: string;
   short_display_name?: string;
   abbreviation: string;
@@ -118,9 +158,13 @@ export interface BDLInjury {
   detail?: string; // e.g. "Strain", "Surgery"
   side?: string; // e.g. "Left", "Right"
   date?: string; // when this injury update was logged
-  short_comment?: string; // brief sourced update
+  short_comment?: string; // brief sourced update (MLB/WNBA)
   long_comment?: string; // fuller sourced update with context
-  description?: string; // some sports/endpoints may use this field instead of short_comment
+  description?: string; // some sports/endpoints use this instead
+  // CONFIRMED via live debug tool: NFL uses a plain `comment` field and does NOT
+  // populate short_comment/description, which is why every NFL injury previously
+  // rendered as "no summary available".
+  comment?: string;
 }
 
 export interface BDLInjuriesResponse {
@@ -144,6 +188,42 @@ export interface BDLGamesResponse {
   meta?: { next_cursor?: number | null; per_page?: number };
 }
 
+/**
+ * BALLDONTLIE standings row.
+ *
+ * This single object supplies everything splitsAggregator previously computed by
+ * pulling and tallying up to 100 finalized SGO events per call - plus several
+ * fields that were not obtainable that way at all (point_differential,
+ * division/conference record, playoff seed).
+ *
+ * Field availability varies by sport. NFL is confirmed to return the full set
+ * shown here. Treat every field as optional and report what is actually present
+ * rather than assuming, which is the same discipline applied elsewhere in this
+ * connector after being burned by assumed field shapes twice.
+ */
+export interface BDLStanding {
+  team: BDLTeam;
+  season?: number;
+  wins?: number;
+  losses?: number;
+  ties?: number;
+  overall_record?: string;
+  home_record?: string;
+  road_record?: string;
+  division_record?: string;
+  conference_record?: string;
+  win_streak?: number;
+  points_for?: number;
+  points_against?: number;
+  point_differential?: number;
+  playoff_seed?: number;
+}
+
+export interface BDLStandingsResponse {
+  data: BDLStanding[];
+  meta?: { next_cursor?: number | null; per_page?: number };
+}
+
 // ---- Our own normalized/output types (what tools actually return) ----
 
 export interface NormalizedGame {
@@ -155,6 +235,15 @@ export interface NormalizedGame {
   awayTeam: string;
   homeScore?: number;
   awayScore?: number;
+  /** e.g. "Week 1" - present on NFL/CFB events. */
+  seasonWeek?: string;
+  venue?: string;
+  /** CFB only: named rivalry, if this matchup is one. */
+  rivalry?: string;
+  /** CFB only: conference of either participant, if Power 4. */
+  conference?: string;
+  /** CFB only: which participants were in the supplied Top 25 list. */
+  rankedTeams?: string[];
 }
 
 export interface NormalizedOddsLine {
@@ -175,8 +264,10 @@ export interface NormalizedInjury {
   type?: string;
   detail?: string;
   side?: string;
-  summary: string; // short_comment if available, falls back to description
+  summary: string; // sport-dependent: comment / short_comment / description
   returnDate: string | null;
+  /** When this injury update was logged by the provider. */
+  updatedAt?: string;
 }
 
 export interface GameLogEntry {
@@ -185,6 +276,8 @@ export interface GameLogEntry {
   opponent: string;
   isHome: boolean;
   statValue: number | null; // null = player had no recorded value (did not play / DNP)
+  /** Which season this game belongs to (year the season started). */
+  seasonYear?: number;
 }
 
 export interface HitRateResult {
@@ -197,6 +290,12 @@ export interface HitRateResult {
   gamesHit: number;
   gamesExcludedDNP: number;
   log: GameLogEntry[];
+  // Season provenance - prevents prior-season games being written up as current form.
+  currentSeasonGames: number;
+  priorSeasonGames: number;
+  seasonsRepresented: number[];
+  crossesSeasonBoundary: boolean;
+  seasonWarning: string | null;
 }
 
 export interface TeamSplitRecord {

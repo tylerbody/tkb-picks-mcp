@@ -68,15 +68,19 @@ Error Handling:
             content: [
               {
                 type: "text" as const,
-                text: `Team "${team.name}" was found but has no standings data currently populated. Use tkb_get_team_split instead if you need a computed record.`,
+                text: `Team "${team.name ?? params.teamID}" was found but has no standings data currently populated. Use tkb_get_team_split instead if you need a computed record.`,
               },
             ],
           };
         }
 
         const s = team.standings;
+        // SGO's /teams response does not always populate `name`, which rendered as
+        // "undefined: 8-9" in output. Fall back to the teamID, which is always present
+        // and human-readable enough (e.g. "BALTIMORE_RAVENS_NFL").
+        const displayName = team.name ?? params.teamID.replace(/_/g, " ");
         const output = {
-          teamName: team.name,
+          teamName: displayName,
           wins: s.wins,
           losses: s.losses,
           ties: s.ties,
@@ -93,7 +97,7 @@ Error Handling:
           content: [
             {
               type: "text" as const,
-              text: `${team.name}: ${summary}${s.streak ? `, streak: ${s.streak}` : ""}\n\n${JSON.stringify(output, null, 2)}`,
+              text: `${displayName}: ${summary}${s.streak ? `, streak: ${s.streak}` : ""}\n\n${JSON.stringify(output, null, 2)}`,
             },
           ],
           structuredContent: output,

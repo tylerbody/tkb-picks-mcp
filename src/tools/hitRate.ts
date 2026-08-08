@@ -51,8 +51,16 @@ Args:
   - sport, teamID, playerID, playerName, statID, line, direction
   - lookbackGames (default 10): how many recent games to pull before DNP filtering
 
-Returns: gamesConsidered (true sample size), gamesHit, gamesExcludedDNP, and the
-full game-by-game log.
+Returns: gamesConsidered (true sample size), gamesHit, gamesExcludedDNP, the full
+game-by-game log, and SEASON PROVENANCE - how many counted games came from the
+current season vs a prior one, plus a warning when the sample crosses that boundary.
+
+WHY SEASON PROVENANCE MATTERS: the lookback window is a rolling date range, so early
+in a season it reaches back into the previous one. A hit rate built entirely on last
+season's games is NOT current form, and writing it up as though it were is misleading.
+When the warning fires, either report only current-season games or say "last season"
+explicitly in the reasoning bullet. This matters most in NFL Weeks 1-3 and for any
+player who changed teams, role, or scheme in the offseason.
 
 Examples:
   - Use when: "How often has Semien gone over 0.5 hits lately?" -> statID="batting_hits", line=0.5, direction="over"
@@ -61,7 +69,8 @@ Examples:
 
 Error Handling:
   - If gamesConsidered is 0, all recent games were DNP - flag this rather than reporting a hit rate
-  - Report gamesExcludedDNP explicitly so it's clear the sample size reflects only games actually played`,
+  - Report gamesExcludedDNP explicitly so it's clear the sample size reflects only games actually played
+  - If seasonWarning is non-null, do NOT present the number as current-season form`,
       inputSchema: HitRateInputSchema,
       annotations: {
         readOnlyHint: true,
@@ -87,11 +96,17 @@ Error Handling:
 
         const summary = `${result.playerName}: ${result.gamesHit} of ${result.gamesConsidered} (real sample, ${result.gamesExcludedDNP} game(s) excluded as DNP)`;
 
+        const seasonLine = result.seasonWarning
+          ? `\n\nSEASON WARNING: ${result.seasonWarning}`
+          : result.seasonsRepresented.length
+            ? `\n\nAll ${result.gamesConsidered} counted game(s) are from the ${result.seasonsRepresented[0]} season.`
+            : "";
+
         return {
           content: [
             {
               type: "text" as const,
-              text: `${summary}\n\n${JSON.stringify(result, null, 2)}`,
+              text: `${summary}${seasonLine}\n\n${JSON.stringify(result, null, 2)}`,
             },
           ],
           structuredContent: result,

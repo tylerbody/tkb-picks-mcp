@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID, PERIOD_CODES } from "../services/oddIdBuilder.js";
 import { SUPPORTED_PERIODS } from "../services/marketCatalog.js";
+import { extractPricedLine } from "../services/oddsPricing.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
 
 const PeriodOddsInputSchema = z
@@ -114,28 +115,33 @@ Error Handling:
         }
 
         const event = events[0];
-        const odd = event.odds?.[oddID];
+        const description = `${params.period} ${params.betType} (${params.side})`;
 
-        if (!odd) {
+        // GUARDRAIL: real book price required - see services/oddsPricing.ts.
+        const pricing = extractPricedLine(event.odds?.[oddID], {
+          requireLine: params.betType !== "moneyline",
+          marketDescription: description,
+        });
+
+        if (!pricing.priced) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: `No odds currently available for ${params.period} ${params.betType} (${params.side}) in this event. This market may not be offered for this game, or the period code mapping used here hasn't been verified against a live response yet - flag this if it keeps happening.`,
+                text: `NO USABLE ODDS - do not post this pick.\n\n${pricing.reason}\n\nIf this specific period keeps coming back empty across many games, the period-code mapping in services/oddIdBuilder.ts may be wrong for this sport - most codes there are inferred rather than confirmed.`,
               },
             ],
           };
         }
 
-        const firstBook = odd.byBookmaker ? Object.entries(odd.byBookmaker)[0] : undefined;
         const output = {
           period: params.period,
           betType: params.betType,
           side: params.side,
           eventID: event.eventID,
-          line: firstBook?.[1]?.spread ?? firstBook?.[1]?.overUnder,
-          americanOdds: odd.bookOdds ?? odd.fairOdds ?? firstBook?.[1]?.odds,
-          bookmaker: firstBook?.[0],
+          line: pricing.value!.line,
+          americanOdds: pricing.value!.americanOdds,
+          bookmaker: pricing.value!.bookmaker,
         };
 
         return {

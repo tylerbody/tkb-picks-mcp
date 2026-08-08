@@ -1,6 +1,7 @@
 import type { SGOClient } from "./sgoClient.js";
 import type { SportKey } from "../constants.js";
 import type { GameLogEntry, HitRateResult, SGOEvent } from "../types.js";
+import { seasonForDate, summarizeSeasons } from "./seasonBoundary.js";
 
 /**
  * Builds a real recent-game-log hit-rate check for a player against a stat line.
@@ -90,14 +91,18 @@ export async function getPlayerHitRate(
       (isHome ? event.teams.away.names?.long : event.teams.home.names?.long) ??
       opponentTeamID;
 
+    const gameDate = event.status?.startsAt ?? "unknown";
+    const season = gameDate !== "unknown" ? seasonForDate(params.sport, gameDate) : null;
+
     if (statValue === null) {
       gamesExcludedDNP++;
       log.push({
         eventID: event.eventID,
-        date: event.status?.startsAt ?? "unknown",
+        date: gameDate,
         opponent: opponentName,
         isHome,
         statValue: null,
+        ...(season ? { seasonYear: season.seasonYear } : {}),
       });
       continue;
     }
@@ -108,14 +113,23 @@ export async function getPlayerHitRate(
 
     log.push({
       eventID: event.eventID,
-      date: event.status?.startsAt ?? "unknown",
+      date: gameDate,
       opponent: opponentName,
       isHome,
       statValue,
+      ...(season ? { seasonYear: season.seasonYear } : {}),
     });
   }
 
   const gamesConsidered = log.filter((g) => g.statValue !== null).length;
+
+  // SEASON PROVENANCE: the rolling lookback window reaches into the previous
+  // season early in a new one. A live test on 8 Aug 2026 returned five Drake Maye
+  // games all dated Jan/Feb 2026 (the 2025 season) with nothing marking them as
+  // such. Reporting that as current form would be misleading, so the counts and a
+  // plain-language warning travel with the result.
+  const countedDates = log.filter((g) => g.statValue !== null).map((g) => g.date);
+  const seasons = summarizeSeasons(params.sport, countedDates);
 
   return {
     playerName: params.playerName,
@@ -126,6 +140,11 @@ export async function getPlayerHitRate(
     gamesHit,
     gamesExcludedDNP,
     log,
+    currentSeasonGames: seasons.current,
+    priorSeasonGames: seasons.prior,
+    seasonsRepresented: seasons.seasonsRepresented,
+    crossesSeasonBoundary: seasons.crossesSeasonBoundary,
+    seasonWarning: seasons.warning,
   };
 }
 

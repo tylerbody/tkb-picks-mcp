@@ -16,6 +16,10 @@ import { registerDebugEventTool } from "./tools/debugEvent.js";
 import { registerDebugInjuriesTool } from "./tools/debugInjuries.js";
 import { registerTeamRecordTool } from "./tools/teamRecord.js";
 import { registerWeatherTool } from "./tools/weather.js";
+import { registerPlayersTool } from "./tools/players.js";
+import { registerFuturesTool } from "./tools/futures.js";
+import { registerUsageTool } from "./tools/usage.js";
+import { registerGradePicksTool } from "./tools/gradePicks.js";
 
 // ---- Environment / config ----
 
@@ -43,20 +47,24 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
 function buildServer(): McpServer {
   const server = new McpServer({
     name: "tkb-picks-mcp-server",
-    version: "1.0.0",
+    version: "1.1.0",
   });
 
   registerScheduleTool(server, sgo);
   registerOddsTool(server, sgo);
   registerHitRateTool(server, sgo);
   registerInjuriesTool(server, bdl);
-  registerSplitsTool(server, sgo);
+  registerSplitsTool(server, sgo, bdl);
   registerYesNoPropsTool(server, sgo);
   registerPeriodOddsTool(server, sgo);
   registerDebugEventTool(server, sgo);
   registerDebugInjuriesTool(server, bdl);
   registerTeamRecordTool(server, sgo);
   registerWeatherTool(server, weather);
+  registerPlayersTool(server, sgo);
+  registerFuturesTool(server, sgo);
+  registerUsageTool(server, sgo);
+  registerGradePicksTool(server, sgo);
 
   return server;
 }
@@ -67,7 +75,7 @@ const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", server: "tkb-picks-mcp-server", version: "1.0.0" });
+  res.json({ status: "ok", server: "tkb-picks-mcp-server", version: "1.1.0" });
 });
 
 app.post("/mcp", async (req, res) => {

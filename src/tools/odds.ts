@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
+import { extractPricedLine } from "../services/oddsPricing.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
 import type { NormalizedOddsLine } from "../types.js";
 
@@ -81,7 +82,15 @@ Args:
   - preferredBookmakers: optional, comma-separated (e.g. "fanduel,draftkings") to narrow
     which book's price is returned, for consistency across calls
 
-Returns: the odds line(s) with American odds and bookmaker.
+Returns: the odds line(s) with American odds, the line number, and the bookmaker
+that priced it.
+
+PRICING GUARDRAIL: this tool only returns markets a REAL sportsbook has priced.
+If a market exists in the catalog but no book has posted a price yet, the tool
+refuses it and explains why, rather than returning SportsGameOdds' internal
+"fair odds" model estimate. Fair odds are not real odds and must never be posted.
+Player props in particular are usually not priced until close to game time, so an
+"unpriced" result weeks ahead of a game is expected and not a malfunction.
 
 Examples:
   - Use when: "What's Semien's hits prop?" -> marketType="player_prop", marketLabel="Hits", playerID=...
@@ -94,7 +103,9 @@ Examples:
 Error Handling:
   - Returns the full list of valid marketLabel options for this sport if the label doesn't match
   - Returns a clear message if neither eventID nor teamName is given
-  - Returns a clear message if player_prop is requested without playerID`,
+  - Returns a clear message if player_prop is requested without playerID
+  - Returns "NO USABLE ODDS" with an explanation when the market exists but no
+    sportsbook has priced it, or when a price came back with no line attached`,
       inputSchema: OddsInputSchema,
       annotations: {
         readOnlyHint: true,
@@ -209,6 +220,11 @@ Error Handling:
 
         const event = matched[0];
         const lines: NormalizedOddsLine[] = [];
+        const unpricedReasons: string[] = [];
+
+        // Moneyline has no line by nature. Spreads, totals and player props are
+        // meaningless without one, so those require it.
+        const requireLine = params.marketType !== "moneyline";
 
         for (const side of sidesToFetch) {
           const entity =
@@ -224,29 +240,43 @@ Error Handling:
             betType: betTypeCode,
             side,
           });
-          const odd = event.odds?.[oddID];
-          if (!odd) continue;
 
-          const firstBook = odd.byBookmaker ? Object.entries(odd.byBookmaker)[0] : undefined;
+          const description =
+            params.marketType === "player_prop"
+              ? `${params.playerName ?? params.playerID} ${side.toUpperCase()} ${params.marketLabel}`
+              : `${params.marketType} (${side})`;
+
+          // GUARDRAIL: only accept genuinely book-priced markets. See
+          // services/oddsPricing.ts for why fair-odds fallback is banned.
+          const pricing = extractPricedLine(event.odds?.[oddID], {
+            requireLine,
+            marketDescription: description,
+          });
+
+          if (!pricing.priced) {
+            if (pricing.reason) unpricedReasons.push(pricing.reason);
+            continue;
+          }
+
           lines.push({
             oddID,
             statID,
-            description:
-              params.marketType === "player_prop"
-                ? `${params.playerName ?? params.playerID} ${side.toUpperCase()} ${params.marketLabel}`
-                : `${params.marketType} (${side})`,
-            line: firstBook?.[1]?.spread ?? firstBook?.[1]?.overUnder,
-            americanOdds: odd.bookOdds ?? odd.fairOdds ?? firstBook?.[1]?.odds,
-            bookmaker: firstBook?.[0],
+            description,
+            line: pricing.value!.line,
+            americanOdds: pricing.value!.americanOdds,
+            bookmaker: pricing.value!.bookmaker,
           });
         }
 
         if (!lines.length) {
+          const detail = unpricedReasons.length
+            ? unpricedReasons.join("\n\n")
+            : `No market found for this selection on this event. For player props, confirm the playerID is correct and that the player is on this event's roster (use tkb_get_players).`;
           return {
             content: [
               {
                 type: "text" as const,
-                text: `No odds currently available for this market on this event. The market may not be offered for this game right now, or (for player props) confirm the playerID is correct and the player is part of this event's roster.`,
+                text: `NO USABLE ODDS - do not post this pick.\n\n${detail}`,
               },
             ],
           };
@@ -258,6 +288,7 @@ Error Handling:
           awayTeam: event.teams.away.names?.long ?? event.teams.away.teamID,
           lineCount: lines.length,
           lines,
+          ...(unpricedReasons.length ? { unpricedSides: unpricedReasons } : {}),
         };
 
         return {

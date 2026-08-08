@@ -1,6 +1,6 @@
 import axios, { type AxiosInstance, AxiosError } from "axios";
 import { SGO_BASE_URL, SPORT_CONFIG, type SportKey } from "../constants.js";
-import type { SGOEventsResponse, SGOTeam } from "../types.js";
+import type { SGOEventsResponse, SGOTeam, SGOPlayer } from "../types.js";
 
 /**
  * SportsGameOdds API client.
@@ -48,7 +48,17 @@ export class SGOClient {
     playerID?: string;
     oddIDs?: string;
     bookmakerID?: string;
-    includeOpposingOdds?: boolean;
+    // CORRECTED (8 Aug 2026): this param was previously declared as
+    // `includeOpposingOdds`, which is not a real SGO parameter - it was being
+    // silently ignored on every request. SGO's own optimization guide names it
+    // `includeOpposingOddIDs`. With it set true, passing a single oddID also
+    // returns the opposite side, which halves the request count for any
+    // two-sided market (every prop, spread, total, and moneyline we fetch).
+    includeOpposingOddIDs?: boolean;
+    // Include alternate spread / over-under lines. Off by default because it
+    // materially increases response size, which is the OOM risk this connector
+    // has already been bitten by once.
+    includeAltLines?: boolean;
     startsAfter?: string;
     startsBefore?: string;
     oddsAvailable?: boolean;
@@ -105,6 +115,72 @@ export class SGOClient {
    * team record; event-tallying is still needed for home/road or opponent-specific
    * splits since standings doesn't break those out separately.
    */
+  /**
+   * Fetch players directly from SGO's /players endpoint.
+   *
+   * WHY THIS EXISTS: before this, the only way to discover a playerID was
+   * tkb_debug_raw_event, which pulls the entire event object including its odds
+   * map (1,180 markets on a live MLB game). That is exactly the fetch-everything
+   * pattern that caused the earlier out-of-memory crashes on Render. This
+   * endpoint returns player records only - no odds - so it is both correct and
+   * dramatically cheaper.
+   *
+   * Max limit is 250 for /players (vs 25-100 for /events), per SGO's pagination guide.
+   */
+  async getPlayers(params: {
+    playerID?: string;
+    teamID?: string;
+    leagueID?: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ data: SGOPlayer[]; nextCursor?: string | null }> {
+    try {
+      const response = await this.http.get<{ data: SGOPlayer[]; nextCursor?: string | null }>(
+        "/players",
+        { params: { ...params, limit: params.limit ?? 250 } }
+      );
+      return response.data;
+    } catch (err) {
+      throw formatSGOError(err, "players");
+    }
+  }
+
+  /** Fetch all players for a team/league, auto-paginating. */
+  async getAllPlayers(
+    params: Parameters<SGOClient["getPlayers"]>[0],
+    maxPages = 5
+  ): Promise<SGOPlayer[]> {
+    const all: SGOPlayer[] = [];
+    let cursor: string | undefined = undefined;
+    let pages = 0;
+    do {
+      const page = await this.getPlayers({ ...params, cursor });
+      all.push(...page.data);
+      cursor = page.nextCursor ?? undefined;
+      pages++;
+    } while (cursor && pages < maxPages);
+    return all;
+  }
+
+  /**
+   * Fetch current API quota and rate-limit usage.
+   *
+   * WHY THIS MATTERS FOR THIS ACCOUNT SPECIFICALLY: SGO bills per EVENT OBJECT
+   * returned, not per market. A single hit-rate check pulls up to `lookback * 3`
+   * events and can auto-paginate, so one prop check can consume 30-90+ objects.
+   * At 15-20 threads/day with 2 props each, plus splits, monthly consumption can
+   * plausibly approach or exceed the Rookie plan's 100,000 object allowance -
+   * and until now there was no way to see that from inside the workflow.
+   */
+  async getUsage(): Promise<unknown> {
+    try {
+      const response = await this.http.get("/account/usage");
+      return response.data;
+    } catch (err) {
+      throw formatSGOError(err, "account usage");
+    }
+  }
+
   async getTeam(teamID: string): Promise<SGOTeam | null> {
     try {
       const response = await this.http.get<{ data: SGOTeam[] }>("/teams", {

@@ -1,6 +1,11 @@
 import axios, { type AxiosInstance, AxiosError } from "axios";
 import { BDL_BASE_URL, SPORT_CONFIG, type SportKey } from "../constants.js";
-import type { BDLInjuriesResponse, BDLGamesResponse } from "../types.js";
+import type {
+  BDLInjuriesResponse,
+  BDLGamesResponse,
+  BDLStandingsResponse,
+  BDLTeam,
+} from "../types.js";
 
 /**
  * BALLDONTLIE API client - used ONLY for injuries in this build (per current scope;
@@ -46,12 +51,55 @@ export class BDLClient {
             "team_ids[]": params.team_ids,
             "player_ids[]": params.player_ids,
             cursor: params.cursor,
+            // BDL defaults per_page to 25 and caps it at 100. Leaving it at the
+            // default meant a full NFL injury sweep (162 records on a live test)
+            // took 7 paginated requests instead of 2. At the ALL-STAR rate limit
+            // of 60 req/min that waste is worth eliminating.
+            per_page: 100,
           },
         }
       );
       return response.data;
     } catch (err) {
       throw formatBDLError(err, `${sport} injuries`, sport);
+    }
+  }
+
+  /**
+   * Fetch season standings for a sport.
+   *
+   * WHY THIS REPLACES EVENT-TALLYING: splitsAggregator computes home/road records
+   * by pulling up to 100 finalized SGO events and counting wins by hand. That is
+   * both slow and expensive, since SGO bills per event object returned. BDL's
+   * standings endpoint returns home_record, road_record, point_differential,
+   * win_streak, division_record and conference_record in ONE call, at no SGO cost.
+   *
+   * It also supplies point_differential directly, which matters: analysis of 26
+   * seasons of play-by-play found that after roughly six games, point differential
+   * is as predictive of future performance as any advanced metric. That makes it
+   * strong, defensible material for a moneyline reasoning bullet.
+   *
+   * Requires ALL-STAR tier or above (same tier as injuries, already subscribed).
+   */
+  async getStandings(sport: SportKey, season: number): Promise<BDLStandingsResponse> {
+    try {
+      const response = await this.http.get<BDLStandingsResponse>(
+        this.buildPath(sport, "standings"),
+        { params: { season } }
+      );
+      return response.data;
+    } catch (err) {
+      throw formatBDLError(err, `${sport} standings`, sport);
+    }
+  }
+
+  /** Fetch all teams for a sport - used to resolve BDL numeric team IDs from names. */
+  async getTeams(sport: SportKey): Promise<{ data: BDLTeam[] }> {
+    try {
+      const response = await this.http.get<{ data: BDLTeam[] }>(this.buildPath(sport, "teams"));
+      return response.data;
+    } catch (err) {
+      throw formatBDLError(err, `${sport} teams`, sport);
     }
   }
 
