@@ -4,6 +4,7 @@ import type { SGOClient } from "../services/sgoClient.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { getHomeRoadSplit, getOpponentSplit } from "../services/splitsAggregator.js";
 import { currentSeason } from "../services/seasonBoundary.js";
+import { normalizeStanding, findStandingForTeam } from "../services/standingsNormalizer.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
 
 /**
@@ -66,11 +67,6 @@ const SplitsInputSchema = z
   .strict();
 
 type SplitsInput = z.infer<typeof SplitsInputSchema>;
-
-/** Normalize a team name for fuzzy matching between SGO and BDL naming. */
-function normalize(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
 
 export function registerSplitsTool(server: McpServer, sgo: SGOClient, bdl: BDLClient) {
   server.registerTool(
@@ -150,64 +146,63 @@ Error Handling:
           try {
             const season = currentSeason(params.sport).seasonYear;
             const standings = await bdl.getStandings(params.sport, season);
-            const needle = normalize(params.teamName);
+            const row = findStandingForTeam(standings.data, params.teamName);
 
-            const row = standings.data.find((s) => {
-              const t = s.team;
-              return [t?.full_name, t?.display_name, t?.name, t?.location]
-                .filter(Boolean)
-                .some((n) => {
-                  const norm = normalize(String(n));
-                  return norm === needle || norm.includes(needle) || needle.includes(norm);
-                });
-            });
+            if (row) {
+              const n = normalizeStanding(row);
+              const recordString =
+                params.splitType === "home" ? n.homeRecord : n.roadRecord;
+              const wins = params.splitType === "home" ? n.homeWins : n.roadWins;
+              const losses = params.splitType === "home" ? n.homeLosses : n.roadLosses;
 
-            const recordString =
-              params.splitType === "home" ? row?.home_record : row?.road_record;
+              if (recordString && wins !== null && losses !== null) {
+                const output = {
+                  teamName: params.teamName,
+                  wins,
+                  losses,
+                  context: params.splitType,
+                  record: recordString,
+                  source: "balldontlie_standings",
+                  season,
+                  // Extras the SGO tallying path cannot produce at all
+                  overallRecord: n.overallRecord,
+                  pointDifferential: n.pointDifferential,
+                  pointsFor: n.pointsFor,
+                  pointsAgainst: n.pointsAgainst,
+                  avgPointsFor: n.avgPointsFor,
+                  avgPointsAgainst: n.avgPointsAgainst,
+                  streak: n.streak,
+                  lastTen: n.lastTen,
+                  divisionRecord: n.divisionRecord,
+                  conferenceRecord: n.conferenceRecord,
+                  playoffSeed: n.playoffSeed,
+                  gamesPlayed: n.gamesPlayed,
+                };
 
-            if (row && recordString) {
-              // Records come as "3-0" or "5-2-1" strings
-              const parts = recordString.split("-").map((n) => parseInt(n, 10));
-              const wins = Number.isFinite(parts[0]) ? parts[0] : 0;
-              const losses = Number.isFinite(parts[1]) ? parts[1] : 0;
+                const bits: string[] = [];
+                if (typeof n.pointDifferential === "number") {
+                  bits.push(
+                    `Run/point differential ${n.pointDifferential > 0 ? "+" : ""}${n.pointDifferential}.`
+                  );
+                }
+                if (n.lastTen) bits.push(`Last 10: ${n.lastTen}.`);
+                const extras = bits.length ? " " + bits.join(" ") : "";
 
-              const output = {
-                teamName: params.teamName,
-                wins,
-                losses,
-                context: params.splitType,
-                record: recordString,
-                source: "balldontlie_standings",
-                season,
-                // Extras that the SGO tallying path cannot produce at all
-                overallRecord: row.overall_record,
-                pointDifferential: row.point_differential,
-                pointsFor: row.points_for,
-                pointsAgainst: row.points_against,
-                winStreak: row.win_streak,
-                divisionRecord: row.division_record,
-                conferenceRecord: row.conference_record,
-              };
-
-              const diffNote =
-                typeof row.point_differential === "number"
-                  ? ` Point differential: ${row.point_differential > 0 ? "+" : ""}${row.point_differential}.`
-                  : "";
-
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: `${params.teamName} is ${recordString} ${params.splitType} this season.${diffNote}\n\n${JSON.stringify(output, null, 2)}`,
-                  },
-                ],
-                structuredContent: output,
-              };
+                return {
+                  content: [
+                    {
+                      type: "text" as const,
+                      text: `${params.teamName} is ${recordString} ${params.splitType} this season.${extras}\n\n${JSON.stringify(output, null, 2)}`,
+                    },
+                  ],
+                  structuredContent: output,
+                };
+              }
             }
           } catch {
             // Standings unavailable for this sport/season/tier - fall through to SGO.
-            // Deliberately swallowed: the fallback below produces a correct answer,
-            // so a standings outage should degrade cost and detail, not correctness.
+            // Deliberately swallowed: the fallback below still produces a correct
+            // answer, so a standings outage degrades cost and detail, not correctness.
           }
         }
 

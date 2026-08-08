@@ -207,16 +207,75 @@ export interface BDLStanding {
   wins?: number;
   losses?: number;
   ties?: number;
+
+  // ---- NFL-style field names ----
   overall_record?: string;
   home_record?: string;
   road_record?: string;
   division_record?: string;
   conference_record?: string;
   win_streak?: number;
+
+  // ---- MLB-style field names (CONFIRMED DIFFERENT, 8 Aug 2026) ----
+  // MLB and NFL do NOT share a standings schema. MLB returns "home": "44-37"
+  // where NFL returns "home_record": "3-0". Reading only the NFL names is why
+  // the MLB standings lookup silently failed and fell back to the expensive
+  // SGO event-tallying path. Both shapes are declared here and resolved at
+  // read time rather than assuming either one.
+  total?: string;
+  home?: string;
+  road?: string;
+  intra_division?: string;
+  intra_league?: string;
+  streak?: number;
+  last_ten_games?: string;
+  // MLB also exposes these as real numbers, which avoids string parsing entirely.
+  home_wins?: number;
+  home_losses?: number;
+  home_ties?: number;
+  road_wins?: number;
+  road_losses?: number;
+  road_ties?: number;
+  // Runs/points per game - useful for totals reasoning.
+  avg_points_for?: number;
+  avg_points_against?: number;
+  games_behind?: number;
+  win_percent?: number;
+
+  // ---- Shared ----
   points_for?: number;
   points_against?: number;
   point_differential?: number;
   playoff_seed?: number;
+  games_played?: number;
+}
+
+/**
+ * Normalized standings view, resolved across the differing per-sport field names.
+ * Tools should read THIS rather than touching BDLStanding fields directly.
+ */
+export interface NormalizedStanding {
+  [key: string]: unknown;
+  teamName: string;
+  overallRecord: string | null;
+  homeRecord: string | null;
+  roadRecord: string | null;
+  homeWins: number | null;
+  homeLosses: number | null;
+  roadWins: number | null;
+  roadLosses: number | null;
+  divisionRecord: string | null;
+  conferenceRecord: string | null;
+  lastTen: string | null;
+  streak: number | null;
+  pointsFor: number | null;
+  pointsAgainst: number | null;
+  pointDifferential: number | null;
+  avgPointsFor: number | null;
+  avgPointsAgainst: number | null;
+  playoffSeed: number | null;
+  gamesPlayed: number | null;
+  season: number | null;
 }
 
 export interface BDLStandingsResponse {

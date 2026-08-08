@@ -1,6 +1,6 @@
 {
   "name": "tkb-picks-mcp-server",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "MCP server wrapping SportsGameOdds and BALLDONTLIE for TKB Picks thread building",
   "type": "module",
   "main": "dist/index.js",

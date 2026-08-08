@@ -1,4 +1,4 @@
-# TKB Picks MCP Server (v1.1.0)
+# TKB Picks MCP Server (v1.1.1)
 
 MCP server wrapping **SportsGameOdds** (odds, schedules, props, results) and
 **BALLDONTLIE** (injuries, standings) for building TKB Picks betting threads
@@ -66,6 +66,25 @@ Render Web Service, Node environment:
 - CFB tiering filters out the Division II teams SGO's NCAAF feed returns, plus a
   named-rivalry list.
 - Futures and pick grading.
+
+## Fixed in v1.1.1 (both found by live testing v1.1.0)
+
+**Bookmaker attribution in the pricing guardrail.** SGO's `byBookmaker` map contains
+a literal key named `unknown`. The guardrail treated it as a real sportsbook, so the
+NFL Week 1 Drake Maye prop still returned `-137` on both sides sourced to "unknown".
+It also accepted SGO's cross-book consensus `bookOdds` when no named book had priced
+anything. A price is now only usable if it is traceable to a **named** sportsbook.
+`unknown`, `consensus`, `average`, and `fair` are all rejected.
+
+**MLB standings field names.** BALLDONTLIE does not share a standings schema across
+sports. MLB returns `home` / `road` / `total` / `intra_division` / `streak` where NFL
+returns `home_record` / `road_record` / `overall_record` / `division_record` /
+`win_streak`. Only the NFL names were read, so every MLB standings lookup missed and
+fell back to tallying up to 100 billed SGO event objects. A new
+`src/services/standingsNormalizer.ts` resolves every known alias, prefers MLB's
+numeric `home_wins` / `home_losses` over string parsing, and adds runs per game and
+last-ten to the output. Team matching is exact-first so "Chicago White Sox" cannot
+match "Chicago Cubs" on shared location.
 
 ## Known gaps
 

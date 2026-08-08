@@ -43,11 +43,34 @@ export interface PricingResult {
 }
 
 /** True only if at least one bookmaker has an available price on this market. */
+/**
+ * Bookmaker keys that are NOT real, citable sportsbooks.
+ *
+ * FOUND VIA LIVE TEST (8 Aug 2026): SGO's byBookmaker map contains a literal key
+ * named "unknown". On the NFL Week 1 Drake Maye passing-yards market it carried
+ * odds of -137 with no attributable source, and the guardrail accepted it as a
+ * real book - defeating the entire purpose of the guardrail. The MLB control
+ * (Ohtani hits) returned named books, "fanduel" at +150 over and "draftkings" at
+ * -236 under, which is what a genuinely priced two-sided market looks like.
+ *
+ * WHY THIS MATTERS BEYOND TIDINESS: a price you cannot attribute to a named book
+ * is a price you cannot verify, cannot line-shop against, and cannot defend if a
+ * follower asks where it came from. Publishing it is the same failure as
+ * publishing fair odds, just one step less obvious.
+ */
+const NON_BOOKMAKER_KEYS = new Set(["unknown", "", "consensus", "average", "fair"]);
+
+function isRealBookmaker(key: string): boolean {
+  return !NON_BOOKMAKER_KEYS.has(key.trim().toLowerCase());
+}
+
 function firstAvailableBook(
   odd: SGOOdd
 ): [string, { odds: string; spread?: string; overUnder?: string }] | undefined {
   if (!odd.byBookmaker) return undefined;
-  const entries = Object.entries(odd.byBookmaker);
+  // Only consider entries that name a REAL sportsbook. An unattributable price
+  // is treated as no price at all.
+  const entries = Object.entries(odd.byBookmaker).filter(([key]) => isRealBookmaker(key));
   // Prefer a book explicitly marked available; some entries are stale and flagged false.
   const available = entries.find(([, b]) => b.available !== false && b.odds);
   return (available ?? entries.find(([, b]) => b.odds)) as
@@ -81,9 +104,15 @@ export function extractPricedLine(
   }
 
   const book = firstAvailableBook(odd);
-  const hasBookOdds = Boolean(odd.bookOdds) && odd.bookOddsAvailable !== false;
 
-  if (!book && !hasBookOdds) {
+  // DELIBERATE: `odd.bookOdds` alone is NOT sufficient. It is SGO's cross-book
+  // consensus figure, and on an unpriced market it can be present while no single
+  // named book has actually posted anything - which is exactly how the Drake Maye
+  // "-137 on both sides, no bookmaker" result slipped through. A usable price must
+  // be traceable to a named sportsbook.
+  const hasBookOdds = Boolean(book) && Boolean(odd.bookOdds) && odd.bookOddsAvailable !== false;
+
+  if (!book) {
     const fairOnly = Boolean(odd.fairOdds);
     return {
       priced: false,
