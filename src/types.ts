@@ -349,6 +349,18 @@ export interface HitRateResult {
   gamesHit: number;
   gamesExcludedDNP: number;
   log: GameLogEntry[];
+  // Both directions computed from the same appearance set, so an UNDER can be
+  // evaluated without a second call or manual inversion.
+  overHits: number;
+  underHits: number;
+  pushCount: number; // whole-number lines only; previously miscounted as misses
+  // How far back we actually had to scan to collect the appearances.
+  teamGamesScanned: number;
+  hitScanCeiling: boolean;
+  // Sample adequacy. A rate computed on 1-2 appearances is not evidence.
+  sampleSufficient: boolean;
+  sampleWarning: string | null;
+  playerRole: "starting_pitcher" | "position_player";
   // Season provenance - prevents prior-season games being written up as current form.
   currentSeasonGames: number;
   priorSeasonGames: number;
