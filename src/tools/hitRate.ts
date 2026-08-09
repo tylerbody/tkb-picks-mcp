@@ -25,10 +25,19 @@ const HitRateInputSchema = z
       .number()
       .int()
       .min(1)
-      .max(30)
-      .default(10)
+      .max(40)
+      .optional()
       .describe(
-        "How many recent games to pull before filtering out DNPs (default 10). The final reported sample size will be at or below this after DNP exclusion."
+        "How many games the PLAYER ACTUALLY APPEARED IN to collect (not team games). The server scans backward through team games until it has this many real appearances. Defaults by role: 10 for starting pitchers, 15 for batters, 12 for skaters. For a starting pitcher this may scan ~5x this many team games."
+      ),
+    maxTeamGamesScanned: z
+      .number()
+      .int()
+      .min(10)
+      .max(200)
+      .optional()
+      .describe(
+        "Safety ceiling on how many team games to scan before giving up. Prevents a season-ending injury from triggering a full-history crawl. Defaults by role: 140 for starting pitchers, 30 for batters."
       ),
   })
   .strict();
@@ -83,18 +92,33 @@ Error Handling:
       try {
         const result = await getPlayerHitRate(sgo, params);
 
-        if (result.gamesConsidered === 0) {
+        if (!result.sampleSufficient) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: `${params.playerName} has no recorded games with a value for this stat in the last ${params.lookbackGames} team games pulled (all excluded as DNP/inactive). Cannot report a hit rate - do not use this player for this prop without further investigation.`,
+                text:
+                  `${result.sampleWarning}\n\n` +
+                  `${params.playerName} | ${params.statID} ${params.direction} ${params.line}\n` +
+                  `Appearances found: ${result.gamesConsidered} across ${result.teamGamesScanned} team games scanned.\n\n` +
+                  JSON.stringify(result, null, 2),
               },
             ],
+            structuredContent: result,
           };
         }
 
-        const summary = `${result.playerName}: ${result.gamesHit} of ${result.gamesConsidered} (real sample, ${result.gamesExcludedDNP} game(s) excluded as DNP)`;
+        const chosenHits = result.gamesHit;
+        const otherHits =
+          params.direction === "over" ? result.underHits : result.overHits;
+        const otherLabel = params.direction === "over" ? "under" : "over";
+
+        const summary =
+          `${result.playerName}: ${chosenHits} of ${result.gamesConsidered} ` +
+          `(real sample, ${result.gamesExcludedDNP} game(s) excluded as DNP, ` +
+          `${result.teamGamesScanned} team games scanned)\n` +
+          `Other side for reference: ${otherLabel} hit ${otherHits} of ${result.gamesConsidered}` +
+          (result.pushCount > 0 ? ` | ${result.pushCount} push(es) on this whole-number line` : "");
 
         const seasonLine = result.seasonWarning
           ? `\n\nSEASON WARNING: ${result.seasonWarning}`
