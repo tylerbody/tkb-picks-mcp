@@ -361,6 +361,14 @@ export interface HitRateResult {
   sampleSufficient: boolean;
   sampleWarning: string | null;
   playerRole: "starting_pitcher" | "position_player";
+  // Playing-time signal. Surfaces DNP patterns that a raw hit rate hides.
+  recentAvailability: {
+    gamesPlayed: number;
+    teamGamesScanned: number;
+    playRate: number;
+    flag: "OK" | "IRREGULAR" | "ROTATION_NORMAL";
+    note: string | null;
+  };
   // Season provenance - prevents prior-season games being written up as current form.
   currentSeasonGames: number;
   priorSeasonGames: number;

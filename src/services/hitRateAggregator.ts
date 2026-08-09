@@ -191,6 +191,7 @@ export async function getPlayerHitRate(
     sampleSufficient: sufficient,
     sampleWarning: warning,
     playerRole: role,
+    recentAvailability: assessAvailability(appearances, teamGamesScanned, gamesExcludedDNP, role),
     currentSeasonGames: seasons.current,
     priorSeasonGames: seasons.prior,
     seasonsRepresented: seasons.seasonsRepresented,
@@ -266,4 +267,66 @@ function extractPlayerStat(
 
   const value = playerResults[statID];
   return typeof value === "number" ? value : null;
+}
+
+/**
+ * PLAYING-TIME FLAG
+ *
+ * A hit rate says nothing about whether the player will actually be in there. On
+ * 2026-08-09 two props were nearly written up before the DNP pattern surfaced:
+ * Bobby Witt Jr. had sat 7 of Kansas City's last 12 games, and Jose Ramirez showed
+ * 11 DNPs in 15 Cleveland games (a player just back from something). Both facts
+ * were visible only by manually reading the log array, one row at a time.
+ *
+ * This turns that into a one-line read. IRREGULAR is the signal to confirm the
+ * posted lineup before locking the pick, not necessarily to discard it.
+ *
+ * Starting pitchers are exempt from the ratio test - a starter appearing in 20% of
+ * team games is a healthy starter on normal rest, not a red flag.
+ */
+function assessAvailability(
+  appearances: number,
+  teamGamesScanned: number,
+  dnpCount: number,
+  role: PlayerRole
+): {
+  gamesPlayed: number;
+  teamGamesScanned: number;
+  playRate: number;
+  flag: "OK" | "IRREGULAR" | "ROTATION_NORMAL";
+  note: string | null;
+} {
+  const playRate = teamGamesScanned > 0 ? appearances / teamGamesScanned : 0;
+
+  if (role === "starting_pitcher") {
+    return {
+      gamesPlayed: appearances,
+      teamGamesScanned,
+      playRate,
+      flag: "ROTATION_NORMAL",
+      note: null,
+    };
+  }
+
+  if (playRate < 0.7) {
+    return {
+      gamesPlayed: appearances,
+      teamGamesScanned,
+      playRate,
+      flag: "IRREGULAR",
+      note:
+        `PLAYING TIME RISK: appeared in only ${appearances} of the last ` +
+        `${teamGamesScanned} team games (${dnpCount} DNPs). This player is not an ` +
+        `everyday lock. CONFIRM THE POSTED LINEUP before using this prop, and do ` +
+        `not describe the hit rate as current form without noting the missed time.`,
+    };
+  }
+
+  return {
+    gamesPlayed: appearances,
+    teamGamesScanned,
+    playRate,
+    flag: "OK",
+    note: null,
+  };
 }

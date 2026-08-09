@@ -147,3 +147,52 @@ export function extractPricedLine(
     value: { americanOdds, line, bookmaker: book?.[0] },
   };
 }
+
+/**
+ * ODDS ROUNDING - TKB house style.
+ *
+ * Round to the nearest 10 using standard rounding, where the 5 rounds AWAY from
+ * zero: -136 becomes -140, -134 becomes -130, +106 becomes +110, +104 becomes +100.
+ *
+ * WHY THIS LIVES IN THE SERVER: this was applied by hand on every single pick for
+ * months. On 2026-08-09 a Melton outs prop was nearly published at -145 when the
+ * real under price was -110, because the number was carried across from a
+ * different query and re-rounded from memory. Arithmetic repeated dozens of times
+ * a morning is arithmetic that eventually goes wrong. Every tool that returns a
+ * price now returns the rounded form alongside it, so the published number is
+ * never computed by hand.
+ */
+export function roundToNearestTen(american: string | number): string {
+  const n = typeof american === "number" ? american : parseInt(american, 10);
+  if (Number.isNaN(n)) return String(american);
+  const sign = n < 0 ? -1 : 1;
+  const abs = Math.abs(n);
+  // Math.round pushes .5 up, which for an absolute value is "away from zero".
+  const rounded = Math.round(abs / 10) * 10;
+  return (sign < 0 ? "-" : "+") + String(rounded);
+}
+
+/**
+ * Break-even win probability implied by an American price, as a 0-1 decimal.
+ * -150 returns 0.60, meaning the bet must win 60% of the time to break even.
+ */
+export function impliedProbability(american: string | number): number {
+  const n = typeof american === "number" ? american : parseInt(american, 10);
+  if (Number.isNaN(n) || n === 0) return 0;
+  return n < 0 ? -n / (-n + 100) : 100 / (n + 100);
+}
+
+/**
+ * Edge = counted hit rate minus break-even. Positive means the number is better
+ * than the price implies.
+ *
+ * WHY THIS IS RETURNED RATHER THAN LEFT TO THE CALLER: a raw hit rate is
+ * misleading on its own. On 2026-08-09 a Hoerner singles prop showed 7 of 11,
+ * which reads like a play, at a price of -186. Break-even there is 65.0% and his
+ * rate was 63.6% - a negative-edge bet that looks positive. Ranking or writing
+ * from hit rate alone systematically surfaces exactly these. Returning edge makes
+ * the comparison impossible to skip.
+ */
+export function computeEdge(hitRate: number, american: string | number): number {
+  return hitRate - impliedProbability(american);
+}

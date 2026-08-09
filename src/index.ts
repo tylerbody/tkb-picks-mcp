@@ -20,6 +20,9 @@ import { registerPlayersTool } from "./tools/players.js";
 import { registerFuturesTool } from "./tools/futures.js";
 import { registerUsageTool } from "./tools/usage.js";
 import { registerGradePicksTool } from "./tools/gradePicks.js";
+import { registerScreenPropsTool } from "./tools/screenProps.js";
+import { registerCoverPlayerTool } from "./tools/coverPlayer.js";
+import { registerTweetCharsTool } from "./tools/tweetChars.js";
 
 // ---- Environment / config ----
 
@@ -65,6 +68,9 @@ function buildServer(): McpServer {
   registerFuturesTool(server, sgo);
   registerUsageTool(server, sgo);
   registerGradePicksTool(server, sgo);
+  registerScreenPropsTool(server, sgo);
+  registerCoverPlayerTool(server, sgo, bdl);
+  registerTweetCharsTool(server);
 
   return server;
 }
