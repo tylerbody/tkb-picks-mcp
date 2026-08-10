@@ -272,9 +272,37 @@ export class BDLClient {
     }
   }
 
+  /**
+   * Fetch games, used to resolve dates for stat rows.
+   *
+   * WHY THIS IS LOAD-BEARING RATHER THAN INCIDENTAL: BDL's MLB stats rows carry
+   * a bare `game_id` and NOTHING else identifying the game - no date, no
+   * opponent, no home/away. Confirmed via live probe 2026-08-10.
+   *
+   * Without dates a hit rate cannot be computed correctly at all:
+   *   - Rows cannot be sorted, so "last 15 games" becomes "15 arbitrary games"
+   *   - Season provenance cannot be assessed, so prior-season games mix into a
+   *     sample presented as current form, and the warning built to catch exactly
+   *     that stays silent because it keys off dates
+   *
+   * A live cross-check caught this: BDL returned 10 of 15 where SGO returned 11
+   * of 15 for the same player and line, because the two were grading different
+   * sets of games. The BDL game_ids spanned roughly 7,000 to 44,000, almost
+   * certainly across multiple seasons.
+   *
+   * So stat rows get joined against this endpoint to recover their dates.
+   */
   async getGames(
     sport: SportKey,
-    params: { dates?: string[]; team_ids?: number[]; cursor?: number } = {}
+    params: {
+      dates?: string[];
+      teamIDs?: number[];
+      seasons?: number[];
+      startDate?: string; // YYYY-MM-DD
+      endDate?: string;
+      cursor?: number;
+      perPage?: number;
+    } = {}
   ): Promise<BDLGamesResponse> {
     try {
       const response = await this.http.get<BDLGamesResponse>(
@@ -282,8 +310,12 @@ export class BDLClient {
         {
           params: {
             "dates[]": params.dates,
-            "team_ids[]": params.team_ids,
+            "team_ids[]": params.teamIDs,
+            "seasons[]": params.seasons,
+            start_date: params.startDate,
+            end_date: params.endDate,
             cursor: params.cursor,
+            per_page: params.perPage ?? 100,
           },
         }
       );

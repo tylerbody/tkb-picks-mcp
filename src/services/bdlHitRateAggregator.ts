@@ -1,7 +1,7 @@
 import type { BDLClient } from "./bdlClient.js";
 import type { SportKey } from "../constants.js";
 import type { GameLogEntry, HitRateResult } from "../types.js";
-import { seasonForDate, summarizeSeasons } from "./seasonBoundary.js";
+import { seasonForDate, summarizeSeasons, currentSeason } from "./seasonBoundary.js";
 import { resolveStat, isStatSupported } from "./bdlStatMap.js";
 
 /**
@@ -73,7 +73,7 @@ export async function resolveBdlPlayerID(
   sport: SportKey,
   playerName: string,
   teamNameHint?: string
-): Promise<{ id: number; matchedName: string; note: string | null }> {
+): Promise<{ id: number; matchedName: string; note: string | null; teamID?: number }> {
   const results = await bdl.searchPlayers(sport, playerName);
 
   if (!results.data.length) {
@@ -88,6 +88,7 @@ export async function resolveBdlPlayerID(
       id: p.id,
       matchedName: `${p.first_name} ${p.last_name}`,
       note: null,
+      teamID: p.team?.id,
     };
   }
 
@@ -109,6 +110,7 @@ export async function resolveBdlPlayerID(
         id: p.id,
         matchedName: `${p.first_name} ${p.last_name}`,
         note: `Disambiguated ${results.data.length} name matches by team.`,
+        teamID: p.team?.id,
       };
     }
   }
@@ -123,6 +125,7 @@ export async function resolveBdlPlayerID(
       id: p.id,
       matchedName: `${p.first_name} ${p.last_name}`,
       note: `Resolved by exact name match among ${results.data.length} candidates.`,
+      teamID: p.team?.id,
     };
   }
 
@@ -145,6 +148,7 @@ export async function getBdlPlayerHitRate(
     teamName?: string;
     bdlPlayerID?: number; // skip name resolution when already known
     lookbackGames?: number;
+    lookbackDays?: number;
     seasons?: number[];
   }
 ): Promise<HitRateResult & { bdlPlayerID: number; statSource: string | null; resolutionNote: string | null }> {
@@ -161,6 +165,7 @@ export async function getBdlPlayerHitRate(
 
   let bdlPlayerID = params.bdlPlayerID;
   let resolutionNote: string | null = null;
+  let bdlTeamID: number | undefined;
   if (!bdlPlayerID) {
     const resolved = await resolveBdlPlayerID(
       bdl,
@@ -170,27 +175,96 @@ export async function getBdlPlayerHitRate(
     );
     bdlPlayerID = resolved.id;
     resolutionNote = resolved.note;
+    bdlTeamID = resolved.teamID;
   }
 
-  // Pull enough rows to cover the target. Pitchers appear far less often than
-  // batters, but since BDL returns PLAYER rows (not team games), every row is an
-  // appearance - so no over-fetch multiplier is needed the way the SGO path
-  // required scanning ~5x team games for a starter.
-  const perPage = Math.min(Math.max(targetAppearances * 2, 25), 100);
+  // ---- RECENCY + SEASON BOUNDING ----
+  //
+  // BDL stat rows carry only a bare game_id: no date, no opponent, no season.
+  // Confirmed via live probe 2026-08-10. Left unbounded, the endpoint returns
+  // rows in arbitrary order spanning multiple seasons, and a cross-check against
+  // SGO on the same player and line disagreed (10 of 15 vs 11 of 15) precisely
+  // because the two were grading different sets of games.
+  //
+  // Sorting cannot fix that on its own - with every date unknown the comparator
+  // is a no-op. So the query itself is bounded to a recent window, and the rows
+  // that come back are then joined against the games endpoint to recover real
+  // dates. Both halves are necessary: bounding controls WHICH games, the join
+  // makes ordering and season provenance possible.
+  const now = new Date();
+  const windowStart = new Date(now);
+  windowStart.setDate(windowStart.getDate() - (params.lookbackDays ?? 75));
+  const startDate = windowStart.toISOString().slice(0, 10);
+  const endDate = now.toISOString().slice(0, 10);
+  const season = params.seasons ?? [currentSeason(params.sport).seasonYear];
+
   const raw = await bdl.getPlayerGameStats(params.sport, {
     playerIDs: [bdlPlayerID],
-    seasons: params.seasons,
-    perPage,
+    seasons: season,
+    startDate,
+    endDate,
+    perPage: 100,
   });
 
   const rows = (raw.data ?? []) as Record<string, unknown>[];
 
-  // Newest first. BDL ordering is not contractually guaranteed, so sort rather
-  // than trust it - the SGO path was burned by exactly this assumption.
-  const sorted = [...rows].sort((a, b) => {
-    const da = extractGameDate(a);
-    const db = extractGameDate(b);
-    return (db ? new Date(db).getTime() : 0) - (da ? new Date(da).getTime() : 0);
+  // ---- DATE RESOLUTION ----
+  // Join stat rows to games so each row gets a real date and opponent.
+  const gameDates = new Map<
+    string,
+    { date: string; opponent: string; isHome: boolean }
+  >();
+  try {
+    const teamIDs = bdlTeamID ? [bdlTeamID] : undefined;
+    const games = await bdl.getGames(params.sport, {
+      teamIDs,
+      seasons: season,
+      startDate,
+      endDate,
+      perPage: 100,
+    });
+    for (const g of games.data ?? []) {
+      const gid = String((g as unknown as { id?: number }).id ?? "");
+      if (!gid) continue;
+      const home = g.home_team;
+      const away = g.visitor_team;
+      const isHome = bdlTeamID !== undefined && home?.id === bdlTeamID;
+      const opp = isHome ? away : home;
+      gameDates.set(gid, {
+        date: g.date,
+        opponent:
+          (opp as { full_name?: string; display_name?: string; name?: string })?.full_name ??
+          (opp as { display_name?: string })?.display_name ??
+          (opp as { name?: string })?.name ??
+          "unknown",
+        isHome,
+      });
+    }
+  } catch {
+    // Swallowed deliberately - handled by the hard check below, which refuses to
+    // return a rate rather than returning an unsorted one.
+  }
+
+  // HARD REFUSAL. An unsortable sample is not a recent-form hit rate, and
+  // returning one anyway is the precise failure this connector exists to avoid:
+  // a fully populated, plausible, wrong number. Better to fail and fall back to
+  // SGO than to publish that.
+  const datedRows = rows.filter((r) => gameDates.has(String(r.game_id ?? "")));
+  if (rows.length > 0 && datedRows.length === 0) {
+    throw new Error(
+      `DATE RESOLUTION FAILED: ${rows.length} BALLDONTLIE stat row(s) returned for ` +
+        `${params.playerName}, but none could be matched to a game date. Without dates the ` +
+        `sample cannot be ordered by recency or checked for season contamination, so any ` +
+        `"last N games" figure would be N arbitrary games rather than the most recent ones. ` +
+        `Refusing to return a hit rate - fall back to SportsGameOdds.`
+    );
+  }
+
+  // Newest first, now on real dates.
+  const sorted = [...datedRows].sort((a, b) => {
+    const da = gameDates.get(String(a.game_id ?? ""))?.date ?? "";
+    const db = gameDates.get(String(b.game_id ?? ""))?.date ?? "";
+    return new Date(db).getTime() - new Date(da).getTime();
   });
 
   const log: GameLogEntry[] = [];
@@ -207,9 +281,10 @@ export async function getBdlPlayerHitRate(
     const { value, source } = resolveStat(params.sport, params.statID, row);
     if (source && !statSource) statSource = source;
 
-    const date = extractGameDate(row) ?? "unknown";
+    const resolvedGame = gameDates.get(String(row.game_id ?? ""));
+    const date = resolvedGame?.date ?? "unknown";
     const season = date !== "unknown" ? seasonForDate(params.sport, date) : null;
-    const opponent = extractOpponent(row);
+    const opponent = resolvedGame?.opponent ?? null;
 
     if (value === null) {
       gamesExcludedDNP++;
@@ -217,7 +292,7 @@ export async function getBdlPlayerHitRate(
         eventID: String(row.game_id ?? row.id ?? "unknown"),
         date,
         opponent: opponent ?? "unknown",
-        isHome: extractIsHome(row),
+        isHome: resolvedGame?.isHome ?? false,
         statValue: null,
         ...(season ? { seasonYear: season.seasonYear } : {}),
       });
@@ -233,7 +308,7 @@ export async function getBdlPlayerHitRate(
       eventID: String(row.game_id ?? row.id ?? "unknown"),
       date,
       opponent: opponent ?? "unknown",
-      isHome: extractIsHome(row),
+      isHome: resolvedGame?.isHome ?? false,
       statValue: value,
       ...(season ? { seasonYear: season.seasonYear } : {}),
     });
@@ -247,8 +322,8 @@ export async function getBdlPlayerHitRate(
   const sufficient = appearances >= profile.minSufficient;
   const sampleWarning = !sufficient
     ? appearances === 0
-      ? `NO SAMPLE. No usable stat rows found for ${params.playerName} across ${rows.length} ` +
-        `BALLDONTLIE row(s). DO NOT WRITE REASONING AROUND THIS PROP. If rows were returned but ` +
+      ? `NO SAMPLE. No usable stat rows found for ${params.playerName} across ${datedRows.length} ` +
+        `dated BALLDONTLIE row(s). DO NOT WRITE REASONING AROUND THIS PROP. If rows were returned but ` +
         `none carried this stat, the field mapping for "${params.statID}" may be wrong - run ` +
         `tkb_debug_bdl_stats to inspect the real field names.`
       : `INSUFFICIENT SAMPLE: ${appearances} appearance(s), ${profile.minSufficient} needed for a ` +
@@ -267,15 +342,15 @@ export async function getBdlPlayerHitRate(
     overHits,
     underHits,
     pushCount,
-    teamGamesScanned: rows.length,
-    hitScanCeiling: rows.length >= perPage && appearances < targetAppearances,
+    teamGamesScanned: datedRows.length,
+    hitScanCeiling: false,
     sampleSufficient: sufficient,
     sampleWarning,
     playerRole: role,
     recentAvailability: {
       gamesPlayed: appearances,
-      teamGamesScanned: rows.length,
-      playRate: rows.length > 0 ? appearances / rows.length : 0,
+      teamGamesScanned: datedRows.length,
+      playRate: datedRows.length > 0 ? appearances / datedRows.length : 0,
       // BDL returns only games the player actually appeared in, so a DNP ratio
       // cannot be computed here the way it could from team game logs. Reporting
       // OK would be a false all-clear, so this states the limitation instead.
@@ -298,36 +373,5 @@ export async function getBdlPlayerHitRate(
   };
 }
 
-function extractGameDate(row: Record<string, unknown>): string | null {
-  const game = row.game as Record<string, unknown> | undefined;
-  const candidates = [row.date, row.game_date, game?.date, game?.game_date];
-  for (const c of candidates) {
-    if (typeof c === "string" && c.length >= 8) return c;
-  }
-  return null;
-}
 
-function extractOpponent(row: Record<string, unknown>): string | null {
-  const game = row.game as Record<string, unknown> | undefined;
-  if (!game) return null;
-  const home = game.home_team as Record<string, unknown> | undefined;
-  const away = game.visitor_team ?? game.away_team;
-  const awayObj = away as Record<string, unknown> | undefined;
-  const team = row.team as Record<string, unknown> | undefined;
-  const teamID = team?.id;
 
-  if (teamID && home?.id === teamID) {
-    return String(awayObj?.full_name ?? awayObj?.display_name ?? awayObj?.name ?? "unknown");
-  }
-  if (teamID && awayObj?.id === teamID) {
-    return String(home?.full_name ?? home?.display_name ?? home?.name ?? "unknown");
-  }
-  return null;
-}
-
-function extractIsHome(row: Record<string, unknown>): boolean {
-  const game = row.game as Record<string, unknown> | undefined;
-  const home = game?.home_team as Record<string, unknown> | undefined;
-  const team = row.team as Record<string, unknown> | undefined;
-  return Boolean(team?.id && home?.id === team.id);
-}
