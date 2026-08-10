@@ -1,6 +1,6 @@
 import axios, { type AxiosInstance, AxiosError } from "axios";
 import { SGO_BASE_URL, SPORT_CONFIG, type SportKey } from "../constants.js";
-import type { SGOEventsResponse, SGOTeam, SGOPlayer } from "../types.js";
+import type { SGOEvent, SGOEventsResponse, SGOTeam, SGOPlayer } from "../types.js";
 
 /**
  * SportsGameOdds API client.
@@ -80,12 +80,98 @@ export class SGOClient {
   /**
    * Fetch ALL events matching a filter, auto-paginating via cursor.
    * Use with caution on broad queries - prefer narrow date/team filters.
+   *
+   * ============================================================
+   * ENTITY-COST CACHE (added 2026-08-10 after a measured blowout)
+   * ============================================================
+   *
+   * MEASURED, NOT ESTIMATED: one tkb_screen_props call on a single MLB game cost
+   * 1,610 entities and 286 requests. A 15-game slate at that rate is ~24,000
+   * entities, roughly a quarter of the Rookie plan's 100,000 monthly allowance.
+   * A day that combined a slate with other work consumed 67,697 and exhausted
+   * the plan outright.
+   *
+   * THE CAUSE WAS DUPLICATION, NOT PAYLOAD SIZE. getPlayerHitRate issues an
+   * IDENTICAL team-history query for every player it evaluates - same leagueID,
+   * teamID, date window and finalized flag - and filters by playerID locally
+   * afterwards. Screening 18 players across 2 teams therefore re-fetched the same
+   * two histories dozens of times. screenProps does memoise, but on
+   * `playerID|statID|line`, which only collapses the two sides of one market and
+   * cannot see that different players share a team.
+   *
+   * Caching at this layer rather than inside hitRateAggregator means every caller
+   * benefits from one change: hit rates, screening, splits and head-to-head.
+   *
+   * ---- Three implementation details that matter ----
+   *
+   * 1. SUBSET-AWARE ON `limit`. Role profiles request different depths for the
+   *    same team: 140 team games for a starting pitcher, 30 for a position
+   *    player. Keying on limit would defeat the cache exactly when it matters
+   *    most. Instead the fetched depth is stored, and a cached entry serves any
+   *    request for the same or shallower depth. A deeper request re-fetches and
+   *    upgrades the entry. Callers already slice locally, so extra events are
+   *    harmless.
+   *
+   * 2. DATE BUCKETING. hitRateAggregator derives its window from `new Date()` at
+   *    call time, so two calls milliseconds apart produce different ISO strings.
+   *    Keying on the raw values would miss on every single call. Dates are
+   *    bucketed to the day, which is far finer than the 400-day window needs.
+   *
+   * 3. FINALIZED-ONLY. Completed games are immutable, so a cache hit returns
+   *    byte-identical data and accuracy is untouched. Live odds, schedules and
+   *    any non-finalized query bypass the cache entirely and always hit the
+   *    network, because those legitimately change minute to minute. This buys
+   *    efficiency without trading away correctness - the one trade this
+   *    connector never makes.
    */
+  private historyCache = new Map<
+    string,
+    { events: SGOEvent[]; depth: number; fetchedAt: number }
+  >();
+  private static readonly HISTORY_TTL_MS = 15 * 60 * 1000;
+  private static readonly MAX_CACHE_ENTRIES = 60;
+
+  /** Bucket an ISO timestamp to the day so near-simultaneous calls share a key. */
+  private static dayBucket(iso: string | undefined): string {
+    if (!iso) return "none";
+    return iso.slice(0, 10);
+  }
+
+  private cacheStats = { hits: 0, misses: 0, upgrades: 0 };
+
   async getAllEvents(
     params: Parameters<SGOClient["getEvents"]>[0],
     maxPages = 10
-  ) {
-    const allEvents = [];
+  ): Promise<SGOEvent[]> {
+    const requestedDepth = params.limit ?? 100;
+
+    // Only immutable historical queries are cacheable.
+    const cacheable = params.finalized === true;
+    const cacheKey = cacheable
+      ? [
+          params.leagueID ?? "",
+          params.teamID ?? "",
+          params.playerID ?? "",
+          params.eventIDs ?? "",
+          SGOClient.dayBucket(params.startsAfter),
+          SGOClient.dayBucket(params.startsBefore),
+          params.oddIDs ?? "",
+        ].join("|")
+      : null;
+
+    if (cacheKey) {
+      const hit = this.historyCache.get(cacheKey);
+      const fresh = hit && Date.now() - hit.fetchedAt < SGOClient.HISTORY_TTL_MS;
+      // A cached deeper fetch satisfies any shallower request.
+      if (hit && fresh && hit.depth >= requestedDepth) {
+        this.cacheStats.hits++;
+        return hit.events;
+      }
+      if (hit && fresh) this.cacheStats.upgrades++;
+      else this.cacheStats.misses++;
+    }
+
+    const allEvents: SGOEvent[] = [];
     let cursor: string | undefined = undefined;
     let pages = 0;
 
@@ -93,14 +179,55 @@ export class SGOClient {
       const page: SGOEventsResponse = await this.getEvents({
         ...params,
         cursor,
-        limit: params.limit ?? 100,
+        limit: requestedDepth,
       });
       allEvents.push(...page.data);
       cursor = page.nextCursor ?? undefined;
       pages++;
     } while (cursor && pages < maxPages);
 
+    if (cacheKey) {
+      this.historyCache.set(cacheKey, {
+        events: allEvents,
+        depth: requestedDepth,
+        fetchedAt: Date.now(),
+      });
+      // Bound memory. A full slate touches roughly 30 team histories.
+      if (this.historyCache.size > SGOClient.MAX_CACHE_ENTRIES) {
+        let oldestKey: string | null = null;
+        let oldestAt = Infinity;
+        for (const [k, v] of this.historyCache) {
+          if (v.fetchedAt < oldestAt) {
+            oldestAt = v.fetchedAt;
+            oldestKey = k;
+          }
+        }
+        if (oldestKey) this.historyCache.delete(oldestKey);
+      }
+    }
+
     return allEvents;
+  }
+
+  /**
+   * Cache effectiveness, surfaced through tkb_get_api_usage so the saving is
+   * observable rather than assumed. A high hit count during a slate build is the
+   * signal that duplicate team-history fetches are actually being collapsed.
+   */
+  getCacheStats(): {
+    entries: number;
+    hits: number;
+    misses: number;
+    depthUpgrades: number;
+    ttlMinutes: number;
+  } {
+    return {
+      entries: this.historyCache.size,
+      hits: this.cacheStats.hits,
+      misses: this.cacheStats.misses,
+      depthUpgrades: this.cacheStats.upgrades,
+      ttlMinutes: SGOClient.HISTORY_TTL_MS / 60000,
+    };
   }
 
   /** Convenience: resolve our internal sport key to SGO's leagueID */

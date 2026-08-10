@@ -60,14 +60,28 @@ Error Handling:
     async (_params: UsageInput) => {
       try {
         const usage = await sgo.getUsage();
+        const cache = sgo.getCacheStats();
         const text = JSON.stringify(usage, null, 2);
         const truncated = text.length > 8000 ? text.slice(0, 8000) + "\n...[truncated]" : text;
+
+        const total = cache.hits + cache.misses;
+        const cacheLine =
+          total === 0
+            ? `Team-history cache: no lookups yet this process.`
+            : `Team-history cache: ${cache.hits} hit(s), ${cache.misses} miss(es), ` +
+              `${cache.depthUpgrades} depth upgrade(s) across ${cache.entries} cached ` +
+              `team histories (TTL ${cache.ttlMinutes}m). Each hit is a team-history ` +
+              `fetch avoided - roughly 30-140 entities saved depending on role depth.`;
 
         return {
           content: [
             {
               type: "text" as const,
-              text: `SportsGameOdds account usage:\n\n${truncated}\n\nReminder: billing is per EVENT OBJECT returned, not per market. Hit-rate checks are the heaviest consumer in this connector.`,
+              text:
+                `SportsGameOdds account usage:\n\n${truncated}\n\n${cacheLine}\n\n` +
+                `Reminder: billing is per EVENT OBJECT returned, not per market. Hit-rate ` +
+                `checks are the heaviest consumer in this connector, which is why identical ` +
+                `team-history fetches are cached.`,
             },
           ],
         };

@@ -107,10 +107,14 @@ export function registerScreenPropsTool(server: McpServer, sgo: SGOClient) {
   server.registerTool(
     "tkb_screen_props",
     {
-      title: "Screen every posted prop for a game, ranked by edge",
-      description: `THE FIRST CALL when building a pick thread. Sweeps every posted player prop for one event, computes the counted hit rate, and ranks by EDGE (hit rate minus break-even) rather than by hit rate.
+      title: "Screen every posted prop for a game, ranked by edge or hit rate",
+      description: `THE FIRST CALL when building a pick thread. Sweeps every posted player prop for one event, computes the counted hit rate, and ranks by EDGE (hit rate minus break-even) or by raw HIT RATE, whichever the caller asks for.
 
-WHY EDGE AND NOT HIT RATE: a prop showing 7 of 11 looks strong until you notice the price is -186, whose break-even is 65% against an actual 63.6%. That is a losing bet that reads like a winner. Every row here carries its break-even so that comparison cannot be skipped.
+EDGE VS HIT RATE - PICK THE RIGHT ONE FOR THE JOB:
+  - rankBy="edge" (default) finds the best price-adjusted value. A prop showing 7 of 11 looks strong until you notice the price is -186, whose break-even is 65% against an actual 63.6%. Edge catches that.
+  - rankBy="hitRate" plus minHitRate finds the props most likely to ACTUALLY WIN. Edge alone can surface a 40% prop at +220 because the maths works - a losing pick most nights, and the wrong answer for an account judged on visible win rate rather than closing-line value.
+
+Set minHitRate=0.6 with maxAmericanOdds=-200 for a win-rate-first screen. Both fields are always returned, so the trade-off is never hidden either way.
 
 AUTOMATICALLY EXCLUDED: model-estimated (fairOdds) prices that no book has posted, samples too small to be evidence, combo stats that cannot be counted, and prices shorter than maxAmericanOdds.
 
@@ -121,6 +125,7 @@ Returns per prop: player, market, line, side, real price, roundedOdds (publishab
 Examples:
   - Use when: starting any pick thread and you need to know what is actually bettable
   - Use when: "what are the best props in this game?"
+  - Use when: chasing win rate -> rankBy="hitRate", minHitRate=0.6, minEdge=0
   - Don't use when: you already know the exact player and market - use tkb_get_odds
   - Don't use when: props are not posted yet - it will tell you so
 
@@ -138,6 +143,20 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           .default(0.05)
           .describe(
             "Minimum hitRate minus break-even. 0.05 = a 5 percentage point edge. Set 0 to see every priced prop with a real sample."
+          ),
+        minHitRate: z
+          .number()
+          .min(0)
+          .max(1)
+          .default(0)
+          .describe(
+            "Minimum counted hit rate, 0-1. A WIN-RATE FLOOR, separate from edge. 0.6 returns only props that have actually hit 60%+ of the time. Use this when the account is judged on visible wins rather than closing-line value - a +EV prop that hits 40% of the time is still a losing pick most nights."
+          ),
+        rankBy: z
+          .enum(["edge", "hitRate"])
+          .default("edge")
+          .describe(
+            "Sort order. 'edge' surfaces the best price-adjusted value. 'hitRate' surfaces the props most likely to actually win, which is usually what a free-picks account wants. Both fields are returned either way."
           ),
         maxAmericanOdds: z
           .number()
@@ -315,6 +334,12 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           const breakevenPct = impliedProbability(c.americanOdds);
           const edge = computeEdge(hitRatePct, c.americanOdds);
           if (edge < input.minEdge) return null;
+          // WIN-RATE FLOOR, applied independently of edge. A prop can carry a
+          // positive edge on a plus-money price while still losing most nights -
+          // one screened on 2026-08-10 showed 6 of 15 (40%) at +220 and cleared
+          // an edge filter comfortably. For an account judged on visible wins
+          // rather than ROI, that is the wrong pick regardless of the maths.
+          if (hitRatePct < input.minHitRate) return null;
 
           return {
             playerName: player.name,
@@ -342,18 +367,25 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
         }
       );
 
-      screened.sort((a, b) => b.edge - a.edge);
+      screened.sort((a, b) =>
+        input.rankBy === "hitRate"
+          ? b.hitRatePct - a.hitRatePct || b.edge - a.edge
+          : b.edge - a.edge || b.hitRatePct - a.hitRatePct
+      );
       const top = screened.slice(0, input.limit);
+
+      const filterSummary =
+        `minSample ${input.minSample} / minEdge ${input.minEdge} / ` +
+        `minHitRate ${input.minHitRate} / maxAmericanOdds ${input.maxAmericanOdds}`;
 
       const summary =
         top.length === 0
           ? `NOTHING CLEARED. Screened ${candidates.length} priced markets across ` +
             `${allowedPlayerIDs.size} players in ${teamNames[awayID]} @ ${teamNames[homeID]}, ` +
-            `and none met minSample ${input.minSample} / minEdge ${input.minEdge} / ` +
-            `maxAmericanOdds ${input.maxAmericanOdds}. This is a real answer, not an ` +
+            `and none met ${filterSummary}. This is a real answer, not an ` +
             `error - build this thread from team-level markets rather than padding it ` +
             `with a coin-flip prop.`
-          : `${top.length} prop(s) cleared, ranked by edge. Screened ${candidates.length} ` +
+          : `${top.length} prop(s) cleared, ranked by ${input.rankBy}. Screened ${candidates.length} ` +
             `priced markets across ${allowedPlayerIDs.size} players. Use roundedOdds when ` +
             `publishing. Check availabilityFlag before locking any pick.`;
 

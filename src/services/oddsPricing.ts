@@ -109,8 +109,8 @@ export function extractPricedLine(
   // consensus figure, and on an unpriced market it can be present while no single
   // named book has actually posted anything - which is exactly how the Drake Maye
   // "-137 on both sides, no bookmaker" result slipped through. A usable price must
-  // be traceable to a named sportsbook.
-  const hasBookOdds = Boolean(book) && Boolean(odd.bookOdds) && odd.bookOddsAvailable !== false;
+  // be traceable to a named sportsbook, which is why the check below tests `book`
+  // (a named entry from byBookmaker) rather than the presence of bookOdds.
 
   if (!book) {
     const fairOnly = Boolean(odd.fairOdds);
