@@ -39,7 +39,7 @@ import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
  *
  * MEMORY DISCIPLINE: this reads the event's full odds map, which on a game near
  * first pitch can exceed 1,000 markets. That is one bounded object for one event,
- * which is the same footprint tkb_debug_raw_event already carries. What is NOT
+ * which is one bounded object for one event. What is NOT
  * done is a per-candidate event fetch, which would multiply that by several
  * hundred and reproduce the historical OOM crashes.
  */

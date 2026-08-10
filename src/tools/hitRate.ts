@@ -1,7 +1,10 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
+import type { BDLClient } from "../services/bdlClient.js";
 import { getPlayerHitRate } from "../services/hitRateAggregator.js";
+import { getBdlPlayerHitRate } from "../services/bdlHitRateAggregator.js";
+import { isStatSupported } from "../services/bdlStatMap.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
 
 const HitRateInputSchema = z
@@ -30,6 +33,12 @@ const HitRateInputSchema = z
       .describe(
         "How many games the PLAYER ACTUALLY APPEARED IN to collect (not team games). The server scans backward through team games until it has this many real appearances. Defaults by role: 10 for starting pitchers, 15 for batters, 12 for skaters. For a starting pitcher this may scan ~5x this many team games."
       ),
+    dataSource: z
+      .enum(["auto", "bdl", "sgo"])
+      .default("auto")
+      .describe(
+        "Which provider computes the rate. 'auto' (default) tries BALLDONTLIE first and falls back to SportsGameOdds - BDL has no monthly object cap, so it is roughly 20x cheaper. 'sgo' forces the original path. Results are equivalent; only cost and DNP visibility differ."
+      ),
     maxTeamGamesScanned: z
       .number()
       .int()
@@ -44,7 +53,7 @@ const HitRateInputSchema = z
 
 type HitRateInput = z.infer<typeof HitRateInputSchema>;
 
-export function registerHitRateTool(server: McpServer, sgo: SGOClient) {
+export function registerHitRateTool(server: McpServer, sgo: SGOClient, bdl: BDLClient) {
   server.registerTool(
     "tkb_get_player_hit_rate",
     {
@@ -90,6 +99,98 @@ Error Handling:
     },
     async (params: HitRateInput) => {
       try {
+        // ---- BDL-FIRST ROUTING ----
+        // SGO bills per event object and a hit rate needs a whole team history,
+        // so one thread measured at 211 entities and daily builds projected over
+        // the 100,000 monthly cap. BDL has no object cap and returns per-player
+        // rows directly. Try it first, fall back silently on any failure so a BDL
+        // outage degrades cost rather than correctness.
+        const canUseBdl =
+          params.dataSource !== "sgo" && isStatSupported(params.sport, params.statID);
+
+        if (canUseBdl) {
+          try {
+            const bdlResult = await getBdlPlayerHitRate(bdl, {
+              sport: params.sport,
+              playerName: params.playerName,
+              statID: params.statID,
+              line: params.line,
+              direction: params.direction,
+              lookbackGames: params.lookbackGames,
+            });
+
+            const chosen = bdlResult.gamesHit;
+            const other =
+              params.direction === "over" ? bdlResult.underHits : bdlResult.overHits;
+            const otherLabel = params.direction === "over" ? "under" : "over";
+
+            const provenance =
+              `\n\nSource: BALLDONTLIE (no object quota consumed).` +
+              (bdlResult.statSource
+                ? ` Stat read from field "${bdlResult.statSource}".`
+                : "") +
+              (bdlResult.resolutionNote ? ` ${bdlResult.resolutionNote}` : "") +
+              (bdlResult.recentAvailability.note
+                ? `\n\nNOTE: ${bdlResult.recentAvailability.note}`
+                : "");
+
+            if (!bdlResult.sampleSufficient) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text:
+                      `${bdlResult.sampleWarning}\n\n` +
+                      `${params.playerName} | ${params.statID} ${params.direction} ${params.line}\n` +
+                      `Appearances found: ${bdlResult.gamesConsidered}${provenance}\n\n` +
+                      JSON.stringify(bdlResult, null, 2),
+                  },
+                ],
+                structuredContent: bdlResult,
+              };
+            }
+
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `${bdlResult.playerName}: ${chosen} of ${bdlResult.gamesConsidered} ` +
+                    `(real counted sample)\n` +
+                    `Other side for reference: ${otherLabel} hit ${other} of ${bdlResult.gamesConsidered}` +
+                    (bdlResult.pushCount > 0
+                      ? ` | ${bdlResult.pushCount} push(es) on this whole-number line`
+                      : "") +
+                    (bdlResult.seasonWarning ? `\n\nSEASON WARNING: ${bdlResult.seasonWarning}` : "") +
+                    `${provenance}\n\n${JSON.stringify(bdlResult, null, 2)}`,
+                },
+              ],
+              structuredContent: bdlResult,
+            };
+          } catch (bdlErr) {
+            // Fall through to SGO. The reason is surfaced so a persistent BDL
+            // problem (tier gate, bad field mapping, ambiguous name) is visible
+            // rather than quietly costing quota on every call.
+            const reason = bdlErr instanceof Error ? bdlErr.message : String(bdlErr);
+            const sgoFallback = await getPlayerHitRate(sgo, params);
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `FELL BACK TO SPORTSGAMEODDS. BALLDONTLIE could not serve this: ${reason}\n\n` +
+                    `${sgoFallback.playerName}: ${sgoFallback.gamesHit} of ${sgoFallback.gamesConsidered} ` +
+                    `(${sgoFallback.gamesExcludedDNP} DNP excluded, ${sgoFallback.teamGamesScanned} team games scanned)\n\n` +
+                    `This path consumes SGO object quota. If it keeps happening, run ` +
+                    `tkb_debug_bdl_stats to check tier access and field names.\n\n` +
+                    JSON.stringify(sgoFallback, null, 2),
+                },
+              ],
+              structuredContent: sgoFallback,
+            };
+          }
+        }
+
         const result = await getPlayerHitRate(sgo, params);
 
         if (!result.sampleSufficient) {

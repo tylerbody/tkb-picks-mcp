@@ -28,10 +28,9 @@ export function registerPlayersTool(server: McpServer, sgo: SGOClient) {
       description: `List the players attached to a specific game, with their SGO playerID and teamID.
 
 WHY THIS EXISTS: playerID is required by tkb_get_odds (player props), tkb_get_yes_no_prop,
-and tkb_get_player_hit_rate, but there was previously no way to get one except
-tkb_debug_raw_event, which dumps the ENTIRE event payload including up to 1000+ odds
-markets. That is the exact pattern that caused out-of-memory crashes on this server
-before request-level filtering was introduced. This tool returns only the roster -
+and tkb_get_player_hit_rate. Discovering one previously meant pulling the ENTIRE event
+payload including up to 1000+ odds markets - the exact fetch-everything pattern that
+caused out-of-memory crashes on this server. This tool returns only the roster,
 typically a few hundred bytes instead of megabytes.
 
 IMPORTANT - COVERAGE IS TIED TO MARKET AVAILABILITY: SGO populates the players object
@@ -56,7 +55,7 @@ Examples:
   - Use when: you need a playerID before calling tkb_get_odds for a prop
   - Use when: "who's available to prop in this game?"
   - Don't use when: you need injury status - use tkb_get_injuries
-  - Don't use when: you need the full raw event shape for debugging - use tkb_debug_raw_event
+  - Don't use when: you need current odds for a player - use tkb_get_odds
 
 Error Handling:
   - Returns a clear explanation (not an error) when the roster is empty, including the

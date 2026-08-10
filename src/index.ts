@@ -12,17 +12,18 @@ import { registerInjuriesTool } from "./tools/injuries.js";
 import { registerSplitsTool } from "./tools/splits.js";
 import { registerYesNoPropsTool } from "./tools/yesNoProps.js";
 import { registerPeriodOddsTool } from "./tools/periodOdds.js";
-import { registerDebugEventTool } from "./tools/debugEvent.js";
-import { registerDebugInjuriesTool } from "./tools/debugInjuries.js";
-import { registerTeamRecordTool } from "./tools/teamRecord.js";
 import { registerWeatherTool } from "./tools/weather.js";
 import { registerPlayersTool } from "./tools/players.js";
-import { registerFuturesTool } from "./tools/futures.js";
 import { registerUsageTool } from "./tools/usage.js";
 import { registerGradePicksTool } from "./tools/gradePicks.js";
 import { registerScreenPropsTool } from "./tools/screenProps.js";
 import { registerCoverPlayerTool } from "./tools/coverPlayer.js";
 import { registerTweetCharsTool } from "./tools/tweetChars.js";
+import { registerBdlStatsProbeTool } from "./tools/bdlStatsProbe.js";
+import { registerBatchGradeTool } from "./tools/gradeSlate.js";
+import { registerStreakScanTool } from "./tools/streakScan.js";
+import { registerLineMovementTool } from "./tools/lineMovement.js";
+import { registerLiveMonitorTool } from "./tools/liveMonitor.js";
 
 // ---- Environment / config ----
 
@@ -50,27 +51,28 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
 function buildServer(): McpServer {
   const server = new McpServer({
     name: "tkb-picks-mcp-server",
-    version: "1.2.0",
+    version: "2.0.0",
   });
 
   registerScheduleTool(server, sgo);
   registerOddsTool(server, sgo);
-  registerHitRateTool(server, sgo);
+  registerHitRateTool(server, sgo, bdl);
   registerInjuriesTool(server, bdl);
   registerSplitsTool(server, sgo, bdl);
   registerYesNoPropsTool(server, sgo);
   registerPeriodOddsTool(server, sgo);
-  registerDebugEventTool(server, sgo);
-  registerDebugInjuriesTool(server, bdl);
-  registerTeamRecordTool(server, sgo);
   registerWeatherTool(server, weather);
   registerPlayersTool(server, sgo);
-  registerFuturesTool(server, sgo);
   registerUsageTool(server, sgo);
   registerGradePicksTool(server, sgo);
   registerScreenPropsTool(server, sgo);
   registerCoverPlayerTool(server, sgo, bdl);
   registerTweetCharsTool(server);
+  registerBdlStatsProbeTool(server, bdl);
+  registerBatchGradeTool(server, sgo);
+  registerStreakScanTool(server, bdl);
+  registerLineMovementTool(server, sgo);
+  registerLiveMonitorTool(server, sgo);
 
   return server;
 }
@@ -81,7 +83,7 @@ const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", server: "tkb-picks-mcp-server", version: "1.2.0" });
+  res.json({ status: "ok", server: "tkb-picks-mcp-server", version: "2.0.0" });
 });
 
 app.post("/mcp", async (req, res) => {

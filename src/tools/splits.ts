@@ -92,7 +92,8 @@ differential, streak, and division/conference records.
 Examples:
   - Use when: building an opener hook like "Rangers are 24-11 at home"
   - Use when: "How have they done against this team historically?" -> splitType="opponent"
-  - Don't use when: you need the team's overall record - use tkb_get_team_record
+  - Note: the standings path also returns overall record, point differential and streak,
+    so a separate overall-record lookup is not needed
 
 Error Handling:
   - Returns an error if splitType='opponent' but opponentTeamID/opponentName are missing

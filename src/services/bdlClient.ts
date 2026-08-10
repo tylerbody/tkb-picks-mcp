@@ -117,6 +117,129 @@ export class BDLClient {
     return all;
   }
 
+  /**
+   * ---- PLAYER GAME STATS (the SGO entity-cost replacement) ----
+   *
+   * WHY THIS EXISTS: hit rates were computed by pulling a team's finalized events
+   * from SportsGameOdds and reading player values out of event.results. SGO bills
+   * per EVENT OBJECT returned, so one team-history fetch costs 30-140 objects and
+   * a 15-game slate ran roughly 3,000 - against a 100,000 monthly cap. Measured on
+   * 2026-08-10: one thread cost 211 entities, and a month of daily builds projected
+   * to ~114,000, i.e. over the cap.
+   *
+   * BALLDONTLIE has NO monthly object cap. It rate-limits requests per minute only
+   * (60/min on ALL-STAR, 600/min on GOAT). Moving hit-rate computation here removes
+   * the binding constraint entirely rather than shrinking it.
+   *
+   * ENDPOINT PATH DIFFERS BY SPORT - confirmed from BDL's own OpenAPI index:
+   *   MLB   -> /mlb/v1/stats
+   *   WNBA  -> /wnba/v1/player_stats
+   *   NFL   -> /nfl/v1/stats
+   *   NCAAF -> /ncaaf/v1/player_stats
+   * Guessing one shared path would 404 on half the sports, which is the same class
+   * of mistake as the injuries team-field bug that shipped twice.
+   *
+   * TIER REQUIREMENT: player stats are listed as ALL-STAR ($9.99/sport), the tier
+   * already subscribed for MLB and WNBA. That is sourced from third-party
+   * documentation rather than BDL's own pricing page, so it is UNVERIFIED until a
+   * live call either returns data or 401s. tkb_debug_bdl_stats exists to settle it.
+   */
+  private statsPathFor(sport: SportKey): string {
+    const { bdlPath } = SPORT_CONFIG[sport];
+    // MLB and NFL use /stats; WNBA and NCAAF use /player_stats.
+    const endpoint = sport === "mlb" || sport === "nfl" ? "stats" : "player_stats";
+    return `/${bdlPath}/v1/${endpoint}`;
+  }
+
+  /**
+   * Fetch per-game player stat lines. One row per player per game.
+   *
+   * Filters vary slightly by sport but player_ids[], dates[] and seasons[] are
+   * common across them.
+   */
+  async getPlayerGameStats(
+    sport: SportKey,
+    params: {
+      playerIDs?: number[];
+      gameIDs?: number[];
+      seasons?: number[];
+      startDate?: string; // YYYY-MM-DD
+      endDate?: string;
+      cursor?: number;
+      perPage?: number;
+    } = {}
+  ): Promise<{ data: unknown[]; meta?: { next_cursor?: number | null } }> {
+    try {
+      const response = await this.http.get<{
+        data: unknown[];
+        meta?: { next_cursor?: number | null };
+      }>(this.statsPathFor(sport), {
+        params: {
+          "player_ids[]": params.playerIDs,
+          "game_ids[]": params.gameIDs,
+          "seasons[]": params.seasons,
+          start_date: params.startDate,
+          end_date: params.endDate,
+          cursor: params.cursor,
+          per_page: params.perPage ?? 100,
+        },
+      });
+      return response.data;
+    } catch (err) {
+      throw formatBDLError(err, `${sport} player game stats`, sport);
+    }
+  }
+
+  /**
+   * Resolve a player name to BDL's numeric player ID.
+   *
+   * NECESSARY BECAUSE THE TWO PROVIDERS USE DIFFERENT ID SPACES: SGO returns
+   * "KETEL_MARTE_1_MLB" while BDL uses integers. There is no shared key, so any
+   * migration of stats to BDL has to bridge them by name. Name matching is
+   * inherently fuzzy, which is why this returns ALL candidates rather than
+   * silently picking one - resolving "Will Smith" to the wrong player would
+   * produce a confident, completely wrong hit rate.
+   */
+  async searchPlayers(
+    sport: SportKey,
+    search: string
+  ): Promise<{ data: { id: number; first_name: string; last_name: string; team?: BDLTeam }[] }> {
+    try {
+      const response = await this.http.get<{
+        data: { id: number; first_name: string; last_name: string; team?: BDLTeam }[];
+      }>(this.buildPath(sport, "players"), {
+        params: { search, per_page: 25 },
+      });
+      return response.data;
+    } catch (err) {
+      throw formatBDLError(err, `${sport} player search "${search}"`, sport);
+    }
+  }
+
+  /**
+   * Diagnostic: raw, unprocessed player game stats for direct field inspection.
+   *
+   * The mapping from SGO statIDs (batting_hits, pitching_strikeouts) to BDL field
+   * names is NOT documented anywhere accessible and must not be guessed. This
+   * connector has shipped a wrong BDL field assumption twice already - both times
+   * it failed silently rather than loudly, which is worse. Inspect the real shape
+   * before writing any mapping against it.
+   */
+  async getRawPlayerGameStats(
+    sport: SportKey,
+    playerID: number,
+    perPage = 3
+  ): Promise<unknown> {
+    try {
+      const response = await this.http.get(this.statsPathFor(sport), {
+        params: { "player_ids[]": [playerID], per_page: perPage },
+      });
+      return response.data;
+    } catch (err) {
+      throw formatBDLError(err, `${sport} raw player game stats`, sport);
+    }
+  }
+
   async getGames(
     sport: SportKey,
     params: { dates?: string[]; team_ids?: number[]; cursor?: number } = {}

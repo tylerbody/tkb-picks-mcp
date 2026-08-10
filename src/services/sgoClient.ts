@@ -59,6 +59,9 @@ export class SGOClient {
     // materially increases response size, which is the OOM risk this connector
     // has already been bitten by once.
     includeAltLines?: boolean;
+    // Opening odds alongside current. Rides on the same event fetch, so line
+    // movement costs no additional request - see tools/lineMovement.ts.
+    includeOpenCloseOdds?: boolean;
     startsAfter?: string;
     startsBefore?: string;
     oddsAvailable?: boolean;
@@ -246,7 +249,7 @@ export class SGOClient {
    * Fetch players directly from SGO's /players endpoint.
    *
    * WHY THIS EXISTS: before this, the only way to discover a playerID was
-   * tkb_debug_raw_event, which pulls the entire event object including its odds
+   * pulling the entire event object including its odds
    * map (1,180 markets on a live MLB game). That is exactly the fetch-everything
    * pattern that caused the earlier out-of-memory crashes on Render. This
    * endpoint returns player records only - no odds - so it is both correct and
