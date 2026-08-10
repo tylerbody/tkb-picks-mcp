@@ -168,11 +168,16 @@ export class BDLClient {
       cursor?: number;
       perPage?: number;
     } = {}
-  ): Promise<{ data: unknown[]; meta?: { next_cursor?: number | null } }> {
+  ): Promise<{
+    data: unknown[];
+    meta?: { next_cursor?: number | null; per_page?: number };
+    next_cursor?: number | null;
+  }> {
     try {
       const response = await this.http.get<{
         data: unknown[];
-        meta?: { next_cursor?: number | null };
+        meta?: { next_cursor?: number | null; per_page?: number };
+        next_cursor?: number | null;
       }>(this.statsPathFor(sport), {
         params: {
           "player_ids[]": params.playerIDs,
@@ -246,6 +251,137 @@ export class BDLClient {
     } catch (err) {
       throw formatBDLError(err, `${sport} player search "${search}"`, sport);
     }
+  }
+
+  /**
+   * Fetch ALL player game stat rows, auto-paginating.
+   *
+   * WHY PAGINATION IS MANDATORY HERE, NOT AN OPTIMISATION:
+   *
+   * BDL returns stat rows in ASCENDING date order and caps a page at 100. Page 1
+   * is therefore the OLDEST games of the season, not the newest. Taking a single
+   * page and sorting it locally cannot fix that - the recent games were never in
+   * the response to begin with.
+   *
+   * This produced three separate wrong answers during testing, each of which
+   * looked entirely normal: a hit rate built on late-May through mid-June games
+   * presented as current form, while SGO (correctly) returned late-July through
+   * August for the same player and line.
+   *
+   * Cost is not a concern: BDL bills a flat monthly fee with a per-minute request
+   * limit and NO object cap, so a full MLB season is ~2 pages.
+   */
+  /**
+   * Pull the pagination cursor from a response without assuming one shape.
+   *
+   * WHY DEFENSIVE: pagination silently stopping after page 1 is indistinguishable
+   * from "there was only one page". BDL returns rows ASCENDING from season start,
+   * so a silent stop means only the OLDEST games are ever seen - which produced
+   * three separate wrong hit rates during testing, each of which looked normal.
+   * A wrong assumption about where the cursor lives fails in exactly that silent
+   * way, so every known location is checked.
+   */
+  private static nextCursorOf(resp: unknown): number | undefined {
+    const r = resp as {
+      meta?: { next_cursor?: number | null };
+      next_cursor?: number | null;
+    };
+    const c = r?.meta?.next_cursor ?? r?.next_cursor;
+    return typeof c === "number" ? c : undefined;
+  }
+
+  async getAllPlayerGameStats(
+    sport: SportKey,
+    params: {
+      playerIDs?: number[];
+      seasons?: number[];
+      startDate?: string;
+      endDate?: string;
+      maxPages?: number;
+    } = {}
+  ): Promise<Record<string, unknown>[]> {
+    const all: Record<string, unknown>[] = [];
+    let cursor: number | undefined = undefined;
+    let pages = 0;
+    const maxPages = params.maxPages ?? 6; // ~600 rows, well past a full season
+
+    do {
+      const page = await this.getPlayerGameStats(sport, { ...params, cursor });
+      all.push(...((page.data ?? []) as Record<string, unknown>[]));
+      cursor = BDLClient.nextCursorOf(page);
+      pages++;
+    } while (cursor && pages < maxPages);
+
+    return all;
+  }
+
+  /**
+   * Fetch ALL games matching a filter, auto-paginating. Same reasoning as above.
+   *
+   * CACHED, because BDL rate-limits REQUESTS PER MINUTE (60 on ALL-STAR) and this
+   * is the call most likely to breach that. Every player on a team needs the same
+   * games map to date their stat rows, so building a thread with several props
+   * from one game would otherwise refetch an identical ~70-game list per player.
+   *
+   * Unlike the SGO cache, which exists to control per-object BILLING, this one
+   * exists to control REQUEST RATE - different constraint, same fix. Keyed on the
+   * filter and bucketed to the day so calls seconds apart share an entry.
+   */
+  private gamesCache = new Map<
+    string,
+    { games: BDLGamesResponse["data"]; fetchedAt: number }
+  >();
+  private static readonly GAMES_TTL_MS = 15 * 60 * 1000;
+
+  async getAllGames(
+    sport: SportKey,
+    params: {
+      teamIDs?: number[];
+      seasons?: number[];
+      startDate?: string;
+      endDate?: string;
+      maxPages?: number;
+    } = {}
+  ): Promise<BDLGamesResponse["data"]> {
+    const cacheKey = [
+      sport,
+      (params.teamIDs ?? []).join(","),
+      (params.seasons ?? []).join(","),
+      params.startDate ?? "",
+      params.endDate ?? "",
+    ].join("|");
+
+    const hit = this.gamesCache.get(cacheKey);
+    if (hit && Date.now() - hit.fetchedAt < BDLClient.GAMES_TTL_MS) {
+      return hit.games;
+    }
+
+    const all: BDLGamesResponse["data"] = [];
+    let cursor: number | undefined = undefined;
+    let pages = 0;
+    const maxPages = params.maxPages ?? 6;
+
+    do {
+      const page = await this.getGames(sport, { ...params, cursor });
+      all.push(...(page.data ?? []));
+      cursor = BDLClient.nextCursorOf(page);
+      pages++;
+    } while (cursor && pages < maxPages);
+
+    this.gamesCache.set(cacheKey, { games: all, fetchedAt: Date.now() });
+    if (this.gamesCache.size > 40) {
+      let oldestKey: string | null = null;
+      let oldestAt = Infinity;
+      for (const [k, v] of this.gamesCache) {
+        if (v.fetchedAt < oldestAt) {
+          oldestAt = v.fetchedAt;
+          oldestKey = k;
+        }
+      }
+      if (oldestKey) this.gamesCache.delete(oldestKey);
+    }
+
+    return all;
   }
 
   /**

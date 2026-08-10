@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { resolveStat, isStatSupported } from "../services/bdlStatMap.js";
+import { currentSeason } from "../services/seasonBoundary.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
 
 /**
@@ -161,20 +162,28 @@ Error Handling:
           }
           const player = candidates[0]!;
 
-          const raw = await bdl.getPlayerGameStats(params.sport, {
+          // MUST paginate. BDL returns rows ASCENDING from season start capped
+          // at 100 per page, so page 1 is the OLDEST games. An "active streak"
+          // computed off page 1 would be a streak that ended months ago -
+          // presented as current form, which is worse than no post at all.
+          const rows = await bdl.getAllPlayerGameStats(params.sport, {
             playerIDs: [player.id],
-            perPage: Math.min(params.lookback * 2, 100),
+            seasons: [currentSeason(params.sport).seasonYear],
           });
-          const rows = (raw.data ?? []) as Record<string, unknown>[];
           if (!rows.length) {
             skipped.push(`${name}: no stat rows returned`);
             continue;
           }
 
+          // Sort newest-first. Rows lacking a usable date sort last rather than
+          // silently landing at the front and corrupting the streak count.
           const sorted = [...rows].sort((a, b) => {
             const da = gameDate(a);
             const db = gameDate(b);
-            return (db ? new Date(db).getTime() : 0) - (da ? new Date(da).getTime() : 0);
+            if (!da && !db) return 0;
+            if (!da) return 1;
+            if (!db) return -1;
+            return new Date(db).getTime() - new Date(da).getTime();
           });
 
           const values: { v: number; date: string; opp: string }[] = [];

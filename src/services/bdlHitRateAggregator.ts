@@ -198,15 +198,15 @@ export async function getBdlPlayerHitRate(
   const endDate = now.toISOString().slice(0, 10);
   const season = params.seasons ?? [currentSeason(params.sport).seasonYear];
 
-  const raw = await bdl.getPlayerGameStats(params.sport, {
+  // Paginated: BDL returns rows ASCENDING from season start, so a single page is
+  // the OLDEST games. Fetching one page and sorting locally cannot recover recent
+  // games that were never in the response.
+  const rows = await bdl.getAllPlayerGameStats(params.sport, {
     playerIDs: [bdlPlayerID],
     seasons: season,
     startDate,
     endDate,
-    perPage: 100,
   });
-
-  const rows = (raw.data ?? []) as Record<string, unknown>[];
 
   // ---- DATE RESOLUTION ----
   // Join stat rows to games so each row gets a real date and opponent.
@@ -216,18 +216,22 @@ export async function getBdlPlayerHitRate(
   >();
   try {
     const teamIDs = bdlTeamID ? [bdlTeamID] : undefined;
-    const games = await bdl.getGames(params.sport, {
+    const games = await bdl.getAllGames(params.sport, {
       teamIDs,
       seasons: season,
       startDate,
       endDate,
-      perPage: 100,
     });
-    for (const g of games.data ?? []) {
+    for (const g of games) {
       const gid = String((g as unknown as { id?: number }).id ?? "");
       if (!gid) continue;
       const home = g.home_team;
-      const away = g.visitor_team;
+      // Field name varies: MLB has used away_team where NBA-style feeds use
+      // visitor_team. Checking both stops opponents rendering as "unknown" on
+      // half the log, which is what happened on the first dated run.
+      const away =
+        g.visitor_team ??
+        (g as unknown as { away_team?: typeof g.home_team }).away_team;
       const isHome = bdlTeamID !== undefined && home?.id === bdlTeamID;
       const opp = isHome ? away : home;
       gameDates.set(gid, {
