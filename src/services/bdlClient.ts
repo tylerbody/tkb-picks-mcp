@@ -195,22 +195,54 @@ export class BDLClient {
    *
    * NECESSARY BECAUSE THE TWO PROVIDERS USE DIFFERENT ID SPACES: SGO returns
    * "KETEL_MARTE_1_MLB" while BDL uses integers. There is no shared key, so any
-   * migration of stats to BDL has to bridge them by name. Name matching is
-   * inherently fuzzy, which is why this returns ALL candidates rather than
-   * silently picking one - resolving "Will Smith" to the wrong player would
-   * produce a confident, completely wrong hit rate.
+   * migration of stats to BDL has to bridge them by name.
+   *
+   * CONFIRMED VIA LIVE PROBE (2026-08-10): BDL's `search` parameter matches on
+   * LAST NAME ONLY. Passing "Ketel Marte" returns ZERO results; passing "Marte"
+   * returns 18. Sending the full name would therefore have failed on every
+   * lookup and fallen back to SportsGameOdds silently - the entity saving this
+   * whole migration exists for would never have materialised, and nothing would
+   * have indicated why.
+   *
+   * So: search on the last token, then filter locally on the full name. Name
+   * matching stays inherently fuzzy, which is why ALL candidates are returned
+   * rather than one being picked - "Marte" alone spans Ketel, Starling, Noelvi
+   * and Yunior, all active players. Resolving to the wrong one produces a fully
+   * populated, plausible, completely wrong hit rate.
    */
   async searchPlayers(
     sport: SportKey,
     search: string
   ): Promise<{ data: { id: number; first_name: string; last_name: string; team?: BDLTeam }[] }> {
     try {
+      // Search the last token - BDL matches last name, not full name.
+      const tokens = search.trim().split(/\s+/);
+      const lastName = tokens.length > 1 ? tokens[tokens.length - 1]! : search;
+
       const response = await this.http.get<{
         data: { id: number; first_name: string; last_name: string; team?: BDLTeam }[];
       }>(this.buildPath(sport, "players"), {
-        params: { search, per_page: 25 },
+        params: { search: lastName, per_page: 100 },
       });
-      return response.data;
+
+      const all = response.data.data ?? [];
+
+      // When a full name was supplied, narrow locally to those that actually
+      // match it. Fall back to the unfiltered set so the caller still sees the
+      // candidates and can decide, rather than getting a bare "not found".
+      if (tokens.length > 1) {
+        const full = search.trim().toLowerCase();
+        const exact = all.filter(
+          (p) => `${p.first_name} ${p.last_name}`.trim().toLowerCase() === full
+        );
+        if (exact.length) return { data: exact };
+
+        const firstName = tokens[0]!.toLowerCase();
+        const looseFirst = all.filter((p) => p.first_name.toLowerCase() === firstName);
+        if (looseFirst.length) return { data: looseFirst };
+      }
+
+      return { data: all };
     } catch (err) {
       throw formatBDLError(err, `${sport} player search "${search}"`, sport);
     }

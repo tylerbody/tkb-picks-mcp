@@ -63,10 +63,10 @@ function num(row: Record<string, unknown>, keys: string[]): number | null {
  * are missing - a half-computed total base count is worse than no answer.
  */
 function deriveTotalBases(row: Record<string, unknown>): number | null {
-  const hits = num(row, ["hits", "h", "batting_hits"]);
-  const doubles = num(row, ["doubles", "double", "d", "batting_doubles", "2b"]);
-  const triples = num(row, ["triples", "triple", "t", "batting_triples", "3b"]);
-  const homeRuns = num(row, ["home_runs", "homeruns", "hr", "batting_homeRuns"]);
+  const hits = num(row, ["hits"]);
+  const doubles = num(row, ["doubles"]);
+  const triples = num(row, ["triples"]);
+  const homeRuns = num(row, ["hr"]);
 
   if (hits === null || doubles === null || triples === null || homeRuns === null) {
     return null;
@@ -82,49 +82,49 @@ export const STAT_RESOLVERS: StatResolver[] = [
     statID: "batting_hits",
     label: "Hits",
     sports: ["mlb"],
-    candidates: ["hits", "h", "batting_hits"],
+    candidates: ["hits"],
   },
   {
     statID: "batting_totalBases",
     label: "Total Bases",
     sports: ["mlb"],
-    candidates: ["total_bases", "totalBases", "tb"],
+    candidates: ["total_bases"],
     derive: deriveTotalBases,
   },
   {
     statID: "batting_RBI",
     label: "Runs Batted In",
     sports: ["mlb"],
-    candidates: ["rbi", "rbis", "runs_batted_in", "batting_RBI"],
+    candidates: ["rbi"],
   },
   {
     statID: "batting_homeRuns",
     label: "Home Runs",
     sports: ["mlb"],
-    candidates: ["home_runs", "homeruns", "hr", "batting_homeRuns"],
+    candidates: ["hr"],
   },
   {
     statID: "batting_doubles",
     label: "Doubles",
     sports: ["mlb"],
-    candidates: ["doubles", "double", "2b", "batting_doubles"],
+    candidates: ["doubles"],
   },
   {
     statID: "batting_triples",
     label: "Triples",
     sports: ["mlb"],
-    candidates: ["triples", "triple", "3b", "batting_triples"],
+    candidates: ["triples"],
   },
   {
     statID: "batting_singles",
     label: "Singles",
     sports: ["mlb"],
-    candidates: ["singles", "single", "1b", "batting_singles"],
+    candidates: [],
     derive: (row) => {
-      const hits = num(row, ["hits", "h"]);
-      const d = num(row, ["doubles", "2b"]);
-      const t = num(row, ["triples", "3b"]);
-      const hr = num(row, ["home_runs", "hr"]);
+      const hits = num(row, ["hits"]);
+      const d = num(row, ["doubles"]);
+      const t = num(row, ["triples"]);
+      const hr = num(row, ["hr"]);
       if (hits === null || d === null || t === null || hr === null) return null;
       const s = hits - d - t - hr;
       return s >= 0 ? s : null;
@@ -134,19 +134,19 @@ export const STAT_RESOLVERS: StatResolver[] = [
     statID: "batting_basesOnBalls",
     label: "Walks (batter)",
     sports: ["mlb"],
-    candidates: ["walks", "bb", "base_on_balls", "bases_on_balls", "batting_basesOnBalls"],
+    candidates: ["bb"],
   },
   {
     statID: "batting_strikeouts",
     label: "Strikeouts (batter)",
     sports: ["mlb"],
-    candidates: ["strikeouts", "so", "k", "batting_strikeouts"],
+    candidates: ["k"],
   },
   {
     statID: "batting_stolenBases",
     label: "Stolen Bases",
     sports: ["mlb"],
-    candidates: ["stolen_bases", "sb", "batting_stolenBases"],
+    candidates: ["stolen_bases"],
   },
 
   // ---- MLB pitching ----
@@ -157,48 +157,46 @@ export const STAT_RESOLVERS: StatResolver[] = [
     statID: "pitching_strikeouts",
     label: "Strikeouts (pitcher)",
     sports: ["mlb"],
-    candidates: [
-      "pitching_strikeouts",
-      "strikeouts_pitched",
-      "pitcher_strikeouts",
-      "strikeouts",
-      "so",
-      "k",
-    ],
+    // CONFIRMED via live probe 2026-08-10: BDL prefixes pitching counterparts
+    // with p_ (p_k, p_hits, p_bb, p_hr, p_runs) precisely because the unprefixed
+    // names are the BATTING versions on the same row.
+    //
+    // "k", "so" and "strikeouts" are DELIBERATELY EXCLUDED here. "k" is the
+    // batter strikeout field and is populated on every batting row. Including it
+    // as a fallback would let a pitcher-strikeout lookup silently return how many
+    // times a hitter struck out - a fully populated, plausible, completely wrong
+    // number. That is the exact silent-failure class this file exists to prevent.
+    candidates: ["p_k"],
   },
   {
     statID: "pitching_earnedRuns",
     label: "Earned Runs",
     sports: ["mlb"],
-    candidates: ["earned_runs", "er", "pitching_earnedRuns"],
+    candidates: ["er"],
   },
   {
     statID: "pitching_hits",
     label: "Hits Allowed",
     sports: ["mlb"],
-    candidates: ["hits_allowed", "pitching_hits", "hits_against"],
+    // p_hits, not hits - "hits" is the batting field on the same row.
+    candidates: ["p_hits"],
   },
   {
     statID: "pitching_basesOnBalls",
     label: "Walks (pitcher)",
     sports: ["mlb"],
-    candidates: [
-      "walks_allowed",
-      "pitching_basesOnBalls",
-      "base_on_balls_allowed",
-      "walks",
-      "bb",
-    ],
+    // p_bb, not bb - "bb" is the batter walk field on the same row.
+    candidates: ["p_bb"],
   },
   {
     statID: "pitching_outs",
     label: "Outs",
     sports: ["mlb"],
-    candidates: ["outs", "outs_recorded", "pitching_outs"],
+    candidates: ["pitching_outs"],
     // Innings pitched is conventionally "6.2" meaning 6 innings + 2 outs, NOT 6.2
     // innings. Multiplying by 3 would be wrong. Parse the decimal as thirds.
     derive: (row) => {
-      const ip = num(row, ["innings_pitched", "ip", "innings"]);
+      const ip = num(row, ["ip"]);
       if (ip === null) return null;
       const whole = Math.floor(ip);
       const frac = Math.round((ip - whole) * 10);
@@ -213,7 +211,7 @@ export const STAT_RESOLVERS: StatResolver[] = [
     statID: "points",
     label: "Runs / Points",
     sports: ["mlb"],
-    candidates: ["runs", "r", "runs_scored"],
+    candidates: ["runs"],
   },
 
   // ---- WNBA ----
