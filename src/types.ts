@@ -348,6 +348,15 @@ export interface HitRateResult {
   gamesConsidered: number; // true sample size, after excluding DNP games
   gamesHit: number;
   gamesExcludedDNP: number;
+  /**
+   * Game-by-game log, ORDERED NEWEST FIRST. log[0] is the most recent appearance.
+   *
+   * Stated explicitly because reading this ordering backwards has already caused a
+   * published error: a hitter's most recent game was described as the oldest,
+   * turning "7 total bases last night" into "held to zero in five straight". Every
+   * value in the array was correct; only the direction was assumed. Each entry
+   * carries its own `date` - use it rather than relying on position.
+   */
   log: GameLogEntry[];
   // Both directions computed from the same appearance set, so an UNDER can be
   // evaluated without a second call or manual inversion.

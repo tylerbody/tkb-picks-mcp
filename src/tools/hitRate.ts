@@ -73,6 +73,12 @@ Returns: gamesConsidered (true sample size), gamesHit, gamesExcludedDNP, the ful
 game-by-game log, and SEASON PROVENANCE - how many counted games came from the
 current season vs a prior one, plus a warning when the sample crosses that boundary.
 
+LOG ORDERING - READ THIS BEFORE DESCRIBING ANY STREAK: the log is NEWEST FIRST.
+log[0] is the most recent appearance. Reading it backwards has already produced a
+published error, turning a 7-total-base game from last night into "held to zero in
+five consecutive starts". Every number was right; only the direction was assumed.
+Each entry carries its own date - cite the date, never the position.
+
 WHY SEASON PROVENANCE MATTERS: the lookback window is a rolling date range, so early
 in a season it reaches back into the previous one. A hit rate built entirely on last
 season's games is NOT current form, and writing it up as though it were is misleading.

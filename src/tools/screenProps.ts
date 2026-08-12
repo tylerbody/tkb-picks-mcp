@@ -73,7 +73,10 @@ interface ScreenedProp {
   breakevenPct: number;
   edge: number;
   sample: number;
-  recentValues: (number | null)[];
+  /** The single most recent appearance, named so it cannot be inferred by position. */
+  mostRecentGame: { date: string; value: number | null } | null;
+  /** Newest first. Each entry carries its own date so direction is never ambiguous. */
+  recentGamesNewestFirst: { date: string; value: number | null }[];
   availabilityFlag: string;
   availabilityNote: string | null;
   seasonWarning: string | null;
@@ -356,10 +359,27 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
             breakevenPct: Number(breakevenPct.toFixed(3)),
             edge: Number(edge.toFixed(3)),
             sample: rate.gamesConsidered,
-            recentValues: rate.log
+            // DATED AND LABELLED DELIBERATELY. This was a bare number array
+            // (`recentValues`) sorted newest-first, and on 2026-08-12 it was read
+            // left-to-right as oldest-to-newest while writing a thread. Gunnar
+            // Henderson's [7,0,0,0,0,0] - a 7-total-base game LAST NIGHT followed
+            // by five earlier zeros - got published as "held to zero in five
+            // consecutive starts", the exact inverse of the truth.
+            //
+            // Every existing guardrail passed, because none of them were wrong:
+            // the odds were real, the sample was real, the 13-of-15 hit rate was
+            // computed correctly. The error was in PROSE describing the array, and
+            // no data check can catch that. So the fix is to make the ordering
+            // impossible to misread rather than merely documented: each value now
+            // carries its own date and the most recent game is named outright.
+            mostRecentGame: (() => {
+              const g = rate.log.find((x) => x.statValue !== null);
+              return g ? { date: g.date.slice(0, 10), value: g.statValue } : null;
+            })(),
+            recentGamesNewestFirst: rate.log
               .filter((g) => g.statValue !== null)
               .slice(0, 6)
-              .map((g) => g.statValue),
+              .map((g) => ({ date: g.date.slice(0, 10), value: g.statValue })),
             availabilityFlag: rate.recentAvailability.flag,
             availabilityNote: rate.recentAvailability.note,
             seasonWarning: rate.seasonWarning,
