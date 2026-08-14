@@ -26,6 +26,36 @@ import type {
 export class BDLClient {
   private http: AxiosInstance;
 
+  /**
+   * ---- CLIENT-SIDE REQUEST THROTTLE ----
+   *
+   * BALLDONTLIE allows 60 requests/minute on ALL-STAR. Caching removes most of
+   * the duplication, but a wide screen can still burst: 18 players each needing
+   * a search plus a paginated stats fetch is ~40 requests fired within a couple
+   * of seconds under 3-way concurrency.
+   *
+   * A 429 here is worse than a slow request, because the aggregator treats any
+   * failure as a reason to fall back to SportsGameOdds - which costs real
+   * entities. Spacing requests slightly is strictly cheaper than being rate
+   * limited into the expensive path.
+   *
+   * 1100ms between requests holds ~54/min, comfortably under the ceiling with
+   * room for the retry the interceptor does not do.
+   */
+  private static readonly MIN_REQUEST_GAP_MS = 1100;
+  private lastRequestAt = 0;
+  private queue: Promise<void> = Promise.resolve();
+
+  private throttle<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(async () => {
+      const wait = BDLClient.MIN_REQUEST_GAP_MS - (Date.now() - this.lastRequestAt);
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      this.lastRequestAt = Date.now();
+    });
+    this.queue = run.catch(() => undefined);
+    return run.then(fn);
+  }
+
   constructor(apiKey: string) {
     this.http = axios.create({
       baseURL: BDL_BASE_URL,
@@ -174,7 +204,7 @@ export class BDLClient {
     next_cursor?: number | null;
   }> {
     try {
-      const response = await this.http.get<{
+      const response = await this.throttle(() => this.http.get<{
         data: unknown[];
         meta?: { next_cursor?: number | null; per_page?: number };
         next_cursor?: number | null;
@@ -188,11 +218,40 @@ export class BDLClient {
           cursor: params.cursor,
           per_page: params.perPage ?? 100,
         },
-      });
+      }));
       return response.data;
     } catch (err) {
       throw formatBDLError(err, `${sport} player game stats`, sport);
     }
+  }
+
+  /**
+   * ---- PER-PLAYER CACHING ----
+   *
+   * WHY THIS IS NECESSARY, NOT AN OPTIMISATION. Measured 2026-08-14: a single
+   * screen fell back to SportsGameOdds on 56 of 74 markets, and the reason was
+   * BALLDONTLIE's own rate limit (60 req/min on ALL-STAR), not a data problem.
+   *
+   * The caller memoises hit rates on playerID|statID|line, which is correct for
+   * ITS purposes but means one player with 8 posted markets triggers 8 separate
+   * BDL round trips - 8 name searches and 8 game-log fetches - when a single
+   * fetch of that player's rows answers all 8 stats. At 3-way concurrency that
+   * saturates the minute budget in seconds.
+   *
+   * Caching here rather than in the aggregator means every caller benefits and
+   * the fix cannot be bypassed by a new call site. Both caches are keyed on the
+   * exact query and expire together, so a stale roster or a changed date window
+   * still refetches.
+   */
+  private playerSearchCache = new Map<
+    string,
+    { data: { id: number; first_name: string; last_name: string; team?: BDLTeam }[]; at: number }
+  >();
+  private playerStatsCache = new Map<string, { rows: Record<string, unknown>[]; at: number }>();
+  private static readonly PLAYER_TTL_MS = 15 * 60 * 1000;
+
+  private static fresh(at: number): boolean {
+    return Date.now() - at < BDLClient.PLAYER_TTL_MS;
   }
 
   /**
@@ -219,35 +278,43 @@ export class BDLClient {
     sport: SportKey,
     search: string
   ): Promise<{ data: { id: number; first_name: string; last_name: string; team?: BDLTeam }[] }> {
+    const cacheKey = `${sport}|${search.trim().toLowerCase()}`;
+    const hit = this.playerSearchCache.get(cacheKey);
+    if (hit && BDLClient.fresh(hit.at)) return { data: hit.data };
+
     try {
       // Search the last token - BDL matches last name, not full name.
       const tokens = search.trim().split(/\s+/);
       const lastName = tokens.length > 1 ? tokens[tokens.length - 1]! : search;
 
-      const response = await this.http.get<{
+      const response = await this.throttle(() => this.http.get<{
         data: { id: number; first_name: string; last_name: string; team?: BDLTeam }[];
       }>(this.buildPath(sport, "players"), {
         params: { search: lastName, per_page: 100 },
-      });
+      }));
 
       const all = response.data.data ?? [];
 
       // When a full name was supplied, narrow locally to those that actually
       // match it. Fall back to the unfiltered set so the caller still sees the
       // candidates and can decide, rather than getting a bare "not found".
+      let resolved = all;
       if (tokens.length > 1) {
         const full = search.trim().toLowerCase();
         const exact = all.filter(
           (p) => `${p.first_name} ${p.last_name}`.trim().toLowerCase() === full
         );
-        if (exact.length) return { data: exact };
-
-        const firstName = tokens[0]!.toLowerCase();
-        const looseFirst = all.filter((p) => p.first_name.toLowerCase() === firstName);
-        if (looseFirst.length) return { data: looseFirst };
+        if (exact.length) {
+          resolved = exact;
+        } else {
+          const firstName = tokens[0]!.toLowerCase();
+          const looseFirst = all.filter((p) => p.first_name.toLowerCase() === firstName);
+          if (looseFirst.length) resolved = looseFirst;
+        }
       }
 
-      return { data: all };
+      this.playerSearchCache.set(cacheKey, { data: resolved, at: Date.now() });
+      return { data: resolved };
     } catch (err) {
       throw formatBDLError(err, `${sport} player search "${search}"`, sport);
     }
@@ -300,6 +367,22 @@ export class BDLClient {
       maxPages?: number;
     } = {}
   ): Promise<Record<string, unknown>[]> {
+    // CACHED PER PLAYER + WINDOW. One player's rows answer every stat market
+    // posted on them - hits, total bases, RBI, singles, walks and so on all read
+    // from the same 15 rows. Without this, screening a player with 8 markets
+    // meant 8 identical paginated fetches, which is what exhausted BDL's 60
+    // req/min budget and forced 56 of 74 rates back onto SportsGameOdds.
+    const cacheKey = [
+      sport,
+      (params.playerIDs ?? []).join(","),
+      (params.seasons ?? []).join(","),
+      params.startDate ?? "",
+      params.endDate ?? "",
+    ].join("|");
+
+    const hit = this.playerStatsCache.get(cacheKey);
+    if (hit && BDLClient.fresh(hit.at)) return hit.rows;
+
     const all: Record<string, unknown>[] = [];
     let cursor: number | undefined = undefined;
     let pages = 0;
@@ -311,6 +394,19 @@ export class BDLClient {
       cursor = BDLClient.nextCursorOf(page);
       pages++;
     } while (cursor && pages < maxPages);
+
+    this.playerStatsCache.set(cacheKey, { rows: all, at: Date.now() });
+    if (this.playerStatsCache.size > 200) {
+      let oldestKey: string | null = null;
+      let oldestAt = Infinity;
+      for (const [k, v] of this.playerStatsCache) {
+        if (v.at < oldestAt) {
+          oldestAt = v.at;
+          oldestKey = k;
+        }
+      }
+      if (oldestKey) this.playerStatsCache.delete(oldestKey);
+    }
 
     return all;
   }
