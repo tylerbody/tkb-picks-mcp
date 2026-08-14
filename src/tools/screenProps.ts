@@ -9,6 +9,9 @@ import {
   computeEdge,
 } from "../services/oddsPricing.js";
 import { getPlayerHitRate } from "../services/hitRateAggregator.js";
+import { getBdlPlayerHitRate } from "../services/bdlHitRateAggregator.js";
+import { isStatSupported } from "../services/bdlStatMap.js";
+import type { BDLClient } from "../services/bdlClient.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
 
 /**
@@ -45,6 +48,91 @@ import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
  */
 
 const HIT_RATE_CONCURRENCY = 3;
+
+/** Playing-time picture for one player, derived from real team game history. */
+export interface AvailabilityInfo {
+  gamesPlayed: number;
+  teamGamesScanned: number;
+  playRate: number;
+  flag: "OK" | "IRREGULAR";
+  note: string | null;
+}
+
+/**
+ * ONE SGO fetch per team, reused for every player on that roster.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM THE HIT RATE. BALLDONTLIE returns only games a
+ * player actually appeared in, so a bench bat who has started 8 of the last 30
+ * looks identical to an everyday regular. The hit rate is correct either way -
+ * what disappears is the CONTEXT that the rate was compiled from sporadic
+ * appearances.
+ *
+ * That context has repeatedly been the deciding factor: Bobby Witt Jr. screened
+ * 12 of 15 while playing 15 of 28 team games, Cameron Brink 11 of 15 while
+ * missing 8 of 23, and Azzi Fudd 12 of 15 having not played in a week. Each
+ * would have been published on the strength of the rate alone.
+ *
+ * Cost is bounded: the client caches team histories, so a two-team game pays
+ * roughly 60 entities total no matter how many players get screened. That is a
+ * deliberate trade - a small fixed cost to keep a safeguard that has caught
+ * something nearly every day.
+ */
+async function probeTeamAvailability(
+  sgo: SGOClient,
+  sport: SportKey,
+  teamID: string
+): Promise<Map<string, AvailabilityInfo>> {
+  const result = new Map<string, AvailabilityInfo>();
+  try {
+    const now = new Date();
+    const windowStart = new Date(now);
+    windowStart.setDate(windowStart.getDate() - 60);
+
+    const events = await sgo.getAllEvents({
+      leagueID: sgo.leagueIDFor(sport),
+      teamID,
+      finalized: true,
+      startsAfter: windowStart.toISOString(),
+      startsBefore: now.toISOString(),
+      // Narrow the odds payload to a single market - only results are read here.
+      oddIDs: "points-home-game-ml-home",
+      limit: 30,
+    });
+
+    const teamGames = events.length;
+    if (teamGames === 0) return result;
+
+    const appearances = new Map<string, number>();
+    for (const event of events) {
+      const period = event.results?.["game"];
+      if (!period) continue;
+      for (const playerID of Object.keys(period)) {
+        appearances.set(playerID, (appearances.get(playerID) ?? 0) + 1);
+      }
+    }
+
+    for (const [playerID, played] of appearances) {
+      const playRate = played / teamGames;
+      const irregular = playRate < 0.7;
+      result.set(playerID, {
+        gamesPlayed: played,
+        teamGamesScanned: teamGames,
+        playRate: Number(playRate.toFixed(2)),
+        flag: irregular ? "IRREGULAR" : "OK",
+        note: irregular
+          ? `PLAYING TIME RISK: appeared in only ${played} of the last ${teamGames} ` +
+            `team games. This player is not an everyday lock. CONFIRM THE POSTED ` +
+            `LINEUP before using this prop, and do not describe the hit rate as ` +
+            `current form without noting the missed time.`
+          : null,
+      });
+    }
+  } catch {
+    // A failed probe means no flag, not a wrong flag. Screening continues and the
+    // caller is told availability was unavailable rather than being told "OK".
+  }
+  return result;
+}
 
 /** Combo stats the hit-rate path cannot compute - there is no per-component log. */
 const UNCOUNTABLE_STATIDS = new Set([
@@ -106,7 +194,7 @@ async function mapWithConcurrency<T, R>(
   return out;
 }
 
-export function registerScreenPropsTool(server: McpServer, sgo: SGOClient) {
+export function registerScreenPropsTool(server: McpServer, sgo: SGOClient, bdl: BDLClient) {
   server.registerTool(
     "tkb_screen_props",
     {
@@ -303,9 +391,48 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
         });
       }
 
-      // Hit rates are memoised per player+stat+line, so both sides of a market
-      // share a single upstream game-log fetch.
+      // ---- BDL-FIRST HIT RATES WITH A SHARED AVAILABILITY PROBE ----
+      //
+      // WHY THIS IS SPLIT IN TWO. Hit rates and playing-time risk come from the
+      // same SGO fetch today, and that fetch is what makes screening expensive:
+      // SGO has no player game-log endpoint, so computing one rate means pulling
+      // a whole TEAM's recent history. A starting pitcher appears in roughly 1 of
+      // every 5 team games, so collecting 10 starts scans up to 140 events.
+      // Measured 2026-08-14: ~1,080 entities per game, and two pitcher props can
+      // cost more than all 18 hitters combined.
+      //
+      // BALLDONTLIE returns rows for ONE PLAYER directly and has no monthly
+      // object cap, so moving the rate calculation there removes the cost almost
+      // entirely. Verified game-for-game against SGO on 2026-08-12.
+      //
+      // BUT BDL ONLY RETURNS GAMES THE PLAYER APPEARED IN. DNPs are invisible,
+      // which means the IRREGULAR playing-time flag cannot be computed from it.
+      // That flag is not decorative - it vetoed Bobby Witt Jr. (15 of 28 team
+      // games), Gary Sanchez, Rhys Hoskins and Cameron Brink in a single week,
+      // each of whom screened with a strong hit rate while quietly missing time.
+      // Dropping it to save entities would trade a real accuracy safeguard for
+      // money, which is the wrong trade.
+      //
+      // So: rates come from BDL (cheap, per-player), and availability comes from
+      // ONE SGO team-history fetch per team, shared across every player on that
+      // roster via the client's existing cache. Two teams per game means the
+      // safeguard costs ~60 entities total rather than ~30 per player.
       const rateCache = new Map<string, Awaited<ReturnType<typeof getPlayerHitRate>>>();
+      const availabilityByTeam = new Map<string, Map<string, AvailabilityInfo>>();
+      let bdlServed = 0;
+      let sgoFallback = 0;
+
+      const availabilityFor = async (
+        teamID: string,
+        playerID: string
+      ): Promise<AvailabilityInfo | null> => {
+        let team = availabilityByTeam.get(teamID);
+        if (!team) {
+          team = await probeTeamAvailability(sgo, input.sport as SportKey, teamID);
+          availabilityByTeam.set(teamID, team);
+        }
+        return team.get(playerID) ?? null;
+      };
 
       const screened = await mapWithConcurrency(
         candidates,
@@ -317,20 +444,44 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           const key = `${c.playerID}|${c.statID}|${c.line}`;
           let rate = rateCache.get(key);
           if (!rate) {
-            rate = await getPlayerHitRate(sgo, {
-              sport: input.sport as SportKey,
-              teamID: player.teamID,
-              playerID: c.playerID,
-              playerName: player.name,
-              statID: c.statID,
-              line: c.line,
-              direction: c.side,
-            });
+            // Try BDL first. Any failure - tier gate, unmapped stat, ambiguous
+            // name, unresolvable dates - falls back to SGO rather than degrading
+            // the answer. Cost is the thing that degrades, never correctness.
+            if (isStatSupported(input.sport as SportKey, c.statID)) {
+              try {
+                const bdlRate = await getBdlPlayerHitRate(bdl, {
+                  sport: input.sport as SportKey,
+                  playerName: player.name,
+                  statID: c.statID,
+                  line: c.line,
+                  direction: c.side,
+                  teamName: teamNames[player.teamID] ?? undefined,
+                });
+                rate = bdlRate as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
+                bdlServed++;
+              } catch {
+                rate = undefined;
+              }
+            }
+            if (!rate) {
+              rate = await getPlayerHitRate(sgo, {
+                sport: input.sport as SportKey,
+                teamID: player.teamID,
+                playerID: c.playerID,
+                playerName: player.name,
+                statID: c.statID,
+                line: c.line,
+                direction: c.side,
+              });
+              sgoFallback++;
+            }
             rateCache.set(key, rate);
           }
 
           if (!rate.sampleSufficient) return null;
           if (rate.gamesConsidered < input.minSample) return null;
+
+          const avail = await availabilityFor(player.teamID, c.playerID);
 
           const hits = c.side === "over" ? rate.overHits : rate.underHits;
           const hitRatePct = hits / rate.gamesConsidered;
@@ -380,8 +531,12 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
               .filter((g) => g.statValue !== null)
               .slice(0, 6)
               .map((g) => ({ date: g.date.slice(0, 10), value: g.statValue })),
-            availabilityFlag: rate.recentAvailability.flag,
-            availabilityNote: rate.recentAvailability.note,
+            // From the shared per-team SGO probe, NOT from the rate object. The
+            // BDL path cannot see DNPs, so its own flag would read "OK" for a
+            // player who has been sitting. Falls back to the rate's flag only
+            // when the probe returned nothing for this player.
+            availabilityFlag: avail?.flag ?? rate.recentAvailability.flag,
+            availabilityNote: avail?.note ?? rate.recentAvailability.note,
             seasonWarning: rate.seasonWarning,
           };
         }
@@ -409,9 +564,22 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
             `priced markets across ${allowedPlayerIDs.size} players. Use roundedOdds when ` +
             `publishing. Check availabilityFlag before locking any pick.`;
 
+      // Routing visibility. If bdlServed is 0 on a sport that should be mapped,
+      // every rate came from SGO and the screen cost roughly 10x what it should -
+      // worth noticing immediately rather than discovering it at the quota wall.
+      const routing =
+        bdlServed + sgoFallback === 0
+          ? ""
+          : `\n\nRate sources: ${bdlServed} from BALLDONTLIE (no SGO quota), ` +
+            `${sgoFallback} from SportsGameOdds.` +
+            (sgoFallback > bdlServed && bdlServed === 0
+              ? ` ALL rates fell back to SGO - check tier access with tkb_debug_bdl_stats.`
+              : "") +
+            ` Availability probed across ${availabilityByTeam.size} team(s).`;
+
       return {
         content: [
-          { type: "text" as const, text: `${summary}\n\n${JSON.stringify(top, null, 2)}` },
+          { type: "text" as const, text: `${summary}${routing}\n\n${JSON.stringify(top, null, 2)}` },
         ],
         structuredContent: {
           eventID: input.eventID,
