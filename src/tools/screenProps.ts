@@ -421,6 +421,7 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       const availabilityByTeam = new Map<string, Map<string, AvailabilityInfo>>();
       let bdlServed = 0;
       let sgoFallback = 0;
+      const bdlFailures = new Map<string, number>();
 
       const availabilityFor = async (
         teamID: string,
@@ -447,6 +448,13 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
             // Try BDL first. Any failure - tier gate, unmapped stat, ambiguous
             // name, unresolvable dates - falls back to SGO rather than degrading
             // the answer. Cost is the thing that degrades, never correctness.
+            //
+            // FAILURE REASONS ARE COUNTED, NOT SWALLOWED. A silent catch here
+            // produced exactly one bad outcome on 2026-08-14: 217 of 235 rates
+            // fell back to SGO, the screen cost 1,195 entities instead of the
+            // projected 100, and the output gave no indication why. A fallback
+            // that hides its own cause is indistinguishable from a fallback that
+            // never fires.
             if (isStatSupported(input.sport as SportKey, c.statID)) {
               try {
                 const bdlRate = await getBdlPlayerHitRate(bdl, {
@@ -459,9 +467,29 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
                 });
                 rate = bdlRate as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
                 bdlServed++;
-              } catch {
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                // Bucket by cause so the pattern is visible at a glance rather
+                // than requiring 200 individual messages to be read.
+                const bucket = msg.includes("AMBIGUOUS PLAYER")
+                  ? "ambiguous name"
+                  : msg.includes("No BALLDONTLIE player found")
+                    ? "player not found"
+                    : msg.includes("DATE RESOLUTION FAILED")
+                      ? "dates unresolvable"
+                      : msg.includes("auth error") || msg.includes("401")
+                        ? "tier gate"
+                        : msg.includes("rate limit") || msg.includes("429")
+                          ? "BDL rate limit"
+                          : "other";
+                bdlFailures.set(bucket, (bdlFailures.get(bucket) ?? 0) + 1);
                 rate = undefined;
               }
+            } else {
+              bdlFailures.set(
+                "stat not mapped",
+                (bdlFailures.get("stat not mapped") ?? 0) + 1
+              );
             }
             if (!rate) {
               rate = await getPlayerHitRate(sgo, {
@@ -572,8 +600,13 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           ? ""
           : `\n\nRate sources: ${bdlServed} from BALLDONTLIE (no SGO quota), ` +
             `${sgoFallback} from SportsGameOdds.` +
-            (sgoFallback > bdlServed && bdlServed === 0
-              ? ` ALL rates fell back to SGO - check tier access with tkb_debug_bdl_stats.`
+            (bdlFailures.size
+              ? ` BDL fallback reasons: ` +
+                [...bdlFailures.entries()]
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([reason, n]) => `${reason} (${n})`)
+                  .join(", ") +
+                `.`
               : "") +
             ` Availability probed across ${availabilityByTeam.size} team(s).`;
 
