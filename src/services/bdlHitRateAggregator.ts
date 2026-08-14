@@ -116,8 +116,12 @@ export async function resolveBdlPlayerID(
   }
 
   // Exact full-name match as a last resort before giving up.
+  // Accent-insensitive. "Eugenio Suarez" from SGO must match "Eugenio Suárez"
+  // from BDL, or the disambiguator refuses a name it could have resolved.
+  const norm = (v: string) =>
+    v.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
   const exact = results.data.filter(
-    (p) => `${p.first_name} ${p.last_name}`.toLowerCase() === playerName.toLowerCase()
+    (p) => norm(`${p.first_name} ${p.last_name}`) === norm(playerName)
   );
   if (exact.length === 1) {
     const p = exact[0]!;

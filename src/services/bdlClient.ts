@@ -23,6 +23,43 @@ import type {
  * turns out to use a different convention.
  */
 
+/**
+ * Strip diacritics for name matching.
+ *
+ * MEASURED 2026-08-14: a full-roster screen on Marlins @ Reds fell back to
+ * SportsGameOdds on 24 of 191 rates, split evenly between "player not found"
+ * and "ambiguous name". The lineup was Heriberto Hernandez, Eugenio Suarez and
+ * Elly De La Cruz - accented characters and multi-word surnames.
+ *
+ * This is not a rare edge case. A large share of MLB rosters carry one or both,
+ * so leaving it unhandled means a persistent ~13% fallback rate concentrated on
+ * exactly the players most likely to appear in a lineup.
+ */
+function stripAccents(s: string): string {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+/**
+ * Candidate search terms for a player name, longest surname first.
+ *
+ * BDL's `search` matches on last name, but "last name" is ambiguous for
+ * "De La Cruz" - searching "Cruz" returns every Cruz in the league and the
+ * disambiguator correctly refuses to guess. Trying progressively longer
+ * suffixes ("Cruz", then "La Cruz", then "De La Cruz") finds the specific one
+ * without loosening the refusal rule that prevents wrong-player matches.
+ */
+function searchTermsFor(fullName: string): string[] {
+  const tokens = fullName.trim().split(/\s+/);
+  if (tokens.length <= 1) return [fullName.trim()];
+
+  const terms: string[] = [];
+  // Longest surname suffix first: most specific query wins.
+  for (let take = Math.min(3, tokens.length - 1); take >= 1; take--) {
+    terms.push(tokens.slice(tokens.length - take).join(" "));
+  }
+  return [...new Set(terms)];
+}
+
 export class BDLClient {
   private http: AxiosInstance;
 
@@ -283,32 +320,47 @@ export class BDLClient {
     if (hit && BDLClient.fresh(hit.at)) return { data: hit.data };
 
     try {
-      // Search the last token - BDL matches last name, not full name.
       const tokens = search.trim().split(/\s+/);
-      const lastName = tokens.length > 1 ? tokens[tokens.length - 1]! : search;
+      const fullNorm = stripAccents(search.trim().toLowerCase());
+      const firstNorm = stripAccents((tokens[0] ?? "").toLowerCase());
 
-      const response = await this.throttle(() => this.http.get<{
-        data: { id: number; first_name: string; last_name: string; team?: BDLTeam }[];
-      }>(this.buildPath(sport, "players"), {
-        params: { search: lastName, per_page: 100 },
-      }));
+      // Try the most specific surname suffix first, widening only if needed.
+      // Each attempt is throttled, so stopping early genuinely saves budget.
+      let all: { id: number; first_name: string; last_name: string; team?: BDLTeam }[] = [];
+      for (const term of searchTermsFor(search)) {
+        const response = await this.throttle(() => this.http.get<{
+          data: { id: number; first_name: string; last_name: string; team?: BDLTeam }[];
+        }>(this.buildPath(sport, "players"), {
+          params: { search: term, per_page: 100 },
+        }));
+        all = response.data.data ?? [];
+        // An exact accent-insensitive hit means this term was specific enough.
+        const exactHere = all.filter(
+          (p) =>
+            stripAccents(`${p.first_name} ${p.last_name}`.trim().toLowerCase()) === fullNorm
+        );
+        if (exactHere.length) {
+          this.playerSearchCache.set(cacheKey, { data: exactHere, at: Date.now() });
+          return { data: exactHere };
+        }
+        if (all.length) break; // term returned people, just not an exact match
+      }
 
-      const all = response.data.data ?? [];
-
-      // When a full name was supplied, narrow locally to those that actually
-      // match it. Fall back to the unfiltered set so the caller still sees the
-      // candidates and can decide, rather than getting a bare "not found".
+      // Narrow locally, accent-insensitively. Returning ALL candidates when the
+      // name stays ambiguous is deliberate - the caller refuses to guess, which
+      // is what stops a wrong-player hit rate being published.
       let resolved = all;
       if (tokens.length > 1) {
-        const full = search.trim().toLowerCase();
         const exact = all.filter(
-          (p) => `${p.first_name} ${p.last_name}`.trim().toLowerCase() === full
+          (p) =>
+            stripAccents(`${p.first_name} ${p.last_name}`.trim().toLowerCase()) === fullNorm
         );
         if (exact.length) {
           resolved = exact;
         } else {
-          const firstName = tokens[0]!.toLowerCase();
-          const looseFirst = all.filter((p) => p.first_name.toLowerCase() === firstName);
+          const looseFirst = all.filter(
+            (p) => stripAccents(p.first_name.toLowerCase()) === firstNorm
+          );
           if (looseFirst.length) resolved = looseFirst;
         }
       }

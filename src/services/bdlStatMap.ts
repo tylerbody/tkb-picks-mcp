@@ -205,6 +205,35 @@ export const STAT_RESOLVERS: StatResolver[] = [
     },
   },
 
+  // ---- MLB combo stats ----
+  // COMPUTABLE ON THIS PATH ONLY. The SGO aggregator reads one statID out of an
+  // event's results object and has no way to add components together, so these
+  // were excluded outright. A BDL row carries every component, so the sum is
+  // exact rather than approximated.
+  {
+    statID: "batting_hits+runs+rbi",
+    label: "Hits + Runs + RBIs",
+    sports: ["mlb"],
+    candidates: [],
+    derive: (row) => {
+      const h = num(row, ["hits"]);
+      const r = num(row, ["runs"]);
+      const rbi = num(row, ["rbi"]);
+      return h === null || r === null || rbi === null ? null : h + r + rbi;
+    },
+  },
+  {
+    statID: "batting_runs+rbi",
+    label: "Runs + RBIs",
+    sports: ["mlb"],
+    candidates: [],
+    derive: (row) => {
+      const r = num(row, ["runs"]);
+      const rbi = num(row, ["rbi"]);
+      return r === null || rbi === null ? null : r + rbi;
+    },
+  },
+
   // ---- Shared: runs scored ----
   // SGO uses "points" for the winner-determining stat, which in MLB is runs.
   {

@@ -135,6 +135,22 @@ async function probeTeamAvailability(
 }
 
 /** Combo stats the hit-rate path cannot compute - there is no per-component log. */
+/**
+ * Stats the SGO aggregator cannot count.
+ *
+ * SGO exposes one value per statID in an event's results object, with no way to
+ * add components together, so a "Points + Rebounds" line has no countable
+ * source. Publishing a hit rate for one would mean inventing it.
+ *
+ * THE BDL PATH CAN COMPUTE THESE EXACTLY, because a single stat row carries
+ * every component. So the exclusion is now conditional: a combo stat is allowed
+ * through when bdlStatMap has a derivation for it, and blocked otherwise. That
+ * unlocks Points + Rebounds, Reb + Ast, Pts + Reb + Ast and Hits + Runs + RBIs
+ * without loosening the rule that an uncountable stat never gets a rate.
+ *
+ * fantasyScore stays excluded on every path - scoring formulas vary by book and
+ * are not reconstructible from a box score.
+ */
 const UNCOUNTABLE_STATIDS = new Set([
   "batting_hits+runs+rbi",
   "batting_runs+rbi",
@@ -145,6 +161,9 @@ const UNCOUNTABLE_STATIDS = new Set([
   "blocks+steals",
   "fantasyScore",
 ]);
+
+/** Never computable from a box score regardless of provider. */
+const NEVER_COUNTABLE = new Set(["fantasyScore"]);
 
 interface ScreenedProp {
   playerName: string;
@@ -277,7 +296,15 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
 
       const catalog = OU_PROP_MARKETS[input.sport as SportKey] ?? [];
       const wanted = catalog.filter((m) => {
-        if (UNCOUNTABLE_STATIDS.has(m.statID)) return false;
+        // Blocked only if BDL also cannot derive it. fantasyScore is never
+        // countable; the rest become countable once a BDL derivation exists.
+        if (NEVER_COUNTABLE.has(m.statID)) return false;
+        if (
+          UNCOUNTABLE_STATIDS.has(m.statID) &&
+          !isStatSupported(input.sport as SportKey, m.statID)
+        ) {
+          return false;
+        }
         if (input.markets && !input.markets.includes(m.label)) return false;
         return true;
       });
@@ -417,7 +444,16 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       // ONE SGO team-history fetch per team, shared across every player on that
       // roster via the client's existing cache. Two teams per game means the
       // safeguard costs ~60 entities total rather than ~30 per player.
-      const rateCache = new Map<string, Awaited<ReturnType<typeof getPlayerHitRate>>>();
+      // PROMISES, NOT VALUES. Three workers run concurrently, so storing only
+      // resolved rates let all three miss the same key before any of them wrote
+      // it - triggering three identical upstream fetches. Caching the in-flight
+      // promise means the second and third callers await the first one's work.
+      // This is what inflated the source counters on 2026-08-14 (235 counted
+      // computations across ~120 unique player+stat+line keys).
+      const rateCache = new Map<
+        string,
+        Promise<Awaited<ReturnType<typeof getPlayerHitRate>>>
+      >();
       const availabilityByTeam = new Map<string, Map<string, AvailabilityInfo>>();
       let bdlServed = 0;
       let sgoFallback = 0;
@@ -443,8 +479,10 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           if (!player) return null;
 
           const key = `${c.playerID}|${c.statID}|${c.line}`;
-          let rate = rateCache.get(key);
-          if (!rate) {
+          let pending = rateCache.get(key);
+          if (!pending) {
+            pending = (async () => {
+            let rate: Awaited<ReturnType<typeof getPlayerHitRate>> | undefined;
             // Try BDL first. Any failure - tier gate, unmapped stat, ambiguous
             // name, unresolvable dates - falls back to SGO rather than degrading
             // the answer. Cost is the thing that degrades, never correctness.
@@ -503,8 +541,11 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
               });
               sgoFallback++;
             }
-            rateCache.set(key, rate);
+            return rate;
+            })();
+            rateCache.set(key, pending);
           }
+          const rate = await pending;
 
           if (!rate.sampleSufficient) return null;
           if (rate.gamesConsidered < input.minSample) return null;
@@ -608,7 +649,26 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
                   .join(", ") +
                 `.`
               : "") +
-            ` Availability probed across ${availabilityByTeam.size} team(s).`;
+            (() => {
+              // REPORT COVERAGE, NOT ATTEMPTS. A failed probe returns an empty
+              // map but still counts as a "probed team", so counting teams made
+              // a total failure look identical to a clean slate - the precise
+              // blind spot this safeguard exists to close.
+              const covered = [...availabilityByTeam.values()].reduce(
+                (n, m) => n + m.size,
+                0
+              );
+              const flagged = [...availabilityByTeam.values()].reduce(
+                (n, m) => n + [...m.values()].filter((a) => a.flag === "IRREGULAR").length,
+                0
+              );
+              return covered === 0
+                ? ` AVAILABILITY UNAVAILABLE: the playing-time probe returned no data for ` +
+                  `${availabilityByTeam.size} team(s), so no IRREGULAR flag can be trusted ` +
+                  `on this screen. Confirm lineups manually.`
+                : ` Availability: ${covered} player(s) covered across ` +
+                  `${availabilityByTeam.size} team(s), ${flagged} flagged IRREGULAR.`;
+            })();
 
       return {
         content: [

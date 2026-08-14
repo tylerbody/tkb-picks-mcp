@@ -51,7 +51,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
 function buildServer(): McpServer {
   const server = new McpServer({
     name: "tkb-picks-mcp-server",
-    version: "2.3.0",
+    version: "2.4.0",
   });
 
   registerScheduleTool(server, sgo);
@@ -83,7 +83,7 @@ const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", server: "tkb-picks-mcp-server", version: "2.3.0" });
+  res.json({ status: "ok", server: "tkb-picks-mcp-server", version: "2.4.0" });
 });
 
 app.post("/mcp", async (req, res) => {
