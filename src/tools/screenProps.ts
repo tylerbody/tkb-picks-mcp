@@ -80,7 +80,8 @@ export interface AvailabilityInfo {
 async function probeTeamAvailability(
   sgo: SGOClient,
   sport: SportKey,
-  teamID: string
+  teamID: string,
+  rosterIDs: Set<string>
 ): Promise<Map<string, AvailabilityInfo>> {
   const result = new Map<string, AvailabilityInfo>();
   try {
@@ -88,25 +89,39 @@ async function probeTeamAvailability(
     const windowStart = new Date(now);
     windowStart.setDate(windowStart.getDate() - 60);
 
-    const events = await sgo.getAllEvents({
-      leagueID: sgo.leagueIDFor(sport),
-      teamID,
-      finalized: true,
-      startsAfter: windowStart.toISOString(),
-      startsBefore: now.toISOString(),
-      // Narrow the odds payload to a single market - only results are read here.
-      oddIDs: "points-home-game-ml-home",
-      limit: 30,
-    });
+    const events = await sgo.getAllEvents(
+      {
+        leagueID: sgo.leagueIDFor(sport),
+        teamID,
+        finalized: true,
+        startsAfter: windowStart.toISOString(),
+        startsBefore: now.toISOString(),
+        // Narrow the odds payload to a single market - only results are read here.
+        oddIDs: "points-home-game-ml-home",
+        limit: 30,
+      },
+      // ONE PAGE. `limit` is the PAGE SIZE in getAllEvents, not a total cap, and
+      // the default maxPages of 10 turned "limit: 30" into up to 300 events.
+      // Measured 2026-08-14: a flag read "18 of the last 51 team games" when the
+      // window was supposed to be 30. Thirty games is ample for a play-rate
+      // signal and bounds the cost at ~30 entities per team.
+      1
+    );
 
     const teamGames = events.length;
     if (teamGames === 0) return result;
 
+    // COUNT ONLY THIS TEAM'S ROSTER. An event's results object holds BOTH teams'
+    // players, so tallying every key counted opponents too - each appearing in
+    // one or two of the thirty games and therefore landing under the 0.7 play
+    // rate. That produced "629 players covered, 613 flagged IRREGULAR" for a
+    // two-team game, which is noise rather than a signal.
     const appearances = new Map<string, number>();
     for (const event of events) {
       const period = event.results?.["game"];
       if (!period) continue;
       for (const playerID of Object.keys(period)) {
+        if (!rosterIDs.has(playerID)) continue;
         appearances.set(playerID, (appearances.get(playerID) ?? 0) + 1);
       }
     }
@@ -465,7 +480,15 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       ): Promise<AvailabilityInfo | null> => {
         let team = availabilityByTeam.get(teamID);
         if (!team) {
-          team = await probeTeamAvailability(sgo, input.sport as SportKey, teamID);
+          const rosterIDs = new Set(
+            roster.filter((p) => p.teamID === teamID).map((p) => p.playerID)
+          );
+          team = await probeTeamAvailability(
+            sgo,
+            input.sport as SportKey,
+            teamID,
+            rosterIDs
+          );
           availabilityByTeam.set(teamID, team);
         }
         return team.get(playerID) ?? null;
