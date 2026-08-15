@@ -87,7 +87,17 @@ async function probeTeamAvailability(
   try {
     const now = new Date();
     const windowStart = new Date(now);
-    windowStart.setDate(windowStart.getDate() - 60);
+    // THIRTY DAYS, NOT SIXTY. SGO's default ordering for finalized events is
+    // confirmed NOT to be most-recent-first, so asking for one page of 30 out of
+    // a 60-day window returned an arbitrary 30 of roughly 50 games - often the
+    // oldest. That is how Alejandro Kirk was reported at "2 of the last 30 team
+    // games" on 2026-08-15 while actually starting 4 of his last 6: the window
+    // simply did not contain his recent starts.
+    //
+    // A 30-day window holds roughly 26 games for an MLB club, so a single page
+    // of 30 captures essentially all of them and recency is guaranteed by the
+    // date bound rather than by trusting API ordering.
+    windowStart.setDate(windowStart.getDate() - 30);
 
     const events = await sgo.getAllEvents(
       {
@@ -102,13 +112,20 @@ async function probeTeamAvailability(
       },
       // ONE PAGE. `limit` is the PAGE SIZE in getAllEvents, not a total cap, and
       // the default maxPages of 10 turned "limit: 30" into up to 300 events.
-      // Measured 2026-08-14: a flag read "18 of the last 51 team games" when the
-      // window was supposed to be 30. Thirty games is ample for a play-rate
-      // signal and bounds the cost at ~30 entities per team.
       1
     );
 
-    const teamGames = events.length;
+    // Sort newest-first and cap, so the denominator is genuinely "recent games"
+    // even if the window happens to hold more than one page.
+    const recent = [...events]
+      .sort((a, b) => {
+        const da = a.status?.startsAt ? new Date(a.status.startsAt).getTime() : 0;
+        const db = b.status?.startsAt ? new Date(b.status.startsAt).getTime() : 0;
+        return db - da;
+      })
+      .slice(0, 30);
+
+    const teamGames = recent.length;
     if (teamGames === 0) return result;
 
     // COUNT ONLY THIS TEAM'S ROSTER. An event's results object holds BOTH teams'
@@ -117,7 +134,7 @@ async function probeTeamAvailability(
     // rate. That produced "629 players covered, 613 flagged IRREGULAR" for a
     // two-team game, which is noise rather than a signal.
     const appearances = new Map<string, number>();
-    for (const event of events) {
+    for (const event of recent) {
       const period = event.results?.["game"];
       if (!period) continue;
       for (const playerID of Object.keys(period)) {
@@ -476,7 +493,8 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
 
       const availabilityFor = async (
         teamID: string,
-        playerID: string
+        playerID: string,
+        statID: string
       ): Promise<AvailabilityInfo | null> => {
         let team = availabilityByTeam.get(teamID);
         if (!team) {
@@ -491,7 +509,27 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           );
           availabilityByTeam.set(teamID, team);
         }
-        return team.get(playerID) ?? null;
+        const info = team.get(playerID) ?? null;
+        if (!info) return null;
+
+        // STARTING PITCHERS ARE EXEMPT FROM THE PLAY-RATE TEST. A starter works
+        // every fifth game, so appearing in 6 of 30 is a healthy rotation arm on
+        // normal rest, not a player losing playing time. Flagging that as
+        // IRREGULAR is not a conservative error - it is a false positive that
+        // trains the reader to ignore the flag, which then costs a real catch
+        // like Bobby Witt Jr. at 15 of 28.
+        //
+        // The SGO aggregator carried this exemption from the start; the probe
+        // added in v2.4.0 did not, and on 2026-08-15 it flagged Cam Schlittler
+        // at "6 of the last 30" while he was simply pitching on schedule.
+        if (statID.startsWith("pitching_")) {
+          return {
+            ...info,
+            flag: "OK",
+            note: null,
+          };
+        }
+        return info;
       };
 
       const screened = await mapWithConcurrency(
@@ -573,7 +611,7 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           if (!rate.sampleSufficient) return null;
           if (rate.gamesConsidered < input.minSample) return null;
 
-          const avail = await availabilityFor(player.teamID, c.playerID);
+          const avail = await availabilityFor(player.teamID, c.playerID, c.statID);
 
           const hits = c.side === "over" ? rate.overHits : rate.underHits;
           const hitRatePct = hits / rate.gamesConsidered;

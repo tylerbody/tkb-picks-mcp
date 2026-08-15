@@ -60,8 +60,29 @@ export interface PricingResult {
  */
 const NON_BOOKMAKER_KEYS = new Set(["unknown", "", "consensus", "average", "fair"]);
 
+/**
+ * PICK'EM APPS - real companies, but NOT sportsbooks for pricing purposes.
+ *
+ * Underdog, PrizePicks and their peers price nearly every prop at a flat
+ * +100/+100. That is a product decision, not a market opinion: the payout is
+ * fixed and the edge comes from requiring multiple correct legs. Treating one
+ * of those numbers as a market price makes every prop look like a coin flip
+ * with enormous edge, because the "break-even" is always 50%.
+ *
+ * MEASURED 2026-08-15: a Cardinals/Cubs screen returned 8 of its top 14 props
+ * priced by Underdog at +100, including one showing a 50-point edge purely
+ * because 12 of 12 was being compared against a flat 50% break-even. Those
+ * numbers cannot be published - a follower shopping DraftKings or FanDuel would
+ * find a completely different price.
+ *
+ * Excluded at this layer so no tool can source a price from them, matching the
+ * existing rule that fair-odds estimates are never publishable.
+ */
+const PICKEM_APPS = new Set(["underdog", "prizepicks", "sleeper", "betr", "dabble", "parlayplay"]);
+
 function isRealBookmaker(key: string): boolean {
-  return !NON_BOOKMAKER_KEYS.has(key.trim().toLowerCase());
+  const k = key.trim().toLowerCase();
+  return !NON_BOOKMAKER_KEYS.has(k) && !PICKEM_APPS.has(k);
 }
 
 function firstAvailableBook(
