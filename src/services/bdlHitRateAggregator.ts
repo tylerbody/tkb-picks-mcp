@@ -163,6 +163,26 @@ export async function getBdlPlayerHitRate(
     );
   }
 
+  // ---- TIER GATE, CHECKED BEFORE NAME RESOLUTION ----
+  //
+  // BALLDONTLIE gates Player Stats behind GOAT for WNBA and NCAAF while including
+  // it at ALL-STAR for MLB and NFL. That 401 is expected, but rediscovering it per
+  // candidate is not: resolveBdlPlayerID below issues a THROTTLED name search
+  // before any stats fetch happens, so guarding only the fetch would still burn
+  // ~1.1s per player+stat+line on a sport that cannot serve any of them. Checking
+  // here means one 401 disables the whole BDL path for that sport for the memo's
+  // TTL, and everything falls through to SportsGameOdds immediately.
+  //
+  // isStatSupported above is deliberately NOT the place for this - it answers
+  // "is there a field mapping", which stays true regardless of subscription.
+  if (bdl.statsTierGated(params.sport)) {
+    throw new Error(
+      `BALLDONTLIE ${params.sport.toUpperCase()} player stats are tier-gated (401) on the ` +
+        `current subscription - Player Stats requires GOAT for this sport. Skipping the ` +
+        `BALLDONTLIE path without a network call; falling back to SportsGameOdds.`
+    );
+  }
+
   const role = inferPlayerRole(params.statID);
   const profile = ROLE_PROFILES[role];
   const targetAppearances = params.lookbackGames ?? profile.defaultAppearances;

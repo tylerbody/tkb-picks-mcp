@@ -219,6 +219,79 @@ export class BDLClient {
   }
 
   /**
+   * ---- TIER-GATE MEMO ----
+   *
+   * BALLDONTLIE tiers features PER SPORT, and the boundaries are NOT the same
+   * across sports. Verified live on 2026-08-19 with MLB, NFL, NCAAF and WNBA all
+   * subscribed at ALL-STAR on this account, against the published feature tables
+   * at wnba.balldontlie.io and ncaaf.balldontlie.io:
+   *
+   *   MLB   /mlb/v1/stats           included at ALL-STAR   -> works
+   *   NFL   /nfl/v1/stats           included at ALL-STAR   -> works
+   *   WNBA  /wnba/v1/player_stats   GOAT only              -> 401
+   *   CFB   /ncaaf/v1/player_stats  GOAT only              -> 401
+   *
+   * For WNBA and NCAAF the feature table lists Player Stats as "No" at ALL-STAR.
+   * Teams, Players and Games sit on Free; Player Injuries, Standings and
+   * Play-by-Play sit on ALL-STAR. So the 401 on stats is CORRECT AND EXPECTED,
+   * not a misconfiguration, and not something a code change can route around.
+   *
+   * THE DEFECT WAS REDISCOVERING IT ON EVERY CALL. A successful stats fetch is
+   * cached per player+window by getAllPlayerGameStats, so its cost is paid once.
+   * A 401 was cached nowhere. Every player+stat+line combination therefore paid a
+   * throttled round trip (MIN_REQUEST_GAP_MS, 1100ms) for the name search AND
+   * another for the stats fetch, all of them guaranteed to fail. On a 13-player
+   * WNBA event that is roughly 90 doomed requests, ~100 seconds of pure latency,
+   * which is what pushed tkb_screen_props past its 60s timeout on WNBA while MLB
+   * stayed comfortably under it. MLB never showed the symptom because its calls
+   * succeed and therefore cache.
+   *
+   * MEMOISED WITH A TTL RATHER THAN HARDCODED PER SPORT. A hardcoded
+   * "wnba is gated" constant would keep BDL switched off even after an upgrade to
+   * GOAT was paid for, and would need a redeploy plus someone remembering it
+   * exists. A TTL heals on its own within one window, and covers NCAAF (and any
+   * future sport with a different tier boundary) without a list to maintain.
+   *
+   * Deliberately NOT applied to getRawPlayerGameStats: tkb_debug_bdl_stats must
+   * always perform a real network check so an upgrade can be verified instantly.
+   */
+  private statsTierGate = new Map<SportKey, number>();
+  private static readonly TIER_GATE_TTL_MS = 30 * 60 * 1000;
+
+  /**
+   * True when this sport's stats endpoint 401'd recently.
+   *
+   * PUBLIC ON PURPOSE. bdlHitRateAggregator resolves a player NAME before it
+   * fetches stats, so a guard placed only on the fetch would still pay a
+   * throttled search per candidate. The aggregator checks this first.
+   */
+  statsTierGated(sport: SportKey): boolean {
+    const at = this.statsTierGate.get(sport);
+    if (at === undefined) return false;
+    if (Date.now() - at < BDLClient.TIER_GATE_TTL_MS) return true;
+    this.statsTierGate.delete(sport);
+    return false;
+  }
+
+  /** Record a tier gate, but only for a genuine auth failure. */
+  private noteTierGate(sport: SportKey, err: Error): void {
+    if (err.message.includes("auth error")) {
+      this.statsTierGate.set(sport, Date.now());
+    }
+  }
+
+  /** Message shared by both guards, so the wording cannot drift between them. */
+  private tierGateMessage(sport: SportKey): string {
+    return (
+      `BALLDONTLIE ${sport.toUpperCase()} player stats are tier-gated (401) on the current ` +
+      `subscription - Player Stats requires GOAT for this sport. Skipping the request rather ` +
+      `than re-paying a throttled round trip that is known to fail. This memo expires after ` +
+      `${BDLClient.TIER_GATE_TTL_MS / 60000} minutes, so upgrading the subscription takes effect ` +
+      `without a redeploy.`
+    );
+  }
+
+  /**
    * Fetch per-game player stat lines. One row per player per game.
    *
    * Filters vary slightly by sport but player_ids[], dates[] and seasons[] are
@@ -240,6 +313,12 @@ export class BDLClient {
     meta?: { next_cursor?: number | null; per_page?: number };
     next_cursor?: number | null;
   }> {
+    // Fast-fail before touching the network or the throttle queue. Covers every
+    // caller, including tkb_scan_streaks, which reaches this method directly
+    // rather than through the hit-rate aggregator.
+    if (this.statsTierGated(sport)) {
+      throw new Error(this.tierGateMessage(sport));
+    }
     try {
       const response = await this.throttle(() => this.http.get<{
         data: unknown[];
@@ -258,7 +337,9 @@ export class BDLClient {
       }));
       return response.data;
     } catch (err) {
-      throw formatBDLError(err, `${sport} player game stats`, sport);
+      const formatted = formatBDLError(err, `${sport} player game stats`, sport);
+      this.noteTierGate(sport, formatted);
+      throw formatted;
     }
   }
 

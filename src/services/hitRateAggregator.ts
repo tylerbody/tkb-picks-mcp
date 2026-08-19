@@ -254,6 +254,59 @@ function assessSample(input: {
  */
 const PERIOD_ID_FULL_GAME = "game";
 
+/**
+ * COMPOSITE STATS, DERIVED BY SUMMING COMPONENTS.
+ *
+ * MEASURED 2026-08-19. SportsGameOdds PRICES combination markets - its statID
+ * reference lists points+rebounds+assists, batting_hits+runs+rbi and the rest -
+ * but does NOT settle them: the composite key is absent from an event's results
+ * object. Same player, same 30 events, forced to the SGO path:
+ *
+ *   points                    -> real values on all 9 games she appeared in
+ *   points+rebounds+assists   -> null on all 30, INCLUDING those same 9
+ *
+ * The components are all present on those same events under the same playerID.
+ * Napheesa Collier's last 9: points 19/20/17/22/21/18/16/15/24, rebounds
+ * 6/9/8/6/8/8/5/6/10, assists 2/2/3/3/6/7/2/3/1. Summing gives
+ * 27/31/28/31/35/33/23/24/35, which is an EXACT count, not an approximation.
+ *
+ * So "SGO cannot count combos" was only ever true of SGO's results object, never
+ * of this code. Deriving here unlocks combo markets on the SGO path for every
+ * sport. That matters most for WNBA and NCAAF, where BALLDONTLIE gates player
+ * stats behind GOAT (see the tier-gate memo in bdlClient.ts) and SGO is the ONLY
+ * path available.
+ *
+ * WHY CANDIDATE ARRAYS PER COMPONENT: same defensive pattern as bdlStatMap.ts.
+ * MLB runs scored were confirmed live to sit under "points" - SGO's
+ * winner-determining stat, which in baseball is runs - with Trent Grisham
+ * returning 1/0/0/1/0/3 there. "batting_runs" is still tried first in case the
+ * feed ever exposes the explicit name.
+ *
+ * WHY A MISSING COMPONENT RETURNS null RATHER THAN A PARTIAL SUM: a
+ * half-computed combo is exactly the "fully populated, plausible, completely
+ * wrong" failure this connector exists to prevent. null routes the game to the
+ * DNP branch, excluding it from the sample instead of under-counting it.
+ *
+ * SAFE BECAUSE ZEROS ARE REAL: SGO stores a genuine 0 rather than omitting the
+ * key, verified on Courtney Williams (0 points on 7/22) and Grisham (0 runs on
+ * three separate dates). Were zeros omitted, every summed line would silently
+ * drop a player's quiet games and inflate the rate.
+ */
+const COMPONENT_DERIVATIONS: Record<string, string[][]> = {
+  // WNBA / NBA
+  "points+rebounds": [["points"], ["rebounds"]],
+  "points+assists": [["points"], ["assists"]],
+  "rebounds+assists": [["rebounds"], ["assists"]],
+  "points+rebounds+assists": [["points"], ["rebounds"], ["assists"]],
+  "blocks+steals": [["blocks"], ["steals"]],
+  // MLB
+  "batting_hits+runs+rbi": [["batting_hits"], ["batting_runs", "points"], ["batting_RBI"]],
+  "batting_runs+rbi": [["batting_runs", "points"], ["batting_RBI"]],
+  // NFL / CFB
+  "passing+rushing_yards": [["passing_yards"], ["rushing_yards"]],
+  "rushing+receiving_yards": [["rushing_yards"], ["receiving_yards"]],
+};
+
 function extractPlayerStat(
   event: SGOEvent,
   playerID: string,
@@ -266,7 +319,27 @@ function extractPlayerStat(
   if (!playerResults) return null;
 
   const value = playerResults[statID];
-  return typeof value === "number" ? value : null;
+  if (typeof value === "number") return value;
+
+  // Composite market with no settled value. Sum its components instead, but only
+  // if EVERY component resolves - see the note above on partial sums.
+  const components = COMPONENT_DERIVATIONS[statID];
+  if (!components) return null;
+
+  let sum = 0;
+  for (const candidates of components) {
+    let resolved: number | null = null;
+    for (const candidate of candidates) {
+      const raw = playerResults[candidate];
+      if (typeof raw === "number") {
+        resolved = raw;
+        break;
+      }
+    }
+    if (resolved === null) return null;
+    sum += resolved;
+  }
+  return sum;
 }
 
 /**
