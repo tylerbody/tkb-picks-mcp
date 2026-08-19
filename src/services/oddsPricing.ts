@@ -80,9 +80,34 @@ const NON_BOOKMAKER_KEYS = new Set(["unknown", "", "consensus", "average", "fair
  */
 const PICKEM_APPS = new Set(["underdog", "prizepicks", "sleeper", "betr", "dabble", "parlayplay"]);
 
+/**
+ * NOT PUBLISHABLE FOR THIS ACCOUNT, though not pick'em apps either.
+ *
+ * Fliff is a sweepstakes book. Unlike Underdog it posts genuinely juiced two-way
+ * lines, so it does NOT corrupt the edge maths the way a flat +100/+100 board
+ * does - measured 2026-08-19, Fliff had Chisholm total bases under at -182 while
+ * Caesars had -179, and Rice at -145 while DraftKings had -128. The numbers are
+ * real. The problem is that a follower cannot bet them, and this account's own
+ * publishing rules name Fliff alongside Underdog, PrizePicks and Sleeper as
+ * never-publishable. Enforcing that here rather than trusting the workflow to
+ * re-check it every time is the same reasoning that moved "never publish fair
+ * odds" out of prose and into extractPricedLine.
+ *
+ * Note the Rice case cuts BOTH ways: pricing against Fliff understated that
+ * prop's real edge by 3 points. An unbettable price is not merely unpublishable,
+ * it silently corrupts any ranking built on it. The durable fix is passing
+ * preferredBookmakers into tkb_screen_props (v2.5.3) so the screen only ever
+ * sees your books; this set is the backstop for anything that slips past.
+ */
+const NON_PUBLISHABLE_BOOKS = new Set(["fliff"]);
+
 function isRealBookmaker(key: string): boolean {
   const k = key.trim().toLowerCase();
-  return !NON_BOOKMAKER_KEYS.has(k) && !PICKEM_APPS.has(k);
+  return (
+    !NON_BOOKMAKER_KEYS.has(k) &&
+    !PICKEM_APPS.has(k) &&
+    !NON_PUBLISHABLE_BOOKS.has(k)
+  );
 }
 
 function firstAvailableBook(

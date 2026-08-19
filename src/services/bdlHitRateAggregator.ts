@@ -2,6 +2,7 @@ import type { BDLClient } from "./bdlClient.js";
 import type { SportKey } from "../constants.js";
 import type { GameLogEntry, HitRateResult } from "../types.js";
 import { seasonForDate, summarizeSeasons, currentSeason } from "./seasonBoundary.js";
+import { describeRecency } from "./sampleRecency.js";
 import { resolveStat, isStatSupported } from "./bdlStatMap.js";
 
 /**
@@ -358,6 +359,17 @@ export async function getBdlPlayerHitRate(
         `${role.replace(/_/g, " ")}. A rate on ${appearances} game(s) is NOT a hit rate.`
     : seasons.warning;
 
+  // WITHIN-SEASON STALENESS - see services/sampleRecency.ts. This path needs it
+  // MORE than the SGO one, not less: BALLDONTLIE returns only games the player
+  // appeared in, so a long absence leaves no trace at all here. Fifteen rows from
+  // May look identical to fifteen rows from the last three weeks.
+  const recency = describeRecency(
+    log,
+    role === "starting_pitcher" ? { maxGapDays: 30, maxDaysSinceMostRecent: 14 } : {}
+  );
+  const combinedWarning =
+    [sampleWarning, recency.warning].filter(Boolean).join(" ") || null;
+
   return {
     playerName: params.playerName,
     statID: params.statID,
@@ -373,7 +385,7 @@ export async function getBdlPlayerHitRate(
     teamGamesScanned: datedRows.length,
     hitScanCeiling: false,
     sampleSufficient: sufficient,
-    sampleWarning,
+    sampleWarning: combinedWarning,
     playerRole: role,
     recentAvailability: {
       gamesPlayed: appearances,

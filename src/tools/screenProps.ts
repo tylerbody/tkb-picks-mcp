@@ -11,6 +11,7 @@ import {
 import { getPlayerHitRate } from "../services/hitRateAggregator.js";
 import { getBdlPlayerHitRate } from "../services/bdlHitRateAggregator.js";
 import { isStatSupported } from "../services/bdlStatMap.js";
+import { describeRecency } from "../services/sampleRecency.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
 
@@ -219,6 +220,11 @@ interface ScreenedProp {
   availabilityFlag: string;
   availabilityNote: string | null;
   seasonWarning: string | null;
+  /** True when the counted games are not recent - see services/sampleRecency.ts. */
+  sampleIsStale: boolean;
+  /** Prose naming which recency check fired, or null when the sample is current. */
+  stalenessNote: string | null;
+  daysSinceMostRecentGame: number | null;
 }
 
 async function mapWithConcurrency<T, R>(
@@ -314,6 +320,12 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           .max(30)
           .default(18)
           .describe("Cap on players screened, keeps latency bounded."),
+        preferredBookmakers: z
+          .string()
+          .optional()
+          .describe(
+            "Comma-separated bookmaker IDs to price against, e.g. 'draftkings,fanduel,betmgm,caesars'. STRONGLY RECOMMENDED. Without it the screen prices each prop from whichever book happens to appear first in SGO's response, which is frequently a book you cannot bet - measured 2026-08-19, 5 of the top 6 MLB props came back priced by Bovada, Hard Rock, ESPN Bet and Fliff. Edge is then ranked against a price you will never get: one prop showed -145 from Fliff while DraftKings had -128, understating its true edge by 3 points. Passing your books makes the ranking honest, makes the mandatory re-pull a confirmation instead of a correction, and cuts candidate count, which speeds the sweep up."
+          ),
         limit: z.number().int().max(25).default(12),
       },
       annotations: {
@@ -360,7 +372,17 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       // ONE fetch. Reading the event's odds map directly avoids a per-candidate
       // request, which is what makes this tool viable rather than just relocating
       // the same 150 calls inside the server.
-      const events = await sgo.getAllEvents({ leagueID, eventIDs: input.eventID });
+      // PRICE AGAINST THE BOOKS YOU CAN ACTUALLY BET. SGO returns every book that
+      // priced a market, and firstAvailableBook() in oddsPricing simply takes the
+      // first entry it finds - there is no preference ordering - so the displayed
+      // price was effectively arbitrary. Filtering at the request means the odds,
+      // the break-even and therefore the EDGE RANKING all reflect a real,
+      // obtainable number. It also shrinks the payload and the candidate list.
+      const events = await sgo.getAllEvents({
+        leagueID,
+        eventIDs: input.eventID,
+        bookmakerID: input.preferredBookmakers,
+      });
       if (!events.length) {
         return {
           content: [
@@ -613,6 +635,13 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
 
           const avail = await availabilityFor(player.teamID, c.playerID, c.statID);
 
+          const recency = describeRecency(
+            rate.log,
+            c.statID.startsWith("pitching_")
+              ? { maxGapDays: 30, maxDaysSinceMostRecent: 14 }
+              : {}
+          );
+
           const hits = c.side === "over" ? rate.overHits : rate.underHits;
           const hitRatePct = hits / rate.gamesConsidered;
           const breakevenPct = impliedProbability(c.americanOdds);
@@ -666,8 +695,22 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
             // player who has been sitting. Falls back to the rate's flag only
             // when the probe returned nothing for this player.
             availabilityFlag: avail?.flag ?? rate.recentAvailability.flag,
-            availabilityNote: avail?.note ?? rate.recentAvailability.note,
+            // `avail?.note ?? rate...note` was WRONG. A player the probe covered
+            // and found healthy has note === null, so ?? fell straight through to
+            // the BDL disclaimer. Every healthy MLB position player therefore
+            // displayed "Playing-time risk is NOT assessed on this path" while
+            // simultaneously being flagged OK - teaching the writer to distrust a
+            // safeguard that was working. Choose the SOURCE first, then its note.
+            availabilityNote: avail ? avail.note : rate.recentAvailability.note,
             seasonWarning: rate.seasonWarning,
+            // DELIBERATELY A WARNING, NOT A FILTER. Chris Bassitt screened 8 of 10
+            // on 2026-08-19 with one of those ten starts inside the last 30 days,
+            // the rest from May and June, and seasonWarning was null because it
+            // was all one season. The under may still be correct; what it cannot
+            // be is written as "his last 10" without saying when they happened.
+            sampleIsStale: recency.isStale,
+            stalenessNote: recency.warning,
+            daysSinceMostRecentGame: recency.daysSinceMostRecent,
           };
         }
       );

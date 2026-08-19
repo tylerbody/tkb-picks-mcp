@@ -51,7 +51,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
 function buildServer(): McpServer {
   const server = new McpServer({
     name: "tkb-picks-mcp-server",
-    version: "2.5.2",
+    version: "2.5.3",
   });
 
   registerScheduleTool(server, sgo);

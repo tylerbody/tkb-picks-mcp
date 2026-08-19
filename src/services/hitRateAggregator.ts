@@ -2,6 +2,7 @@ import type { SGOClient } from "./sgoClient.js";
 import type { SportKey } from "../constants.js";
 import type { GameLogEntry, HitRateResult, SGOEvent } from "../types.js";
 import { seasonForDate, summarizeSeasons } from "./seasonBoundary.js";
+import { describeRecency } from "./sampleRecency.js";
 
 /**
  * Builds a real recent-game-log hit-rate check for a player against a stat line.
@@ -174,6 +175,19 @@ export async function getPlayerHitRate(
     seasonWarning: seasons.warning,
   });
 
+  // WITHIN-SEASON STALENESS. summarizeSeasons above only fires across a SEASON
+  // boundary, so a sample built entirely from May and June reads as clean in
+  // August. Appended rather than replacing, because an insufficient sample and a
+  // stale one are different problems and a caller may be facing both at once.
+  // A starting pitcher works every fifth day, so its gap tolerance is widened -
+  // otherwise normal rotation rest would flag as an absence.
+  const recency = describeRecency(
+    log,
+    role === "starting_pitcher" ? { maxGapDays: 30, maxDaysSinceMostRecent: 14 } : {}
+  );
+  const combinedWarning =
+    [warning, recency.warning].filter(Boolean).join(" ") || null;
+
   return {
     playerName: params.playerName,
     statID: params.statID,
@@ -189,7 +203,7 @@ export async function getPlayerHitRate(
     teamGamesScanned,
     hitScanCeiling,
     sampleSufficient: sufficient,
-    sampleWarning: warning,
+    sampleWarning: combinedWarning,
     playerRole: role,
     recentAvailability: assessAvailability(appearances, teamGamesScanned, gamesExcludedDNP, role),
     currentSeasonGames: seasons.current,
