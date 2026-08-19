@@ -2,7 +2,7 @@ import type { BDLClient } from "./bdlClient.js";
 import type { SportKey } from "../constants.js";
 import type { GameLogEntry, HitRateResult } from "../types.js";
 import { seasonForDate, summarizeSeasons, currentSeason } from "./seasonBoundary.js";
-import { describeRecency } from "./sampleRecency.js";
+import { describeRecency, STARTING_PITCHER_THRESHOLDS } from "./sampleRecency.js";
 import { resolveStat, isStatSupported } from "./bdlStatMap.js";
 
 /**
@@ -365,7 +365,7 @@ export async function getBdlPlayerHitRate(
   // May look identical to fifteen rows from the last three weeks.
   const recency = describeRecency(
     log,
-    role === "starting_pitcher" ? { maxGapDays: 30, maxDaysSinceMostRecent: 14 } : {}
+    role === "starting_pitcher" ? STARTING_PITCHER_THRESHOLDS : {}
   );
   const combinedWarning =
     [sampleWarning, recency.warning].filter(Boolean).join(" ") || null;

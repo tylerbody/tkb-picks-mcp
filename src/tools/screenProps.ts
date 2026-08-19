@@ -11,7 +11,7 @@ import {
 import { getPlayerHitRate } from "../services/hitRateAggregator.js";
 import { getBdlPlayerHitRate } from "../services/bdlHitRateAggregator.js";
 import { isStatSupported } from "../services/bdlStatMap.js";
-import { describeRecency } from "../services/sampleRecency.js";
+import { describeRecency, STARTING_PITCHER_THRESHOLDS } from "../services/sampleRecency.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
 
@@ -637,9 +637,7 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
 
           const recency = describeRecency(
             rate.log,
-            c.statID.startsWith("pitching_")
-              ? { maxGapDays: 30, maxDaysSinceMostRecent: 14 }
-              : {}
+            c.statID.startsWith("pitching_") ? STARTING_PITCHER_THRESHOLDS : {}
           );
 
           const hits = c.side === "over" ? rate.overHits : rate.underHits;

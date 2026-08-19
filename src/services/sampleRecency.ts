@@ -72,6 +72,36 @@ export const DEFAULT_RECENCY_THRESHOLDS: RecencyThresholds = {
   maxDaysSinceMostRecent: 10,
 };
 
+/**
+ * STARTING PITCHER TOLERANCES - one definition, used by every caller.
+ *
+ * A starter works every fifth or sixth day, so ten starts NATURALLY span about
+ * sixty days. Judging that against a position player's cadence flags healthy
+ * rotation arms as stale.
+ *
+ * CAUGHT IN LIVE TESTING 2026-08-19, v2.5.3. Roki Sasaki tripped STALE on
+ * "only 4 of 10 counted games fall in the last 30 days" with starts on 8/14,
+ * 8/08, 7/31, 7/24, 7/17 and 7/09. That is a pitcher on completely normal rest.
+ * v2.5.3 widened maxGapDays and maxDaysSinceMostRecent for pitchers but left the
+ * 30-day ratio window at the position-player default, so the ratio test stayed
+ * structurally unfair to them.
+ *
+ * WHY A FALSE POSITIVE IS NOT A SAFE ERROR HERE. Exactly the argument v2.5.0
+ * made when the IRREGULAR flag was firing on Cam Schlittler: a flag that cries
+ * wolf on healthy starters trains the reader to ignore it, and its whole value
+ * is the real catches. Chris Bassitt still flags at 45 days (1 of 6, plus a
+ * 72-day hole), which is the case that actually matters.
+ *
+ * EXPORTED AS A CONSTANT rather than repeated at each call site. The version
+ * string in index.ts was written out twice and the two drifted within one build;
+ * three copies of a threshold object would drift the same way.
+ */
+export const STARTING_PITCHER_THRESHOLDS: Partial<RecencyThresholds> = {
+  recentWindowDays: 45,
+  maxGapDays: 30,
+  maxDaysSinceMostRecent: 14,
+};
+
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 function dayDiff(a: Date, b: Date): number {

@@ -48,10 +48,25 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
 
 // ---- Build MCP server and register tools ----
 
+/**
+ * SINGLE SOURCE OF TRUTH FOR THE VERSION.
+ *
+ * This was previously written out twice - once here and once in the /health
+ * response - and on 2026-08-19 the two drifted: buildServer said 2.5.3 while
+ * /health still said 2.5.2. Since /health is the ONLY way to tell which build is
+ * live, a stale string there is worse than no version at all. It cost a full
+ * debugging cycle chasing a deploy that had partly worked.
+ *
+ * DEPLOYCHECK.md already records the same class of failure from 2.0.1-2.0.3,
+ * where /health reported 2.0.0 across three builds and testing was ambiguous.
+ * One constant makes the drift impossible rather than merely unlikely.
+ */
+const SERVER_VERSION = "2.5.4";
+
 function buildServer(): McpServer {
   const server = new McpServer({
     name: "tkb-picks-mcp-server",
-    version: "2.5.3",
+    version: SERVER_VERSION,
   });
 
   registerScheduleTool(server, sgo);
@@ -83,7 +98,7 @@ const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", server: "tkb-picks-mcp-server", version: "2.5.2" });
+  res.json({ status: "ok", server: "tkb-picks-mcp-server", version: SERVER_VERSION });
 });
 
 app.post("/mcp", async (req, res) => {

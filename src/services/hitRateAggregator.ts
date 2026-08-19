@@ -2,7 +2,7 @@ import type { SGOClient } from "./sgoClient.js";
 import type { SportKey } from "../constants.js";
 import type { GameLogEntry, HitRateResult, SGOEvent } from "../types.js";
 import { seasonForDate, summarizeSeasons } from "./seasonBoundary.js";
-import { describeRecency } from "./sampleRecency.js";
+import { describeRecency, STARTING_PITCHER_THRESHOLDS } from "./sampleRecency.js";
 
 /**
  * Builds a real recent-game-log hit-rate check for a player against a stat line.
@@ -183,7 +183,7 @@ export async function getPlayerHitRate(
   // otherwise normal rotation rest would flag as an absence.
   const recency = describeRecency(
     log,
-    role === "starting_pitcher" ? { maxGapDays: 30, maxDaysSinceMostRecent: 14 } : {}
+    role === "starting_pitcher" ? STARTING_PITCHER_THRESHOLDS : {}
   );
   const combinedWarning =
     [warning, recency.warning].filter(Boolean).join(" ") || null;
