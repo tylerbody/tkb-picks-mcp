@@ -1,4 +1,4 @@
-# TKB Picks MCP Server (v2.6.0)
+# TKB Picks MCP Server (v2.6.3)
 
 MCP server wrapping **SportsGameOdds** (odds, schedules, props, results) and
 **BALLDONTLIE** (stats, injuries, standings) for building TKB Picks betting

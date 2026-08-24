@@ -55,6 +55,88 @@ import {
 
 const HIT_RATE_CONCURRENCY = 3;
 
+/**
+ * THE BOOKS THIS ACCOUNT'S AUDIENCE CAN ACTUALLY BET.
+ *
+ * A DEFAULT RATHER THAN A PROMPT ARGUMENT, DELIBERATELY. Passing this from the
+ * nightly tasks was listed as an open follow-up in v2.5.3 and again in v2.5.4,
+ * and was still not being passed as of v2.6.1. Two releases is enough evidence
+ * that a thing which must be remembered every time will not be. There is no
+ * situation where this account wants a board ranked against a book its followers
+ * cannot bet, so this is a policy rather than a parameter, and policies belong in
+ * code - the same reasoning that moved "never publish fair odds" out of prose and
+ * into extractPricedLine.
+ *
+ * FANDUEL STAYS IN THE LIST. Every WNBA prop screened on 2026-08-19 was priced by
+ * FanDuel, and five of six again on 2026-08-24. Dropping it empties that board.
+ *
+ * BEHAVIOUR CHANGE WORTH KNOWING: this WILL sometimes return fewer props, or an
+ * empty board, on games where only excluded venues priced a market. That is the
+ * correct answer - "nothing bettable here" beats a prop priced at Bovada - and the
+ * empty-result message says which of the two happened so it never reads as a
+ * silent failure.
+ */
+const DEFAULT_BOOKMAKERS = "draftkings,fanduel,betmgm,caesars";
+
+/**
+ * HOW MANY PLAYERS TO SCREEN, BY SPORT.
+ *
+ * A FLAT DEFAULT OF 18 WAS SILENTLY CLIPPING MLB. Measured 2026-08-24: five of
+ * six MLB games reported exactly 18 players screened while the availability probe
+ * covered 20 to 22 on the same events. The probe uses the FULL event roster and
+ * screening used the capped one, so 2 to 4 players per game were never evaluated -
+ * every game, invisibly, because a board of 18 looks perfectly healthy.
+ *
+ * The excluded players are not the worst ones. `roster.slice(0, maxPlayers)` cuts
+ * on SGO's response order, which is not sorted by minutes, usage, or anything
+ * else. On the WNBA game screened the same day, capping at 10 of 14 removed Maya
+ * Caldwell, who was the 4th-best prop on the board at 11 of 15.
+ *
+ * COST OF RAISING IT IS LATENCY, NOT QUOTA. The team history is fetched once and
+ * cached; each extra player only reads from it, and MLB rates come from
+ * BALLDONTLIE which has no object cap. The binding constraint is the 60-second
+ * tool ceiling via BDL's 1,100ms throttle, so roughly 2 extra requests per extra
+ * player. Four more MLB players is about 9 seconds.
+ *
+ * CFB STAYS AT 18 DELIBERATELY. Its rosters are genuinely huge and a cap is doing
+ * real work there rather than quietly losing everyday starters.
+ */
+const DEFAULT_MAX_PLAYERS: Record<SportKey, number> = {
+  mlb: 24,   // rosters observed at 20-22
+  wnba: 20,  // rosters observed at 14, ample headroom
+  nfl: 24,   // 22 observed on a Week 1 game
+  cfb: 18,   // large rosters, cap is intentional
+  atp: 0,    // no roster - refused by the capability guard before reaching here
+  wta: 0,
+};
+
+/**
+ * HOW MANY PROPS ONE PLAYER MAY OCCUPY ON A RETURNED BOARD.
+ *
+ * THE PROBLEM, MEASURED 2026-08-24. A Padres/Pirates board returned six props
+ * belonging to THREE players: Fernando Tatis Jr. took three slots, Nick Yorke two,
+ * Brandon Lowe one. A Tigers/Rays board gave Dillon Dingler four of the top
+ * twenty-five. Nothing was wrong with any individual prop - they ranked where they
+ * ranked - but a board is supposed to answer "what are the best plays in this
+ * game", and one that is half Tatis answers a narrower question.
+ *
+ * WHY THIS MATTERS BEYOND VARIETY. This account posts two player props per thread.
+ * If the top two slots are the same player, the thread has one real opinion in it
+ * rather than two, and the two picks rise and fall together - a correlated pair
+ * presented as independent. That is a worse bet than it looks, and the reader
+ * cannot see it.
+ *
+ * DEFAULT 2, NOT 1. One would throw away genuinely different markets on the same
+ * player (a hits prop and a strikeouts prop are not the same read), and would make
+ * the board thinner on games where few players clear the bar. Two guarantees a
+ * 12-prop board draws on at least six players while still allowing a real
+ * double-up when a player is the story of the game.
+ *
+ * SUPPRESSED PROPS ARE COUNTED AND REPORTED, never silently dropped. A board that
+ * quietly hides its own filtering is the failure mode this connector keeps finding.
+ */
+const DEFAULT_MAX_PER_PLAYER = 2;
+
 /** Playing-time picture for one player, derived from real team game history. */
 export interface AvailabilityInfo {
   gamesPlayed: number;
@@ -261,6 +343,37 @@ async function mapWithConcurrency<T, R>(
   return out;
 }
 
+/**
+ * Cap how many props any one player may occupy, preserving rank order.
+ *
+ * APPLIED AFTER RANKING, NEVER BEFORE. Ranking first guarantees the props that
+ * survive are each player's BEST ones. A player's third-best prop is dropped;
+ * their best is never touched, so diversifying can only change WHICH marginal
+ * props appear, never demote a genuinely top-ranked play.
+ *
+ * Exported and pure so this is testable without a network. The v2.6.0 stale-window
+ * bug shipped precisely because logic that changes which data reaches the user was
+ * buried inside a function needing an API client.
+ */
+export function diversifyByPlayer<T extends { playerID: string }>(
+  ranked: T[],
+  maxPerPlayer: number
+): { kept: T[]; suppressed: number } {
+  const seen = new Map<string, number>();
+  const kept: T[] = [];
+  let suppressed = 0;
+  for (const p of ranked) {
+    const n = seen.get(p.playerID) ?? 0;
+    if (n >= maxPerPlayer) {
+      suppressed++;
+      continue;
+    }
+    seen.set(p.playerID, n + 1);
+    kept.push(p);
+  }
+  return { kept, suppressed };
+}
+
 export function registerScreenPropsTool(server: McpServer, sgo: SGOClient, bdl: BDLClient) {
   server.registerTool(
     "tkb_screen_props",
@@ -328,13 +441,24 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           .number()
           .int()
           .max(30)
-          .default(18)
-          .describe("Cap on players screened, keeps latency bounded."),
-        preferredBookmakers: z
-          .string()
           .optional()
           .describe(
-            "Comma-separated bookmaker IDs to price against, e.g. 'draftkings,fanduel,betmgm,caesars'. STRONGLY RECOMMENDED. Without it the screen prices each prop from whichever book happens to appear first in SGO's response, which is frequently a book you cannot bet - measured 2026-08-19, 5 of the top 6 MLB props came back priced by Bovada, Hard Rock, ESPN Bet and Fliff. Edge is then ranked against a price you will never get: one prop showed -145 from Fliff while DraftKings had -128, understating its true edge by 3 points. Passing your books makes the ranking honest, makes the mandatory re-pull a confirmation instead of a correction, and cuts candidate count, which speeds the sweep up."
+            "Cap on players screened. Defaults BY SPORT: mlb 24, nfl 24, wnba 20, cfb 18. Raise only if a roster is unusually large - the cut is on SGO's response order, NOT on player quality, so a low cap silently removes everyday starters rather than fringe players. Costs latency, not quota."
+          ),
+        maxPerPlayer: z
+          .number()
+          .int()
+          .min(1)
+          .max(6)
+          .default(DEFAULT_MAX_PER_PLAYER)
+          .describe(
+            "Max props ONE player may occupy on the returned board (default 2). Prevents a single player taking most of the slots - measured 2026-08-24, one board returned 6 props across only 3 players, with Tatis holding 3 of them. Since threads post two player props, an undiversified board means two correlated picks presented as independent reads. Set higher only when deliberately building a single-player thread."
+          ),
+        preferredBookmakers: z
+          .string()
+          .default(DEFAULT_BOOKMAKERS)
+          .describe(
+            "Comma-separated bookmaker IDs to price against. DEFAULTS to 'draftkings,fanduel,betmgm,caesars' - the books this account's audience can actually bet. Pass a different list to override, or 'all' to disable the filter entirely (diagnostic only, not for building threads). Without a filter the screen prices each prop from whichever book appears first in SGO's response: measured across 6 MLB games on 2026-08-24, only 69% of props came from DraftKings or FanDuel, with the rest split across Hard Rock, ProphetX, ESPN Bet and Bovada. Edge is computed from that price, so an unbettable one silently corrupts the RANKING, not just the display."
           ),
         limit: z.number().int().max(25).default(12),
       },
@@ -361,6 +485,8 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       }
 
       const leagueID = sgo.leagueIDFor(input.sport as SportKey);
+      const maxPlayers =
+        input.maxPlayers ?? DEFAULT_MAX_PLAYERS[input.sport as SportKey];
 
       const catalog = OU_PROP_MARKETS[input.sport as SportKey] ?? [];
       const wanted = catalog.filter((m) => {
@@ -402,10 +528,18 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       // price was effectively arbitrary. Filtering at the request means the odds,
       // the break-even and therefore the EDGE RANKING all reflect a real,
       // obtainable number. It also shrinks the payload and the candidate list.
+      // "all" is an explicit opt-out for diagnostics - it is how the book
+      // distribution above was measured. Anything else is passed through as a
+      // filter on the fetch itself, which also shrinks the payload.
+      const bookFilter =
+        input.preferredBookmakers.trim().toLowerCase() === "all"
+          ? undefined
+          : input.preferredBookmakers;
+
       const events = await sgo.getAllEvents({
         leagueID,
         eventIDs: input.eventID,
-        bookmakerID: input.preferredBookmakers,
+        bookmakerID: bookFilter,
       });
       if (!events.length) {
         return {
@@ -441,8 +575,9 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
         };
       }
 
+      const rosterClipped = roster.length > maxPlayers;
       const allowedPlayerIDs = new Set(
-        roster.slice(0, input.maxPlayers).map((p) => p.playerID)
+        roster.slice(0, maxPlayers).map((p) => p.playerID)
       );
       const playerByID = new Map(roster.map((p) => [p.playerID, p]));
 
@@ -742,7 +877,12 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           ? b.hitRatePct - a.hitRatePct || b.edge - a.edge
           : b.edge - a.edge || b.hitRatePct - a.hitRatePct
       );
-      const top = screened.slice(0, input.limit);
+
+      const { kept: diversified, suppressed: suppressedByDiversity } =
+        diversifyByPlayer(screened, input.maxPerPlayer);
+
+      const top = diversified.slice(0, input.limit);
+      const distinctPlayers = new Set(top.map((p) => p.playerID)).size;
 
       const filterSummary =
         `minSample ${input.minSample} / minEdge ${input.minEdge} / ` +
@@ -754,18 +894,47 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
             `${allowedPlayerIDs.size} players in ${teamNames[awayID]} @ ${teamNames[homeID]}, ` +
             `and none met ${filterSummary}. This is a real answer, not an ` +
             `error - build this thread from team-level markets rather than padding it ` +
-            `with a coin-flip prop.`
-          : `${top.length} prop(s) cleared, ranked by ${input.rankBy}. Screened ${candidates.length} ` +
-            `priced markets across ${allowedPlayerIDs.size} players. Use roundedOdds when ` +
-            `publishing. Check availabilityFlag before locking any pick.`;
+            `with a coin-flip prop.` +
+            (bookFilter
+              ? `\n\nNOTE: priced against ${bookFilter} only. A market that exists but ` +
+                `was only priced by an excluded venue is invisible here BY DESIGN, so ` +
+                `"nothing cleared" and "nothing cleared at your books" are different ` +
+                `statements. To see the unfiltered board for diagnosis, re-run with ` +
+                `preferredBookmakers="all" - but never publish a price from it.`
+              : `\n\nNOTE: the book filter was disabled (preferredBookmakers="all"), so ` +
+                `this board may contain prices from venues your audience cannot bet.`)
+          : `${top.length} prop(s) cleared across ${distinctPlayers} player(s), ranked by ` +
+            `${input.rankBy}. Screened ${candidates.length} priced markets across ` +
+            `${allowedPlayerIDs.size} players. Use roundedOdds when publishing. Check ` +
+            `availabilityFlag before locking any pick.`;
 
       // Routing visibility. If bdlServed is 0 on a sport that should be mapped,
       // every rate came from SGO and the screen cost roughly 10x what it should -
       // worth noticing immediately rather than discovering it at the quota wall.
+      // NEVER FILTER SILENTLY. Both of these change WHICH props are visible, so
+      // both are stated outright rather than left for the reader to infer from a
+      // board that looks complete.
+      const diversityLine = suppressedByDiversity
+        ? ` Diversity: ${suppressedByDiversity} lower-ranked prop(s) suppressed so no ` +
+          `player exceeds ${input.maxPerPlayer} on the board; ${distinctPlayers} distinct ` +
+          `player(s) shown. Raise maxPerPlayer to see them.`
+        : ` Diversity: ${distinctPlayers} distinct player(s) shown, none capped.`;
+
+      const rosterLine = rosterClipped
+        ? ` ROSTER CLIPPED: ${roster.length} players attached, ${maxPlayers} screened. ` +
+          `The cut follows SGO's response order, not player quality, so raise ` +
+          `maxPlayers if this game matters.`
+        : "";
+
+      const bookLine = bookFilter
+        ? `Priced against: ${bookFilter}.`
+        : `Priced against ALL venues - book filter disabled. Diagnostic only; ` +
+          `do NOT publish prices from this board without re-pulling at your books.`;
+
       const routing =
         bdlServed + sgoFallback === 0
-          ? ""
-          : `\n\nRate sources: ${bdlServed} from BALLDONTLIE (no SGO quota), ` +
+          ? `\n\n${bookLine}${rosterLine}${diversityLine}`
+          : `\n\n${bookLine}${rosterLine}${diversityLine} Rate sources: ${bdlServed} from BALLDONTLIE (no SGO quota), ` +
             `${sgoFallback} from SportsGameOdds.` +
             (bdlFailures.size
               ? ` BDL fallback reasons: ` +
@@ -805,6 +974,11 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           matchup: `${teamNames[awayID]} @ ${teamNames[homeID]}`,
           pricedMarketsScreened: candidates.length,
           qualified: screened.length,
+          playersScreened: allowedPlayerIDs.size,
+          playersAttached: roster.length,
+          rosterClipped,
+          distinctPlayersShown: distinctPlayers,
+          suppressedByDiversity,
           props: top,
         },
       };

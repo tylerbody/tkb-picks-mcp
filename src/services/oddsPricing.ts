@@ -101,13 +101,52 @@ const PICKEM_APPS = new Set(["underdog", "prizepicks", "sleeper", "betr", "dabbl
  */
 const NON_PUBLISHABLE_BOOKS = new Set(["fliff"]);
 
+/**
+ * PREDICTION MARKETS - not sportsbooks, and dangerous for a DIFFERENT reason
+ * than either of the two sets above.
+ *
+ * MEASURED LIVE 2026-08-24, on a Lynx/Valkyries screen. Polymarket priced
+ * Courtney Williams OVER 4.5 rebounds at +3079. Her counted rate was 5 of 15,
+ * i.e. 33%. Break-even at +3079 is 3.1%, so the tool computed a 30-point edge
+ * and RANKED IT FIRST ON THE BOARD - above five legitimate FanDuel props.
+ *
+ * A 33% prop at the top of the board is the exact outcome v2.5.0 identified when
+ * Underdog's flat +100 was inflating everything, and the mechanism is the same:
+ * a price that does not come from a two-sided sportsbook market makes the
+ * break-even comparison meaningless, so edge stops measuring value and starts
+ * measuring how strange the price is.
+ *
+ * WHY A SEPARATE SET RATHER THAN ADDING TO PICKEM_APPS, following the reasoning
+ * v2.5.3 used to keep Fliff separate: the REASON determines where a venue goes.
+ * Pick'em apps distort by being FLAT. Fliff is real but unbettable for this
+ * audience. Prediction markets are neither - they are genuine markets with real
+ * liquidity whose contract pricing simply is not comparable to a sportsbook
+ * over/under. If a future venue needs blocking, its category tells you which set
+ * it belongs in and what to expect from it.
+ *
+ * NOT INCLUDED, deliberately: exchanges such as prophetexchange, novig and
+ * sporttrade. Those post realistic two-way prices (ProphetX appeared six times
+ * in the same test at -139, -161, +124 and similar), so they do not corrupt the
+ * maths. They are excluded from screening by the preferredBookmakers default in
+ * screenProps instead, which is a ranking decision rather than a correctness one.
+ * ProphetX in particular is a TKB affiliate partner, so blocking it outright here
+ * would be the wrong call to make silently.
+ */
+const PREDICTION_MARKETS = new Set(["polymarket", "kalshi", "predictit", "manifold"]);
+
 function isRealBookmaker(key: string): boolean {
   const k = key.trim().toLowerCase();
   return (
     !NON_BOOKMAKER_KEYS.has(k) &&
     !PICKEM_APPS.has(k) &&
-    !NON_PUBLISHABLE_BOOKS.has(k)
+    !NON_PUBLISHABLE_BOOKS.has(k) &&
+    !PREDICTION_MARKETS.has(k)
   );
+}
+
+/** Exported for tests. Every venue this connector refuses to price against. */
+export function isBlockedBookmaker(key: string): boolean {
+  return !isRealBookmaker(key);
 }
 
 function firstAvailableBook(

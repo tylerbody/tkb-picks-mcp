@@ -5,6 +5,8 @@ import {
   roundToNearestTen,
   impliedProbability,
   computeEdge,
+  isBlockedBookmaker,
+  extractPricedLine,
 } from "../src/services/oddsPricing.js";
 import {
   describeRecency,
@@ -13,6 +15,7 @@ import {
 import { resolveStat } from "../src/services/bdlStatMap.js";
 import { seasonForDate } from "../src/services/seasonBoundary.js";
 import { sizeLookbackWindow } from "../src/services/hitRateAggregator.js";
+import { diversifyByPlayer } from "../src/tools/screenProps.js";
 import { buildOddID } from "../src/services/oddIdBuilder.js";
 import { weightedTweetLength } from "../src/tools/tweetChars.js";
 import {
@@ -476,5 +479,202 @@ describe("hit-rate lookback window sizing", () => {
       sport: "nfl", targetAppearances: 40, teamGamesPerAppearance: 5, maxScan: 200,
     });
     assert.ok(huge.windowDays <= 400, `got ${huge.windowDays}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("bookmaker blocklist", () => {
+  /**
+   * THE POLYMARKET CASE, MEASURED LIVE 2026-08-24.
+   *
+   * A Lynx/Valkyries screen returned Courtney Williams OVER 4.5 rebounds priced
+   * by Polymarket at +3079, against a counted rate of 5 of 15 (33%). Break-even
+   * at that price is 3.1%, so the tool computed a 30-point edge and RANKED IT
+   * FIRST, above five legitimate FanDuel props.
+   *
+   * Same mechanism as the Underdog case in v2.5.0: a price that is not a
+   * two-sided sportsbook market makes the break-even comparison meaningless, so
+   * edge stops measuring value and starts measuring how strange the price is.
+   */
+  test("prediction markets are blocked", () => {
+    for (const venue of ["polymarket", "kalshi", "predictit", "manifold"]) {
+      assert.equal(isBlockedBookmaker(venue), true, `${venue} must be blocked`);
+    }
+  });
+
+  test("the +3079 Polymarket prop is refused, not priced", () => {
+    const odd = {
+      oddID: "rebounds-X-game-ou-over",
+      statID: "rebounds",
+      bookOdds: "+3079",
+      byBookmaker: {
+        polymarket: { odds: "+3079", overUnder: "4.5", available: true },
+      },
+    };
+    const result = extractPricedLine(odd as never, {
+      requireLine: true,
+      marketDescription: "Courtney Williams OVER Rebounds",
+    });
+    assert.equal(result.priced, false, "a prediction-market-only prop has no usable price");
+  });
+
+  test("a 33% prop at +3079 would otherwise top the board", () => {
+    // Documents WHY the block matters rather than just that it exists.
+    const edge = computeEdge(5 / 15, 3079);
+    assert.ok(edge > 0.29, `edge was ${edge}, which would rank first`);
+  });
+
+  test("pick'em apps and Fliff stay blocked", () => {
+    for (const venue of ["underdog", "prizepicks", "sleeper", "betr", "dabble", "parlayplay", "fliff"]) {
+      assert.equal(isBlockedBookmaker(venue), true, `${venue} must be blocked`);
+    }
+  });
+
+  test("unattributable keys stay blocked", () => {
+    for (const k of ["unknown", "consensus", "average", "fair", ""]) {
+      assert.equal(isBlockedBookmaker(k), true, `"${k}" must be blocked`);
+    }
+  });
+
+  test("blocking is case and whitespace insensitive", () => {
+    assert.equal(isBlockedBookmaker("  PolyMarket "), true);
+    assert.equal(isBlockedBookmaker("UNDERDOG"), true);
+  });
+
+  test("real books observed in live testing are NOT blocked", () => {
+    // Every venue seen across the 6-game 2026-08-24 sweep that is a real
+    // sportsbook. Exchanges are excluded from screening by the preferredBookmakers
+    // default, NOT by this blocklist - ProphetX is an affiliate partner and its
+    // prices are realistic, so blocking it here would be the wrong layer.
+    for (const book of ["draftkings", "fanduel", "betmgm", "caesars", "hardrockbet", "espnbet", "bovada", "prophetexchange"]) {
+      assert.equal(isBlockedBookmaker(book), false, `${book} must NOT be blocked`);
+    }
+  });
+
+  test("a real book still prices normally", () => {
+    const odd = {
+      oddID: "batting_hits-X-game-ou-over",
+      statID: "batting_hits",
+      byBookmaker: {
+        draftkings: { odds: "-125", overUnder: "0.5", available: true },
+      },
+    };
+    const result = extractPricedLine(odd as never, {
+      requireLine: true,
+      marketDescription: "Hits",
+    });
+    assert.equal(result.priced, true);
+    assert.equal(result.value?.americanOdds, "-125");
+    assert.equal(result.value?.bookmaker, "draftkings");
+  });
+
+  test("a blocked venue does not shadow a real one on the same market", () => {
+    // Both priced it. The real book must win rather than the map order deciding.
+    const odd = {
+      oddID: "rebounds-X-game-ou-over",
+      statID: "rebounds",
+      byBookmaker: {
+        polymarket: { odds: "+3079", overUnder: "4.5", available: true },
+        fanduel: { odds: "-154", overUnder: "4.5", available: true },
+      },
+    };
+    const result = extractPricedLine(odd as never, {
+      requireLine: true,
+      marketDescription: "Rebounds",
+    });
+    assert.equal(result.priced, true);
+    assert.equal(result.value?.bookmaker, "fanduel");
+    assert.equal(result.value?.americanOdds, "-154");
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("board diversity", () => {
+  /**
+   * THE REAL PADRES/PIRATES BOARD, 2026-08-24.
+   *
+   * Six props belonging to THREE players. Tatis held three slots, Yorke two,
+   * Lowe one. Nothing was wrong with any individual prop - each ranked where it
+   * ranked - but this account posts TWO player props per thread, so a board
+   * shaped like this hands the writer two Tatis props as if they were
+   * independent reads. They rise and fall together.
+   */
+  const padresBoard = [
+    { playerID: "TATIS", market: "Runs Batted In", edge: 0.318 },
+    { playerID: "TATIS", market: "Runs + RBIs", edge: 0.292 },
+    { playerID: "YORKE", market: "Hits", edge: 0.287 },
+    { playerID: "LOWE", market: "Hits", edge: 0.233 },
+    { playerID: "TATIS", market: "Score", edge: 0.233 },
+    { playerID: "YORKE", market: "Hits + Runs + RBIs", edge: 0.232 },
+  ];
+
+  test("the default cap of 2 breaks up a one-player board", () => {
+    const { kept, suppressed } = diversifyByPlayer(padresBoard, 2);
+    assert.equal(suppressed, 1, "Tatis's third prop should be suppressed");
+    const distinct = new Set(kept.map((p) => p.playerID)).size;
+    assert.equal(distinct, 3);
+    assert.equal(kept.filter((p) => p.playerID === "TATIS").length, 2);
+  });
+
+  test("a player's BEST props survive - only the marginal one is cut", () => {
+    const { kept } = diversifyByPlayer(padresBoard, 2);
+    const tatis = kept.filter((p) => p.playerID === "TATIS");
+    // The 0.318 and 0.292 props stay; the 0.233 one goes.
+    assert.deepEqual(tatis.map((p) => p.edge), [0.318, 0.292]);
+  });
+
+  test("rank order is preserved, never reshuffled", () => {
+    const { kept } = diversifyByPlayer(padresBoard, 2);
+    const edges = kept.map((p) => p.edge);
+    assert.deepEqual([...edges].sort((a, b) => b - a), edges);
+  });
+
+  test("the top-ranked prop is never removable", () => {
+    // Diversifying must not be able to demote the single best play on the board.
+    for (const cap of [1, 2, 3]) {
+      const { kept } = diversifyByPlayer(padresBoard, cap);
+      assert.equal(kept[0]?.edge, 0.318, `cap ${cap} dropped the top prop`);
+    }
+  });
+
+  test("a cap of 1 gives one prop per player", () => {
+    const { kept, suppressed } = diversifyByPlayer(padresBoard, 1);
+    assert.equal(kept.length, 3);
+    assert.equal(suppressed, 3);
+    assert.equal(new Set(kept.map((p) => p.playerID)).size, 3);
+  });
+
+  test("a cap above the worst case changes nothing", () => {
+    const { kept, suppressed } = diversifyByPlayer(padresBoard, 6);
+    assert.equal(suppressed, 0);
+    assert.equal(kept.length, padresBoard.length);
+  });
+
+  test("an already-diverse board is untouched", () => {
+    const board = [
+      { playerID: "A", edge: 0.3 },
+      { playerID: "B", edge: 0.2 },
+      { playerID: "C", edge: 0.1 },
+    ];
+    const { kept, suppressed } = diversifyByPlayer(board, 2);
+    assert.equal(suppressed, 0);
+    assert.deepEqual(kept, board);
+  });
+
+  test("an empty board does not throw", () => {
+    const { kept, suppressed } = diversifyByPlayer([], 2);
+    assert.equal(kept.length, 0);
+    assert.equal(suppressed, 0);
+  });
+
+  test("the Dingler case: 4 props on one player collapses to 2", () => {
+    // Tigers/Rays, 2026-08-24: Dillon Dingler held 4 of the top 25.
+    const board = Array.from({ length: 4 }, (_, i) => ({
+      playerID: "DINGLER",
+      edge: 0.29 - i * 0.01,
+    }));
+    const { kept, suppressed } = diversifyByPlayer(board, 2);
+    assert.equal(kept.length, 2);
+    assert.equal(suppressed, 2);
   });
 });
