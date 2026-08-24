@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import type { BDLClient } from "../services/bdlClient.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 import type { BDLInjury, SGOEvent } from "../types.js";
 
 /**
@@ -122,6 +122,20 @@ NOT a betting-value tool. It ranks marketability and availability only.`,
       },
     },
     async (input) => {
+      // Needs a roster to rank and an injury feed to gate on. Tennis has neither,
+      // and a cover graphic built from a guess publishes with the thread and
+      // cannot be quietly fixed afterwards.
+      if (!supportsCapability(input.sport as SportKey, "playerProps")) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: unsupportedMessage(input.sport as SportKey, "playerProps"),
+            },
+          ],
+        };
+      }
+
       const leagueID = sgo.leagueIDFor(input.sport as SportKey);
 
       const events = await sgo.getAllEvents({ leagueID, eventIDs: input.eventID });

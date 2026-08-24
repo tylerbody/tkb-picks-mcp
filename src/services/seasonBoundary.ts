@@ -39,6 +39,12 @@ const SEASON_START_MONTH: Record<SportKey, number> = {
   wnba: 4, // May
   nfl: 7, // August (preseason); regular season September
   cfb: 7, // August
+  // TENNIS RUNS ON THE CALENDAR YEAR. The tours open with the Australian swing in
+  // January and close in November, so a season never spans a year boundary and
+  // the "belongs to the previous season" branch below can never fire for tennis.
+  // That is correct, not an oversight.
+  atp: 0, // January
+  wta: 0, // January
 };
 
 export function seasonForDate(sport: SportKey, dateISO: string): SeasonInfo | null {

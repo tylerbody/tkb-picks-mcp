@@ -94,7 +94,7 @@ Args:
   - picks: array of { ref, eventID, marketType, side, marketLabel?, playerID?, playerName?, postedLine? }
     'ref' is your own label (e.g. "Marte TB under") and is echoed back for matching.
 
-Returns:每 pick graded, plus a slate summary (record, pushes, ungraded) ready to drop
+Returns: every pick graded, plus a slate summary (record, pushes, ungraded) ready to drop
 into the tracker.
 
 CRITICAL - PASS postedLine. SGO stores the line as it CLOSED. If you posted an over

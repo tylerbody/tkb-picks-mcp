@@ -69,9 +69,13 @@ Error Handling:
           total === 0
             ? `Team-history cache: no lookups yet this process.`
             : `Team-history cache: ${cache.hits} hit(s), ${cache.misses} miss(es), ` +
-              `${cache.depthUpgrades} depth upgrade(s) across ${cache.entries} cached ` +
-              `team histories (TTL ${cache.ttlMinutes}m). Each hit is a team-history ` +
-              `fetch avoided - roughly 30-140 entities saved depending on role depth.`;
+              `${cache.depthUpgrades} depth upgrade(s), ${cache.coalesced} coalesced ` +
+              `in-flight duplicate(s) across ${cache.entries} cached team histories ` +
+              `(TTL ${cache.ttlMinutes}m). Each hit is a team-history fetch avoided - ` +
+              `roughly 30-140 entities saved depending on role depth. Each COALESCED ` +
+              `is a concurrent duplicate collapsed into one request: before v2.6.0 ` +
+              `three screener workers could miss the same not-yet-written cache key ` +
+              `simultaneously and all three got billed.`;
 
         return {
           content: [

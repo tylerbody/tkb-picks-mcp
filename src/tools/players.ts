@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 
 const PlayersInputSchema = z
   .object({
@@ -70,6 +70,17 @@ Error Handling:
     },
     async (params: PlayersInput) => {
       try {
+        // TENNIS HAS NO ROSTER, EVER. Without this the empty-players branch below
+        // returns "props are not posted yet, retry closer to first pitch", which
+        // is false for tennis and invites an indefinite retry loop.
+        if (!supportsCapability(params.sport, "playerProps")) {
+          return {
+            content: [
+              { type: "text" as const, text: unsupportedMessage(params.sport, "playerProps") },
+            ],
+          };
+        }
+
         const leagueID = sgo.leagueIDFor(params.sport);
 
         // Request a single trivial oddID so SGO does not attach the full market

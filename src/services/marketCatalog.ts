@@ -101,6 +101,23 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
     { statID: "points", label: "Score" },
     { statID: "touchdowns", label: "Touchdowns" },
   ],
+
+  // ---- TENNIS ----
+  // EMPTY BY DESIGN, NOT BY OMISSION. SGO does carry tennis player markets
+  // (serving aces, break points won), but they are addressed through the
+  // home/away PARTICIPANT SLOTS rather than a playerID, so they do not fit the
+  // shape of this catalog - every consumer of OU_PROP_MARKETS pairs a statID
+  // with a playerID from event.players, which is permanently empty for tennis.
+  //
+  // An empty array is the correct value: tkb_screen_props reports "no countable
+  // markets" and stops, rather than screening garbage. The capability flags in
+  // constants.ts are what produce the actual explanation to the caller.
+  //
+  // IF TOTALS ARE EVER ADDED: use statID `games`, never `points`. `points`
+  // carries the SET score and settles the match winner; `games` carries the game
+  // count and is what totals and handicaps are priced on.
+  atp: [],
+  wta: [],
 };
 
 /**
@@ -165,6 +182,12 @@ export const YES_NO_MARKETS: Record<SportKey, { statID: string; label: string }[
     { statID: "points", label: "Any Score" },
     { statID: "touchdowns", label: "Any Touchdown" },
   ],
+
+  // ---- TENNIS ----
+  // Same reasoning as OU_PROP_MARKETS above: milestone markets exist but are
+  // participant-slot addressed, not playerID addressed. Moneyline only.
+  atp: [],
+  wta: [],
 };
 
 /**
@@ -193,4 +216,10 @@ export const SUPPORTED_PERIODS: Record<SportKey, string[]> = {
   wnba: ["1st_half", "2nd_half", "1st_quarter", "2nd_quarter", "3rd_quarter", "4th_quarter"],
   nfl: ["1st_half", "2nd_half", "1st_quarter", "2nd_quarter", "3rd_quarter", "4th_quarter"],
   cfb: ["1st_half", "2nd_half", "1st_quarter", "2nd_quarter", "3rd_quarter", "4th_quarter"],
+  // TENNIS: sets, not halves or quarters. Period codes 1s through 5s, added to
+  // oddIdBuilder alongside these. Best-of-five at the Grand Slams means 4s/5s
+  // only exist in men's slam matches; requesting them elsewhere returns no
+  // market rather than an error, which is the correct behaviour.
+  atp: ["1st_set", "2nd_set", "3rd_set", "4th_set", "5th_set"],
+  wta: ["1st_set", "2nd_set", "3rd_set"],
 };

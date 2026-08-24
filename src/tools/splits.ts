@@ -5,7 +5,7 @@ import type { BDLClient } from "../services/bdlClient.js";
 import { getHomeRoadSplit, getOpponentSplit } from "../services/splitsAggregator.js";
 import { currentSeason } from "../services/seasonBoundary.js";
 import { normalizeStanding, findStandingForTeam } from "../services/standingsNormalizer.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 
 /**
  * TEAM SPLITS - home record, road record, or head-to-head.
@@ -110,6 +110,14 @@ Error Handling:
     },
     async (params: SplitsInput) => {
       try {
+        if (!supportsCapability(params.sport, "teamSplits")) {
+          return {
+            content: [
+              { type: "text" as const, text: unsupportedMessage(params.sport, "teamSplits") },
+            ],
+          };
+        }
+
         // ---- Head-to-head: no standings equivalent exists, always tally events ----
         if (params.splitType === "opponent") {
           if (!params.opponentTeamID || !params.opponentName) {

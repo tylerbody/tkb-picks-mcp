@@ -4,7 +4,7 @@ import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { extractPricedLine } from "../services/oddsPricing.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 import type { NormalizedOddsLine } from "../types.js";
 
 const OddsInputSchema = z
@@ -98,7 +98,13 @@ Examples:
   - Use when: "What's the total?" -> marketType="total", teamName="Rangers"
   - Don't use when: you need recent game-log hit-rate stats - use tkb_get_player_hit_rate
   - Don't use when: you need a milestone/yes-no bet (first HR, double-double) - use tkb_get_yes_no_prop
+  - Use when: a tennis match winner -> sport="atp"/"wta", marketType="moneyline", side omitted for both players
   - Don't use when: you need a period-specific line (1st half, 1st 5 innings) - use tkb_get_period_odds
+
+TENNIS: moneyline is the ONLY market this account posts for atp/wta, and it is the
+only one wired up. Players occupy the home/away participant slots, so 'home'/'away'
+select the two players. marketType='player_prop' is refused for tennis with an
+explanation rather than returning an empty result.
 
 Error Handling:
   - Returns the full list of valid marketLabel options for this sport if the label doesn't match
@@ -125,6 +131,17 @@ Error Handling:
               },
             ],
             isError: true,
+          };
+        }
+
+        // ONLY player_prop is gated. moneyline/spread/total are event-level and
+        // work for every sport including tennis - the ML path is in fact the whole
+        // point of the tennis build, so guarding the tool as a whole would break it.
+        if (params.marketType === "player_prop" && !supportsCapability(params.sport, "playerProps")) {
+          return {
+            content: [
+              { type: "text" as const, text: unsupportedMessage(params.sport, "playerProps") },
+            ],
           };
         }
 

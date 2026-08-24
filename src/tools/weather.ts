@@ -5,7 +5,7 @@ import { MLB_STADIUMS, type StadiumInfo } from "../data/mlbStadiums.js";
 import { NFL_STADIUMS } from "../data/nflStadiums.js";
 import { CFB_STADIUMS } from "../data/cfbStadiums.js";
 import { normalizeTeamKey } from "../data/cfbTiers.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 
 const WeatherInputSchema = z
   .object({
@@ -89,6 +89,15 @@ function footballImpact(windMph: number, precipProb: number, tempF: number): str
 }
 
 function lookupStadium(params: WeatherInput): { stadium?: StadiumInfo; error?: string } {
+  // CHECK CAPABILITY FIRST. The CFB branch at the bottom of this function is a
+  // FALLTHROUGH - it handles "any sport that is not wnba/mlb/nfl" - so without
+  // this a tennis lookup would ask for homeTeamName and then search CFB_STADIUMS
+  // for a player's surname. It would have returned "no stadium on file", which is
+  // technically true and completely unhelpful about why.
+  if (!supportsCapability(params.sport, "weather")) {
+    return { error: unsupportedMessage(params.sport, "weather") };
+  }
+
   if (params.sport === "wnba") {
     return {
       error:

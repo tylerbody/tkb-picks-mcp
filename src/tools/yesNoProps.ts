@@ -4,7 +4,7 @@ import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { YES_NO_MARKETS } from "../services/marketCatalog.js";
 import { extractPricedLine } from "../services/oddsPricing.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 
 const YesNoInputSchema = z
   .object({
@@ -71,6 +71,14 @@ Error Handling:
     },
     async (params: YesNoInput) => {
       try {
+        if (!supportsCapability(params.sport, "playerProps")) {
+          return {
+            content: [
+              { type: "text" as const, text: unsupportedMessage(params.sport, "playerProps") },
+            ],
+          };
+        }
+
         const catalog = YES_NO_MARKETS[params.sport];
         const market = catalog.find(
           (m) => m.label.toLowerCase() === params.marketLabel.toLowerCase()

@@ -94,7 +94,13 @@ export async function getPlayerHitRate(
     // moneyline oddID shrinks the odds payload to at most one market instead of
     // 1000+. This is the real fix for the OOM risk on this path.
     oddIDs: "points-home-game-ml-home",
-    limit: maxScan,
+    // maxEvents, NOT limit alone. `limit` is the PER-PAGE size and getAllEvents
+    // defaulted to 10 pages, so this 400-day window (which holds 200+ finalized
+    // games for an MLB club) could bill for up to 10x maxScan events to answer a
+    // request for maxScan. Same class as the bug v2.4.1 fixed in the availability
+    // probe; this call site was never audited. See services/sgoClient.ts.
+    limit: Math.min(maxScan, 100),
+    maxEvents: maxScan,
   });
 
   const sorted = [...events].sort((a, b) => {

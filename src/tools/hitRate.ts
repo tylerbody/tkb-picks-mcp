@@ -5,7 +5,7 @@ import type { BDLClient } from "../services/bdlClient.js";
 import { getPlayerHitRate } from "../services/hitRateAggregator.js";
 import { getBdlPlayerHitRate } from "../services/bdlHitRateAggregator.js";
 import { isStatSupported } from "../services/bdlStatMap.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 
 const HitRateInputSchema = z
   .object({
@@ -105,6 +105,17 @@ Error Handling:
     },
     async (params: HitRateInput) => {
       try {
+        // Guard BEFORE routing. isStatSupported is already false for tennis, so
+        // without this the call would fall straight through to the SGO path,
+        // which needs a teamID and playerID that tennis events do not carry.
+        if (!supportsCapability(params.sport, "hitRates")) {
+          return {
+            content: [
+              { type: "text" as const, text: unsupportedMessage(params.sport, "hitRates") },
+            ],
+          };
+        }
+
         // ---- BDL-FIRST ROUTING ----
         // SGO bills per event object and a hit rate needs a whole team history,
         // so one thread measured at 211 entities and daily builds projected over

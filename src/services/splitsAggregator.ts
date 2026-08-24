@@ -36,7 +36,13 @@ export async function getHomeRoadSplit(
     // payload to a single market to keep response size minimal. Same fix as
     // hitRateAggregator.ts.
     oddIDs: "points-home-game-ml-home",
+    // BOUND THE TOTAL. `limit` is per-page and getAllEvents defaulted to 10
+    // pages, so this could pull up to 1,000 billed event objects to answer one
+    // home/road question. This is a fallback path (BDL standings are tried
+    // first), but it fires whenever standings miss - which is exactly when
+    // nobody is watching the cost.
     limit: 100,
+    maxEvents: 100,
   });
 
   const filtered = events.filter((e) => {
@@ -88,7 +94,13 @@ export async function getOpponentSplit(
     startsAfter,
     startsBefore: new Date().toISOString(),
     oddIDs: "points-home-game-ml-home",
+    // BOUND THE TOTAL. `limit` is per-page and getAllEvents defaulted to 10
+    // pages, so this could pull up to 1,000 billed event objects to answer one
+    // home/road question. This is a fallback path (BDL standings are tried
+    // first), but it fires whenever standings miss - which is exactly when
+    // nobody is watching the cost.
     limit: 100,
+    maxEvents: 100,
   });
 
   const vsOpponent = events.filter((e) => {

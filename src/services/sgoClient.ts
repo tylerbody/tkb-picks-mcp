@@ -69,10 +69,22 @@ export class SGOClient {
     live?: boolean;
     limit?: number;
     cursor?: string;
+    /**
+     * TOTAL events wanted across all pages. See getAllEvents for why this exists
+     * and why `limit` alone was a trap. Ignored by this low-level method, which
+     * issues exactly one request.
+     */
+    maxEvents?: number;
   }): Promise<SGOEventsResponse> {
     try {
+      // maxEvents is OURS, not SGO's. Passing it upstream would be an unknown
+      // query parameter - harmless today, but this connector has already been
+      // bitten once by sending a parameter SGO does not recognise and having it
+      // silently ignored (includeOpposingOdds, corrected 8 Aug 2026). Strip it
+      // explicitly rather than relying on the API to overlook it.
+      const { maxEvents: _maxEvents, ...apiParams } = params;
       const response = await this.http.get<SGOEventsResponse>("/events", {
-        params,
+        params: apiParams,
       });
       return response.data;
     } catch (err) {
@@ -134,19 +146,77 @@ export class SGOClient {
   private static readonly HISTORY_TTL_MS = 15 * 60 * 1000;
   private static readonly MAX_CACHE_ENTRIES = 60;
 
+  /**
+   * IN-FLIGHT REQUEST COALESCING (added v2.6.0).
+   *
+   * THE BUG: the history cache only writes AFTER a fetch resolves, so N callers
+   * that miss the same key simultaneously all fetch, and all get billed. The
+   * cache cannot collapse a duplicate it has not stored yet.
+   *
+   * MEASURED SHAPE OF IT: screenProps runs HIT_RATE_CONCURRENCY=3 workers, and
+   * availabilityFor reads its team map, awaits a probe, then writes. All three
+   * workers can pass the read before any of them writes, so a two-team game
+   * could pay for up to six identical 30-event team-history probes instead of
+   * two - roughly 60 wasted entities per screened game.
+   *
+   * THIS IS THE SAME RACE v2.4.0 FIXED for screenProps' rateCache, by storing
+   * the in-flight PROMISE rather than the resolved value. That fix stopped one
+   * function short of the client. Fixing it here instead means every caller
+   * benefits from one change - hit rates, screening, splits, head-to-head - which
+   * is the identical argument v1.2.0 made for putting the history cache at this
+   * layer rather than inside hitRateAggregator.
+   *
+   * ONLY CACHEABLE KEYS ARE COALESCED. Live odds, schedules and any
+   * non-finalized query legitimately change minute to minute and still hit the
+   * network every time, exactly as before. Efficiency is never traded for
+   * correctness here.
+   */
+  private inFlight = new Map<string, Promise<SGOEvent[]>>();
+
   /** Bucket an ISO timestamp to the day so near-simultaneous calls share a key. */
   private static dayBucket(iso: string | undefined): string {
     if (!iso) return "none";
     return iso.slice(0, 10);
   }
 
-  private cacheStats = { hits: 0, misses: 0, upgrades: 0 };
+  private cacheStats = { hits: 0, misses: 0, upgrades: 0, coalesced: 0 };
 
+  /**
+   * ---- `limit` IS PAGE SIZE, `maxEvents` IS THE TOTAL (v2.6.0) ----
+   *
+   * v2.4.1 established that `limit` is the PER-PAGE size and that maxPages
+   * defaults to 10, so `limit: 30` could pull up to 300 events. It fixed the one
+   * call site it was looking at (screenProps' availability probe, via
+   * maxPages: 1) and did not audit the others. Both remaining offenders were on
+   * the paths that cost the most:
+   *
+   *   - hitRateAggregator asked for 30 team games (or 140 for a pitcher) against
+   *     a 400-DAY window, which for an MLB club holds well over 200 finalized
+   *     games. The cursor kept returning pages, so a request for 30 could bill
+   *     for 300.
+   *   - splitsAggregator asked for 100 with no page bound at all, so one
+   *     home/road question could pull up to 1,000 events.
+   *
+   * Passing maxPages at every call site would have worked and would have been
+   * forgotten again the next time someone adds a caller. So the parameter now
+   * means what every caller already assumed it meant: `maxEvents` is a TOTAL,
+   * enforced here, and paging stops as soon as it is reached.
+   *
+   * SGO caps /events at 100 per page, so `limit: 140` was already being clamped
+   * upstream and then paged - which is precisely how a 140-game pitcher scan
+   * turned into an unbounded crawl. Page size is clamped explicitly below so
+   * that behaviour is visible in the code rather than happening in the API.
+   */
   async getAllEvents(
     params: Parameters<SGOClient["getEvents"]>[0],
     maxPages = 10
   ): Promise<SGOEvent[]> {
-    const requestedDepth = params.limit ?? 100;
+    // The TOTAL number of events this call should ever return. Falls back to
+    // `limit` so existing callers that pass only `limit` keep their intent
+    // honoured rather than silently paging ten times past it.
+    const ceiling = params.maxEvents ?? params.limit ?? 100;
+    // SGO's own per-page maximum for /events.
+    const pageSize = Math.min(params.limit ?? ceiling, 100);
 
     // Only immutable historical queries are cacheable.
     const cacheable = params.finalized === true;
@@ -166,14 +236,40 @@ export class SGOClient {
       const hit = this.historyCache.get(cacheKey);
       const fresh = hit && Date.now() - hit.fetchedAt < SGOClient.HISTORY_TTL_MS;
       // A cached deeper fetch satisfies any shallower request.
-      if (hit && fresh && hit.depth >= requestedDepth) {
+      if (hit && fresh && hit.depth >= ceiling) {
         this.cacheStats.hits++;
         return hit.events;
       }
+
+      // COALESCE. An identical cacheable fetch already running answers this one.
+      // Without this, concurrent callers all miss the not-yet-written cache and
+      // all get billed - see the inFlight declaration above for the measured case.
+      const pending = this.inFlight.get(cacheKey);
+      if (pending) {
+        this.cacheStats.coalesced++;
+        return pending;
+      }
+
       if (hit && fresh) this.cacheStats.upgrades++;
       else this.cacheStats.misses++;
     }
 
+    const work = this.fetchAllPages(params, { pageSize, ceiling, maxPages, cacheKey });
+
+    if (cacheKey) {
+      this.inFlight.set(cacheKey, work);
+      // Clear on settle, success or failure. A rejected promise must not be left
+      // in the map to be handed to every future caller of this key.
+      void work.catch(() => undefined).finally(() => this.inFlight.delete(cacheKey));
+    }
+
+    return work;
+  }
+
+  private async fetchAllPages(
+    params: Parameters<SGOClient["getEvents"]>[0],
+    opts: { pageSize: number; ceiling: number; maxPages: number; cacheKey: string | null }
+  ): Promise<SGOEvent[]> {
     const allEvents: SGOEvent[] = [];
     let cursor: string | undefined = undefined;
     let pages = 0;
@@ -182,17 +278,38 @@ export class SGOClient {
       const page: SGOEventsResponse = await this.getEvents({
         ...params,
         cursor,
-        limit: requestedDepth,
+        limit: opts.pageSize,
       });
       allEvents.push(...page.data);
       cursor = page.nextCursor ?? undefined;
       pages++;
-    } while (cursor && pages < maxPages);
+      // STOP AT THE CEILING. This is the actual fix - previously only the page
+      // count bounded the loop, so the total was pageSize * maxPages.
+    } while (cursor && pages < opts.maxPages && allEvents.length < opts.ceiling);
 
-    if (cacheKey) {
-      this.historyCache.set(cacheKey, {
+    if (opts.cacheKey) {
+      this.historyCache.set(opts.cacheKey, {
         events: allEvents,
-        depth: requestedDepth,
+        // STORE WHAT WE ACTUALLY HOLD, NOT WHAT WAS ASKED FOR.
+        //
+        // depth was previously `params.limit`, i.e. the page size. Combined with
+        // the unbounded paging above, a cached entry routinely held far more
+        // events than its own depth claimed - and the consequence was a spurious
+        // refetch on a path that runs constantly.
+        //
+        // A position-player rate (limit 30) and a pitcher rate (limit 140) on the
+        // same team share a cache key: same league, same team, same 400-day date
+        // bucket, same oddIDs. The pitcher then failed `depth >= ceiling`,
+        // counted a depth upgrade, and refetched an entire team history the cache
+        // very likely already held in full. Every MLB thread has at least one
+        // pitcher prop and several hitter props, so this fired roughly once per
+        // team per screen.
+        //
+        // events.length is the honest measure of what an entry can serve. The
+        // Math.max keeps an exact-ceiling fetch recording its own ceiling, so a
+        // short window that genuinely returned few games still satisfies later
+        // requests for that same shallow depth instead of refetching forever.
+        depth: Math.max(allEvents.length, opts.ceiling),
         fetchedAt: Date.now(),
       });
       // Bound memory. A full slate touches roughly 30 team histories.
@@ -222,6 +339,7 @@ export class SGOClient {
     hits: number;
     misses: number;
     depthUpgrades: number;
+    coalesced: number;
     ttlMinutes: number;
   } {
     return {
@@ -229,6 +347,10 @@ export class SGOClient {
       hits: this.cacheStats.hits,
       misses: this.cacheStats.misses,
       depthUpgrades: this.cacheStats.upgrades,
+      // Concurrent duplicate fetches collapsed into one. Reported for the same
+      // reason every other counter here is: a saving you cannot observe is a
+      // saving you are assuming.
+      coalesced: this.cacheStats.coalesced,
       ttlMinutes: SGOClient.HISTORY_TTL_MS / 60000,
     };
   }

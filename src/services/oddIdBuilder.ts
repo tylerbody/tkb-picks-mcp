@@ -31,6 +31,14 @@ export const PERIOD_CODES: Record<string, string> = {
   "1st_3_innings": "1ix3",
   "1st_5_innings": "1ix5",
   "1st_7_innings": "1ix7",
+  // TENNIS SETS. Confirmed from SGO's tennis documentation, which names 1s
+  // through 5s explicitly for per-set markets - unlike the half/quarter codes
+  // below, these are documented rather than inferred.
+  "1st_set": "1s",
+  "2nd_set": "2s",
+  "3rd_set": "3s",
+  "4th_set": "4s",
+  "5th_set": "5s",
 };
 
 /**

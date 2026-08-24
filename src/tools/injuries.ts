@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BDLClient } from "../services/bdlClient.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 import type { NormalizedInjury, BDLInjury } from "../types.js";
 
 const InjuriesInputSchema = z
@@ -101,7 +101,8 @@ late changes move props more than anything else in the sport. A clean report her
 on Thursday does NOT mean a player is confirmed active on Sunday.
 
 Args:
-  - sport ('mlb'|'wnba'|'nfl'|'cfb'): which sport
+  - sport ('mlb'|'wnba'|'nfl'): which sport. CFB and tennis have no injury feed on
+    the current plan and are refused with an explanation.
   - playerName (string, optional): narrow to one player
   - teamName (string, optional): narrow to one team's report
 
@@ -127,6 +128,14 @@ Error Handling:
     },
     async (params: InjuriesInput) => {
       try {
+        if (!supportsCapability(params.sport, "injuries")) {
+          return {
+            content: [
+              { type: "text" as const, text: unsupportedMessage(params.sport, "injuries") },
+            ],
+          };
+        }
+
         const allInjuries = await bdl.getAllInjuries(params.sport);
 
         // How much of this payload actually carries team data? This drives whether

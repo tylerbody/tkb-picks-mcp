@@ -13,7 +13,12 @@ import { getBdlPlayerHitRate } from "../services/bdlHitRateAggregator.js";
 import { isStatSupported } from "../services/bdlStatMap.js";
 import { describeRecency, STARTING_PITCHER_THRESHOLDS } from "../services/sampleRecency.js";
 import type { BDLClient } from "../services/bdlClient.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import {
+  SUPPORTED_SPORTS,
+  supportsCapability,
+  unsupportedMessage,
+  type SportKey,
+} from "../constants.js";
 
 /**
  * PROP SCREENER
@@ -110,6 +115,11 @@ async function probeTeamAvailability(
         // Narrow the odds payload to a single market - only results are read here.
         oddIDs: "points-home-game-ml-home",
         limit: 30,
+        // Belt and braces with the maxPages: 1 below. maxEvents states the
+        // intent ("thirty games") in the same terms every other call site now
+        // uses, so the denominator in the IRREGULAR note stays honest even if
+        // the page argument is ever dropped.
+        maxEvents: 30,
       },
       // ONE PAGE. `limit` is the PAGE SIZE in getAllEvents, not a total cap, and
       // the default maxPages of 10 turned "limit: 30" into up to 300 events.
@@ -336,6 +346,20 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       },
     },
     async (input) => {
+      // Without this, an empty tennis catalog produces "No countable markets for
+      // atp. Available: " with nothing after the colon - accurate, and useless
+      // about why. The capability message explains that it is structural.
+      if (!supportsCapability(input.sport as SportKey, "playerProps")) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: unsupportedMessage(input.sport as SportKey, "playerProps"),
+            },
+          ],
+        };
+      }
+
       const leagueID = sgo.leagueIDFor(input.sport as SportKey);
 
       const catalog = OU_PROP_MARKETS[input.sport as SportKey] ?? [];

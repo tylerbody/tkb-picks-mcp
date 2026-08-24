@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { resolveStat, isStatSupported } from "../services/bdlStatMap.js";
 import { currentSeason } from "../services/seasonBoundary.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 
 /**
  * STREAK & MILESTONE SCANNER
@@ -128,6 +128,14 @@ Error Handling:
       },
     },
     async (params: StreakInput) => {
+      if (!supportsCapability(params.sport, "hitRates")) {
+        return {
+          content: [
+            { type: "text" as const, text: unsupportedMessage(params.sport, "hitRates") },
+          ],
+        };
+      }
+
       if (!isStatSupported(params.sport, params.statID)) {
         return {
           content: [

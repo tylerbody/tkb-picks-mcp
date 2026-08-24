@@ -16,7 +16,9 @@ const ScheduleInputSchema = z
   .object({
     sport: z
       .enum(SUPPORTED_SPORTS as [SportKey, ...SportKey[]])
-      .describe("Which sport's schedule to fetch (mlb, wnba, nfl, cfb)"),
+      .describe(
+        "Which sport's schedule to fetch. Team sports: mlb, wnba, nfl, cfb. Tennis: atp, wta - these return MATCHES, with each player in the home/away slot, and the account posts moneyline only for them."
+      ),
     date: z
       .string()
       .optional()
@@ -72,7 +74,7 @@ export function registerScheduleTool(server: McpServer, sgo: SGOClient) {
       description: `Get the game schedule for a sport, with flexible date and filtering options.
 
 Args:
-  - sport ('mlb'|'wnba'|'nfl'|'cfb'): which sport
+  - sport ('mlb'|'wnba'|'nfl'|'cfb'|'atp'|'wta'): which sport
   - date (string, optional): single date YYYY-MM-DD
   - startsAfter / startsBefore (ISO datetime, optional): date range instead of single date
   - teamName (string, optional): filter to one team's games
@@ -88,7 +90,13 @@ Examples:
   - Use when: "Top 25 matchups this week" -> sport="cfb", tier="top25", rankedTeams="..." from a live Top 25 search
   - Use when: "what CFB should we post Saturday" -> sport="cfb", tier="postable" (Power 4 + rivalries)
   - Use when: "rivalry games this week" -> sport="cfb", tier="rivalry"
+  - Use when: "what US Open matches are on today?" -> sport="atp" or "wta" with a date
   - Don't use when: you need odds/lines for these games - use tkb_get_odds instead
+
+TENNIS NOTE: atp/wta events put each PLAYER in the home/away team slot, so homeTeam
+and awayTeam in the output are player names and teamName filters on a player name.
+There is no roster, no player props and no hit rates for tennis - moneyline only.
+The CFB tier/conference/rankedTeams arguments are ignored for every other sport.
 
 Error Handling:
   - Returns a clear message if the sport has no games in the requested window
