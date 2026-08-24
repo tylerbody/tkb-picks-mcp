@@ -12,6 +12,7 @@ import {
 } from "../src/services/sampleRecency.js";
 import { resolveStat } from "../src/services/bdlStatMap.js";
 import { seasonForDate } from "../src/services/seasonBoundary.js";
+import { sizeLookbackWindow } from "../src/services/hitRateAggregator.js";
 import { buildOddID } from "../src/services/oddIdBuilder.js";
 import { weightedTweetLength } from "../src/tools/tweetChars.js";
 import {
@@ -409,5 +410,71 @@ describe("sport configuration completeness", () => {
     assert.equal(OU_PROP_MARKETS.atp.length, 0);
     assert.equal(YES_NO_MARKETS.wta.length, 0);
     assert.ok(SUPPORTED_PERIODS.atp.includes("1st_set"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("hit-rate lookback window sizing", () => {
+  /**
+   * THE TEST THAT SHOULD HAVE EXISTED BEFORE v2.6.0 SHIPPED.
+   *
+   * v2.6.0 tried to control cost with an EVENT CEILING against a fixed 400-day
+   * window. SGO does not return finalized events newest-first, so the ceiling
+   * truncated to the OLDEST games in the window. Live test on 24 Aug 2026
+   * returned Spencer Torkelson's August 2025 games: fifteen real games, counted
+   * correctly, exactly one year stale.
+   *
+   * The rule that came out of it: with untrusted API ordering, the WINDOW is the
+   * only safe cost control, because a window bounds cost without changing which
+   * games are eligible. Anything that caps the fetch mid-window silently changes
+   * the answer.
+   */
+  const MLB_POSITION = { sport: "mlb" as SportKey, targetAppearances: 15, teamGamesPerAppearance: 1, maxScan: 30 };
+  const MLB_PITCHER = { sport: "mlb" as SportKey, targetAppearances: 10, teamGamesPerAppearance: 5, maxScan: 140 };
+
+  test("an MLB position player looks back weeks, not a year", () => {
+    const { windowDays } = sizeLookbackWindow(MLB_POSITION);
+    assert.ok(windowDays <= 45, `window should be weeks, got ${windowDays} days`);
+    assert.ok(windowDays >= 30, `window must hold ~15 appearances, got ${windowDays} days`);
+  });
+
+  test("an MLB starter gets a wider window, because starts are every fifth game", () => {
+    const pitcher = sizeLookbackWindow(MLB_PITCHER);
+    const batter = sizeLookbackWindow(MLB_POSITION);
+    assert.ok(
+      pitcher.windowDays > batter.windowDays * 2,
+      `pitcher ${pitcher.windowDays}d vs batter ${batter.windowDays}d`
+    );
+    // 10 starts needs ~50 team games, which is ~60 days of baseball.
+    assert.ok(pitcher.windowDays >= 60, `got ${pitcher.windowDays} days`);
+  });
+
+  test("the window actually holds enough team games to hit the target", () => {
+    // MLB plays roughly 6 games a week. A window that cannot physically contain
+    // the appearances being asked for will silently return a short sample.
+    const { windowDays } = sizeLookbackWindow(MLB_POSITION);
+    const gamesInWindow = windowDays / 1.25;
+    assert.ok(gamesInWindow >= 15, `${gamesInWindow.toFixed(0)} games cannot yield 15 appearances`);
+  });
+
+  test("weekly sports get proportionally longer windows", () => {
+    const nfl = sizeLookbackWindow({ ...MLB_POSITION, sport: "nfl" });
+    const mlb = sizeLookbackWindow(MLB_POSITION);
+    assert.ok(nfl.windowDays > mlb.windowDays, "NFL plays once a week, MLB nearly daily");
+  });
+
+  test("the safety ceiling bounds the window, it does not truncate the fetch", () => {
+    // A caller passing a small maxScan should get a SMALLER WINDOW, so the games
+    // it does return are still the most recent ones.
+    const tight = sizeLookbackWindow({ ...MLB_POSITION, maxScan: 10 });
+    assert.equal(tight.teamGamesNeeded, 10);
+    assert.ok(tight.windowDays <= sizeLookbackWindow(MLB_POSITION).windowDays);
+  });
+
+  test("the window never exceeds 400 days for any configuration", () => {
+    const huge = sizeLookbackWindow({
+      sport: "nfl", targetAppearances: 40, teamGamesPerAppearance: 5, maxScan: 200,
+    });
+    assert.ok(huge.windowDays <= 400, `got ${huge.windowDays}`);
   });
 });

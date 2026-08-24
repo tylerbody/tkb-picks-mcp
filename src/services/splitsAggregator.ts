@@ -36,13 +36,16 @@ export async function getHomeRoadSplit(
     // payload to a single market to keep response size minimal. Same fix as
     // hitRateAggregator.ts.
     oddIDs: "points-home-game-ml-home",
-    // BOUND THE TOTAL. `limit` is per-page and getAllEvents defaulted to 10
-    // pages, so this could pull up to 1,000 billed event objects to answer one
-    // home/road question. This is a fallback path (BDL standings are tried
-    // first), but it fires whenever standings miss - which is exactly when
-    // nobody is watching the cost.
     limit: 100,
-    maxEvents: 100,
+    // A CEILING OF 100 WOULD HAVE BEEN WRONG HERE. A full MLB season is 162
+    // games, and SGO does not return them newest-first, so capping at 100 would
+    // compute a home/road record from an arbitrary partial season and present it
+    // as complete. A wrong record is worse than an expensive one.
+    //
+    // Cost is bounded by the 220-day window instead, and this path only runs when
+    // the BDL standings lookup misses. Set above a full season so it never
+    // truncates.
+    maxEvents: 250,
   });
 
   const filtered = events.filter((e) => {
@@ -94,13 +97,16 @@ export async function getOpponentSplit(
     startsAfter,
     startsBefore: new Date().toISOString(),
     oddIDs: "points-home-game-ml-home",
-    // BOUND THE TOTAL. `limit` is per-page and getAllEvents defaulted to 10
-    // pages, so this could pull up to 1,000 billed event objects to answer one
-    // home/road question. This is a fallback path (BDL standings are tried
-    // first), but it fires whenever standings miss - which is exactly when
-    // nobody is watching the cost.
     limit: 100,
-    maxEvents: 100,
+    // A CEILING OF 100 WOULD HAVE BEEN WRONG HERE. A full MLB season is 162
+    // games, and SGO does not return them newest-first, so capping at 100 would
+    // compute a home/road record from an arbitrary partial season and present it
+    // as complete. A wrong record is worse than an expensive one.
+    //
+    // Cost is bounded by the 220-day window instead, and this path only runs when
+    // the BDL standings lookup misses. Set above a full season so it never
+    // truncates.
+    maxEvents: 250,
   });
 
   const vsOpponent = events.filter((e) => {

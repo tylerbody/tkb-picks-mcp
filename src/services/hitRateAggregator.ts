@@ -32,7 +32,31 @@ interface RoleProfile {
   defaultAppearances: number;
   defaultMaxScan: number;
   minSufficient: number;
+  /**
+   * How many TEAM games pass per one appearance by this role. Used to size the
+   * lookback WINDOW, which is what actually controls both cost and recency.
+   */
+  teamGamesPerAppearance: number;
 }
+
+/**
+ * Roughly how many days pass between a team's games, per sport. Used only to
+ * translate "we need about N team games" into a date window.
+ *
+ * Approximations on purpose, and deliberately generous. Undersizing the window
+ * loses recent games; oversizing it costs a few extra event objects. Those are
+ * not symmetric errors.
+ */
+const DAYS_PER_TEAM_GAME: Record<SportKey, number> = {
+  mlb: 1.25,
+  wnba: 2.6,
+  nfl: 7.5,
+  cfb: 7.5,
+  // Tennis never reaches this aggregator - the capability guard in tools/hitRate.ts
+  // refuses first. Present so the table stays exhaustive over SportKey.
+  atp: 1,
+  wta: 1,
+};
 
 /**
  * Appearance frequency drives how far back we must scan. A starter pitches every
@@ -41,15 +65,51 @@ interface RoleProfile {
 const ROLE_PROFILES: Record<PlayerRole, RoleProfile> = {
   // A starter pitches every 5th team game, so 10 starts needs ~50 team games of
   // scan. The 140 ceiling gives ~28 starts of runway before giving up.
-  starting_pitcher: { defaultAppearances: 10, defaultMaxScan: 140, minSufficient: 5 },
+  starting_pitcher: {
+    defaultAppearances: 10,
+    defaultMaxScan: 140,
+    minSufficient: 5,
+    teamGamesPerAppearance: 5,
+  },
   // Everyday players appear in nearly every team game, so the scan stays shallow.
   // NFL/CFB weekly schedules also fit here since one appearance per team game.
-  position_player: { defaultAppearances: 15, defaultMaxScan: 30, minSufficient: 8 },
+  position_player: {
+    defaultAppearances: 15,
+    defaultMaxScan: 30,
+    minSufficient: 8,
+    teamGamesPerAppearance: 1,
+  },
 };
 
 export function inferPlayerRole(statID: string, _sport: SportKey): PlayerRole {
   // The pitching_ prefix is the only reliable role signal SGO gives us.
   return statID.startsWith("pitching_") ? "starting_pitcher" : "position_player";
+}
+
+/**
+ * How far back to look, in days, and roughly how many team games that covers.
+ *
+ * EXPORTED SO IT CAN BE TESTED WITHOUT A NETWORK. The bug this replaced shipped
+ * because the sizing logic lived inline inside a function that needs an SGO
+ * client, so nothing could assert on it. A cost change that alters WHICH data
+ * comes back is a correctness change and needs a test.
+ */
+export function sizeLookbackWindow(params: {
+  sport: SportKey;
+  targetAppearances: number;
+  teamGamesPerAppearance: number;
+  maxScan: number;
+}): { teamGamesNeeded: number; windowDays: number } {
+  // Headroom for DNPs and rest days, bounded by the caller's safety ceiling.
+  const teamGamesNeeded = Math.min(
+    Math.ceil(params.targetAppearances * params.teamGamesPerAppearance * 1.5),
+    params.maxScan
+  );
+  const windowDays = Math.min(
+    400,
+    Math.max(30, Math.ceil(teamGamesNeeded * DAYS_PER_TEAM_GAME[params.sport]))
+  );
+  return { teamGamesNeeded, windowDays };
 }
 
 export async function getPlayerHitRate(
@@ -73,15 +133,36 @@ export async function getPlayerHitRate(
   const maxScan = params.maxTeamGamesScanned ?? profile.defaultMaxScan;
   const leagueID = sgo.leagueIDFor(params.sport);
 
-  // Must bound by date. A live test showed finalized=true with no date bound can
-  // return games from a much earlier season - the API's default ordering for
-  // finalized events is not most-recent-first and was confirmed NOT to be
-  // (returned Sept 2024 games when today is Aug 2026). Bound to "before now",
-  // pull a wide window, and sort ourselves rather than trusting API ordering.
+  // ---- WINDOW SIZING IS THE COST CONTROL. NOT A PAGE OR EVENT CAP. ----
+  //
+  // SGO's ordering for finalized events is confirmed NOT to be most-recent-first,
+  // so the ONLY safe way to get a player's recent games is to fetch the whole
+  // window and sort locally. That makes any event ceiling actively dangerous: it
+  // truncates to whatever the API happened to return first, which is routinely
+  // the OLDEST games in the window.
+  //
+  // v2.6.0 LEARNED THIS THE HARD WAY. Capping the fetch at maxScan events against
+  // the old fixed 400-day window returned Spencer Torkelson's August 2025 games
+  // on 24 Aug 2026 - fifteen real games, correctly counted, exactly one year
+  // stale. Same failure as the Alejandro Kirk case in v2.5.0, on a different path.
+  //
+  // v2.5.0 already established the correct fix for that class of bug, in the
+  // availability probe: "recency comes from the date bound rather than trusting
+  // API ordering". Applying the same rule here. The window is sized to hold
+  // roughly the number of team games this role actually needs, so exhausting it
+  // is BOTH correct and cheap - a 400-day MLB window held 200+ games, a 30-day
+  // one holds about 26.
   const now = new Date();
   const startsBefore = now.toISOString();
+
+  const { teamGamesNeeded, windowDays } = sizeLookbackWindow({
+    sport: params.sport,
+    targetAppearances,
+    teamGamesPerAppearance: profile.teamGamesPerAppearance,
+    maxScan,
+  });
   const lookbackWindowStart = new Date(now);
-  lookbackWindowStart.setDate(lookbackWindowStart.getDate() - 400);
+  lookbackWindowStart.setDate(lookbackWindowStart.getDate() - windowDays);
 
   const events = await sgo.getAllEvents({
     leagueID,
@@ -94,13 +175,12 @@ export async function getPlayerHitRate(
     // moneyline oddID shrinks the odds payload to at most one market instead of
     // 1000+. This is the real fix for the OOM risk on this path.
     oddIDs: "points-home-game-ml-home",
-    // maxEvents, NOT limit alone. `limit` is the PER-PAGE size and getAllEvents
-    // defaulted to 10 pages, so this 400-day window (which holds 200+ finalized
-    // games for an MLB club) could bill for up to 10x maxScan events to answer a
-    // request for maxScan. Same class as the bug v2.4.1 fixed in the availability
-    // probe; this call site was never audited. See services/sgoClient.ts.
-    limit: Math.min(maxScan, 100),
-    maxEvents: maxScan,
+    limit: 100,
+    // A SAFETY VALVE, NOT THE COST CONTROL. Set deliberately ABOVE what the sized
+    // window can hold, so it never truncates a window and never silently drops
+    // recent games. The window is what bounds cost; this only stops a runaway if
+    // the window estimate is badly wrong for some sport or schedule quirk.
+    maxEvents: Math.max(teamGamesNeeded * 3, 60),
   });
 
   const sorted = [...events].sort((a, b) => {
