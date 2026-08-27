@@ -278,6 +278,31 @@ export interface NormalizedStanding {
   season: number | null;
 }
 
+/**
+ * BALLDONTLIE AP poll row (NCAAF).
+ *
+ * `trend` is a STRING, not a number: BDL returns "-" for no movement and "+1" /
+ * "-1" for a move. Parsing it as a number would yield NaN on the most common
+ * value, so it is kept as text and shown as text.
+ */
+export interface BDLRankingRow {
+  team: BDLTeam;
+  season?: number;
+  week?: number;
+  rank: number;
+  first_place_votes?: number;
+  points?: number;
+  trend?: string;
+  record?: string;
+}
+
+/** BALLDONTLIE conference row (NCAAF). */
+export interface BDLConference {
+  id: number;
+  name: string;
+  abbreviation?: string;
+}
+
 export interface BDLStandingsResponse {
   data: BDLStanding[];
   meta?: { next_cursor?: number | null; per_page?: number };

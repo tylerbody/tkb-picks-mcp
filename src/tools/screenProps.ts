@@ -12,6 +12,7 @@ import { getPlayerHitRate } from "../services/hitRateAggregator.js";
 import { getBdlPlayerHitRate } from "../services/bdlHitRateAggregator.js";
 import { isStatSupported } from "../services/bdlStatMap.js";
 import { describeRecency, STARTING_PITCHER_THRESHOLDS } from "../services/sampleRecency.js";
+import { parseOddID } from "../services/oddIdParser.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import {
   SUPPORTED_SPORTS,
@@ -592,14 +593,15 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       const candidates: Candidate[] = [];
 
       for (const [oddID, odd] of Object.entries(event.odds ?? {})) {
-        const parts = oddID.split("-");
-        if (parts.length < 5) continue;
+        // HARDENED IN v2.6.5. This previously sliced the last four segments off
+        // by position, which silently misreads the documented six-segment form
+        // (...-betType-side-bookmakerID) by treating the bookmaker as the side.
+        // The shared parser anchors on the closed betType/side vocabularies
+        // instead of counting, and refuses rather than guessing.
+        const parsed = parseOddID(oddID);
+        if (!parsed) continue;
 
-        const side = parts[parts.length - 1] as string;
-        const betType = parts[parts.length - 2];
-        const period = parts[parts.length - 3];
-        const entity = parts[parts.length - 4] as string;
-        const statID = parts.slice(0, parts.length - 4).join("-");
+        const { side, betType, period, entity, statID } = parsed;
 
         if (betType !== "ou") continue;
         if (period !== "game") continue;
@@ -624,7 +626,7 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           playerID: entity,
           statID,
           line,
-          side,
+          side: side as "over" | "under",
           americanOdds: priced.value.americanOdds,
           bookmaker: priced.value.bookmaker ?? "unknown",
         });

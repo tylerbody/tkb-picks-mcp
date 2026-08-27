@@ -4,6 +4,8 @@ import type {
   BDLInjuriesResponse,
   BDLGamesResponse,
   BDLStandingsResponse,
+  BDLRankingRow,
+  BDLConference,
   BDLTeam,
 } from "../types.js";
 
@@ -157,6 +159,94 @@ export class BDLClient {
       return response.data;
     } catch (err) {
       throw formatBDLError(err, `${sport} standings`, sport);
+    }
+  }
+
+  /**
+   * ---- AP POLL RANKINGS (NCAAF) ----
+   *
+   * WHY THIS MATTERS MORE THAN IT LOOKS. tkb_get_schedule's CFB tiering requires
+   * the caller to supply `rankedTeams` from a live web search on EVERY call. That
+   * was the right decision when it was made: SGO was confirmed not to expose a
+   * ranking field, and hardcoding a Top 25 into the server would go stale within a
+   * week and then return wrong results silently all season.
+   *
+   * BALLDONTLIE publishes the AP poll directly, on the ALL-STAR tier this account
+   * ALREADY HOLDS for NCAAF. So the manual step was never necessary; it was a gap
+   * in what the connector knew about its own subscriptions. It costs zero SGO
+   * entities and removes a recurring human step from every CFB build.
+   *
+   * WEEK DEFAULTS TO CURRENT when omitted, per BDL's own parameter docs.
+   *
+   * NOT AVAILABLE FOR EVERY SPORT. Rankings are an NCAA concept; MLB, WNBA and NFL
+   * have no poll. The tool layer gates this rather than the client.
+   */
+  async getRankings(
+    sport: SportKey,
+    params: { season: number; week?: number }
+  ): Promise<{ data: BDLRankingRow[] }> {
+    try {
+      const response = await this.http.get<{ data: BDLRankingRow[] }>(
+        this.buildPath(sport, "rankings"),
+        { params: { season: params.season, ...(params.week ? { week: params.week } : {}) } }
+      );
+      return response.data;
+    } catch (err) {
+      throw formatBDLError(err, `${sport} rankings`, sport);
+    }
+  }
+
+  /**
+   * ---- CONFERENCES (NCAAF) ----
+   *
+   * Needed only because NCAAF standings require a conference_id, and conference
+   * names are what a human actually has ("ACC", "Big Ten"). One cheap lookup
+   * resolves the name to the id.
+   *
+   * CACHED FOR THE PROCESS LIFETIME. The conference list changes at most once a
+   * year during realignment, so a TTL would be theatre. Re-fetching it on every
+   * standings call would burn a throttled round trip for data that is effectively
+   * static.
+   */
+  private conferenceCache = new Map<SportKey, BDLConference[]>();
+
+  async getConferences(sport: SportKey): Promise<BDLConference[]> {
+    const cached = this.conferenceCache.get(sport);
+    if (cached) return cached;
+    try {
+      const response = await this.http.get<{ data: BDLConference[] }>(
+        this.buildPath(sport, "conferences")
+      );
+      const rows = response.data?.data ?? [];
+      this.conferenceCache.set(sport, rows);
+      return rows;
+    } catch (err) {
+      throw formatBDLError(err, `${sport} conferences`, sport);
+    }
+  }
+
+  /**
+   * Standings scoped to one conference.
+   *
+   * SEPARATE FROM getStandings BECAUSE THE CONTRACT DIFFERS. BDL's NCAAF standings
+   * endpoint documents conference_id as REQUIRED, unlike the league-wide standings
+   * used by MLB/WNBA/NFL. Overloading one method with an optional parameter would
+   * hide the fact that omitting it is an error for one sport and normal for the
+   * others - the same reasoning that keeps the pick'em and prediction-market
+   * blocklists in separate sets rather than one bag.
+   */
+  async getConferenceStandings(
+    sport: SportKey,
+    params: { conferenceId: number; season: number }
+  ): Promise<BDLStandingsResponse> {
+    try {
+      const response = await this.http.get<BDLStandingsResponse>(
+        this.buildPath(sport, "standings"),
+        { params: { conference_id: params.conferenceId, season: params.season } }
+      );
+      return response.data;
+    } catch (err) {
+      throw formatBDLError(err, `${sport} conference standings`, sport);
     }
   }
 

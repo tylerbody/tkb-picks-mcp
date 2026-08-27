@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
+import { parseOddID, type ParsedOddID } from "../services/oddIdParser.js";
 import {
   SUPPORTED_SPORTS,
   supportsCapability,
@@ -87,42 +88,13 @@ import {
  */
 const DEFAULT_BOOKMAKERS = "draftkings,fanduel,betmgm,caesars";
 
-export interface ParsedOddID {
-  statID: string;
-  entity: string;
-  period: string;
-  betType: string;
-  side: string;
-}
-
 /**
- * Split an SGO oddID into its parts.
- *
- * Shape is {statID}-{entity}-{periodID}-{betType}-{side}, and the statID is
- * reassembled from everything BEFORE the last four segments rather than taken as
- * parts[0]. That matters: statIDs are not single tokens. "passing+rushing_yards"
- * and "batting_hits+runs+rbi" are real catalog entries, and playerIDs carry
- * underscores. Neither contains a hyphen, which is what makes splitting from the
- * right safe.
- *
- * Exported and pure so it can be tested. v2.6.1's lesson was that logic changing
- * WHICH data reaches the user is correctness logic, and burying it inside a
- * function that needs an API client makes it untestable - npm test passed 39/39
- * against a build returning year-stale data for exactly that reason.
+ * Re-exported so existing callers and tests keep one import site. The parser
+ * itself moved to services/oddIdParser.ts in v2.6.5 when it was hardened against
+ * the documented six-segment oddID form; see that file for why.
  */
-export function parseOddID(oddID: string): ParsedOddID | null {
-  const parts = oddID.split("-");
-  if (parts.length < 5) return null;
-
-  const side = parts[parts.length - 1] ?? "";
-  const betType = parts[parts.length - 2] ?? "";
-  const period = parts[parts.length - 3] ?? "";
-  const entity = parts[parts.length - 4] ?? "";
-  const statID = parts.slice(0, parts.length - 4).join("-");
-
-  if (!statID || !entity || !side || !betType || !period) return null;
-  return { statID, entity, period, betType, side };
-}
+export { parseOddID };
+export type { ParsedOddID };
 
 export interface PricedSide {
   playerID: string;

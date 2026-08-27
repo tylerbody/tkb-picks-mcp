@@ -1,6 +1,6 @@
 {
   "name": "tkb-picks-mcp-server",
-  "version": "2.6.4",
+  "version": "2.6.5",
   "description": "MCP server for TKB Picks - wraps SportsGameOdds and BALLDONTLIE APIs for odds, schedules, stats, hit-rates, splits, and injuries across MLB, WNBA, NFL, NCAAF and ATP/WTA tennis (moneyline only).",
   "main": "dist/index.js",
   "type": "module",

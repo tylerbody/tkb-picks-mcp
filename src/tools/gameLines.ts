@@ -312,21 +312,33 @@ Error Handling:
 
         let events: SGOEvent[] = [];
         let requestCount = 0;
+        let missingEventIDs: string[] = [];
 
         if (input.eventIDs?.length) {
-          // One fetch per event, the gradePicks pattern. Comma-separated eventIDs
-          // may well work in a single request but is unconfirmed, and guessing at
-          // an API parameter is how includeOpposingOdds went silently ignored.
-          for (const eventID of input.eventIDs) {
-            requestCount++;
-            const found = await sgo.getAllEvents({
-              leagueID,
-              eventIDs: eventID,
-              oddIDs,
-              bookmakerID: bookFilter,
-            });
-            if (found[0]) events.push(found[0]);
-          }
+          // BATCHED IN v2.6.5. v2.6.4 fetched one event at a time because
+          // comma-separated eventIDs was unverified. SGO's best-practices doc
+          // settles it: "query by eventID or eventIDs - this is the fastest query
+          // path". So N requests become 1.
+          //
+          // THE DOCUMENTED CAVEAT, worth knowing: when eventIDs is supplied every
+          // OTHER filter is ignored (leagueID, live, startsAfter and so on). Only
+          // the response-shaping params - oddID, bookmakerID, playerID - still
+          // apply. That is fine here since the IDs already identify the games, but
+          // it means you cannot combine eventIDs with a date bound and expect the
+          // date to do anything.
+          requestCount = 1;
+          events = await sgo.getAllEvents({
+            leagueID,
+            eventIDs: input.eventIDs.join(","),
+            oddIDs,
+            bookmakerID: bookFilter,
+            limit: 100,
+          });
+
+          // Report anything asked for that did not come back, rather than
+          // silently returning a shorter list than was requested.
+          const returned = new Set(events.map((e) => e.eventID));
+          missingEventIDs = input.eventIDs.filter((id) => !returned.has(id));
         } else {
           let startsAfter = input.startsAfter;
           let startsBefore = input.startsBefore;
@@ -369,6 +381,12 @@ Error Handling:
           ? `Priced against: ${bookFilter}.`
           : `Priced against ALL venues - filter disabled. Diagnostic only.`;
 
+        const missingLine = missingEventIDs.length
+          ? `\n\nREQUESTED BUT NOT RETURNED (${missingEventIDs.length}): ` +
+            `${missingEventIDs.join(", ")}. Confirm these eventIDs are correct and belong to ` +
+            `${input.sport.toUpperCase()}.`
+          : "";
+
         const emptyLine = withNothing.length
           ? `\n\nNO PRICED TEAM MARKETS on ${withNothing.length} game(s): ` +
             `${withNothing.map((r) => r.matchup).join("; ")}. Listed rather than dropped, ` +
@@ -378,7 +396,7 @@ Error Handling:
         const summary =
           `${rows.length} game(s), ${withSomething.length} with at least one priced team ` +
           `market. Markets pulled: ${kinds.join(", ")}. ${requestCount} request(s), ` +
-          `roughly ${events.length} entities.\n\n${bookLine}${emptyLine}\n\n` +
+          `roughly ${events.length} entities.\n\n${bookLine}${missingLine}${emptyLine}\n\n` +
           `Use roundedOdds when publishing. Lines move, so re-pull before a thread ships.`;
 
         return {

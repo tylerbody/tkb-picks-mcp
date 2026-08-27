@@ -27,6 +27,9 @@ import { registerLineMovementTool } from "./tools/lineMovement.js";
 import { registerLiveMonitorTool } from "./tools/liveMonitor.js";
 import { registerPropBoardTool } from "./tools/propBoard.js";
 import { registerGameLinesTool } from "./tools/gameLines.js";
+import { registerRankingsTool } from "./tools/rankings.js";
+import { registerStandingsTool } from "./tools/standings.js";
+import { registerEventProbeTool } from "./tools/eventProbe.js";
 
 // ---- Environment / config ----
 
@@ -77,7 +80,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.6.4";
+const SERVER_VERSION = "2.6.5";
 
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -106,6 +109,9 @@ function buildServer(): McpServer {
   registerLiveMonitorTool(server, sgo);
   registerPropBoardTool(server, sgo);
   registerGameLinesTool(server, sgo);
+  registerRankingsTool(server, bdl);
+  registerStandingsTool(server, bdl);
+  registerEventProbeTool(server, sgo);
 
   return server;
 }

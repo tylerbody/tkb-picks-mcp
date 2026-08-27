@@ -1,4 +1,4 @@
-# TKB Picks MCP Server (v2.6.4)
+# TKB Picks MCP Server (v2.6.5)
 
 MCP server wrapping **SportsGameOdds** (odds, schedules, props, results) and
 **BALLDONTLIE** (stats, injuries, standings) for building TKB Picks betting
@@ -17,8 +17,8 @@ Render Web Service, Node environment:
 Then verify rather than assume:
 
 ```bash
-npm test                                        # 77 tests, no network needed
-node scripts/verify-deploy.mjs --expect 2.6.4
+npm test                                        # 86 tests, no network needed
+node scripts/verify-deploy.mjs --expect 2.6.5
 node scripts/verify-deploy.mjs --screen <mlbEventID>   # measures entity cost
 ```
 
@@ -47,7 +47,7 @@ on an event rather than roster positions, so `event.players` is permanently empt
 and player props cannot be addressed by playerID. This is structural, not
 unfinished. Use `tkb_get_odds` with `marketType="moneyline"`.
 
-## Tools (21)
+## Tools (24)
 
 **Picks**
 
@@ -58,6 +58,8 @@ unfinished. Use `tkb_get_odds` with `marketType="moneyline"`.
 | `tkb_screen_props` | Sweeps every posted prop for one event, ranked by edge or hit rate |
 | `tkb_get_prop_board` | Every priced prop on one event, NO hit-rate gate. Use when a screen returns empty |
 | `tkb_get_game_lines` | Moneyline, spread and total across a whole slate in one call |
+| `tkb_get_rankings` | Live AP Top 25. Replaces the manual rankedTeams step. Zero SGO cost |
+| `tkb_get_standings` | Full standings table, records and point differential. Zero SGO cost |
 | `tkb_get_player_hit_rate` | Real counted hit rate, DNP-excluded, season- and recency-labelled |
 | `tkb_get_yes_no_prop` | Milestone markets (first TD, any HR, double-double) |
 | `tkb_get_period_odds` | Half / quarter / inning / set markets |
@@ -89,6 +91,7 @@ unfinished. Use `tkb_get_odds` with `marketType="moneyline"`.
 |---|---|
 | `tkb_get_api_usage` | SGO quota, plus cache hit/miss/coalesce counters |
 | `tkb_debug_bdl_stats` | Diagnostic: BDL tier access and real field names |
+| `tkb_probe_event_fields` | Diagnostic: which keys an SGO event carries. Never dumps odds |
 
 ## Design rules this connector actually enforces
 
@@ -107,6 +110,10 @@ published or near-published error, documented in `docs/`.
   a bare newest-first array was once read backwards and published as its inverse.
 - **Warnings, not filters.** Stale samples and playing-time risk are surfaced with
   reasons; the writer decides. A tool that silently drops props teaches nothing.
+- **Decaying facts come from the connector, never from an article.** Records,
+  streaks, standings position and rankings are wrong the moment a team plays again.
+  `tkb_get_standings` and `tkb_get_rankings` exist so those numbers are always
+  re-derived rather than quoted from a source with a publish date.
 - **A missing rate is not a missing market.** `tkb_screen_props` cannot rank what it
   cannot score, so on a sport with no rate source it returns an empty board while a
   full one exists. `tkb_get_prop_board` prints that board. Being unable to grade a
@@ -138,8 +145,10 @@ archive/tools/        removed in v2.0.0, kept for reference only
   upgrade takes effect without a redeploy.
 - **Retractable roofs are never assumed.** Roof status is a same-day team
   decision; those stadiums are flagged for manual verification.
-- **CFB rankings are an input, not a lookup.** SGO does not expose a verified
-  ranking field, so pass `rankedTeams` from a live search.
+- **CFB rankings now come from BALLDONTLIE**, not a live search. SGO still does not
+  expose a ranking field, but BDL publishes the AP poll on the NCAAF ALL-STAR tier
+  this account already holds. Run `tkb_get_rankings` and feed its `rankedTeams`
+  string into `tkb_get_schedule`.
 - **Player props appear close to game time.** An empty roster means "not priced
   yet", not "no players". Build threads inside the normal pre-game window.
 - **No CFB or WNBA hit rates from BALLDONTLIE**, and in the opening weeks of any
