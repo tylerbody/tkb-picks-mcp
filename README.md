@@ -1,4 +1,4 @@
-# TKB Picks MCP Server (v2.6.3)
+# TKB Picks MCP Server (v2.6.4)
 
 MCP server wrapping **SportsGameOdds** (odds, schedules, props, results) and
 **BALLDONTLIE** (stats, injuries, standings) for building TKB Picks betting
@@ -17,8 +17,8 @@ Render Web Service, Node environment:
 Then verify rather than assume:
 
 ```bash
-npm test                                        # 39 tests, no network needed
-node scripts/verify-deploy.mjs --expect 2.6.0
+npm test                                        # 77 tests, no network needed
+node scripts/verify-deploy.mjs --expect 2.6.4
 node scripts/verify-deploy.mjs --screen <mlbEventID>   # measures entity cost
 ```
 
@@ -47,7 +47,7 @@ on an event rather than roster positions, so `event.players` is permanently empt
 and player props cannot be addressed by playerID. This is structural, not
 unfinished. Use `tkb_get_odds` with `marketType="moneyline"`.
 
-## Tools (19)
+## Tools (21)
 
 **Picks**
 
@@ -56,6 +56,8 @@ unfinished. Use `tkb_get_odds` with `marketType="moneyline"`.
 | `tkb_get_schedule` | Games by date/range/team. CFB tiering: top25 / power4 / rivalry / postable |
 | `tkb_get_odds` | Moneyline, spread, total, player props. Pricing guardrail enforced |
 | `tkb_screen_props` | Sweeps every posted prop for one event, ranked by edge or hit rate |
+| `tkb_get_prop_board` | Every priced prop on one event, NO hit-rate gate. Use when a screen returns empty |
+| `tkb_get_game_lines` | Moneyline, spread and total across a whole slate in one call |
 | `tkb_get_player_hit_rate` | Real counted hit rate, DNP-excluded, season- and recency-labelled |
 | `tkb_get_yes_no_prop` | Milestone markets (first TD, any HR, double-double) |
 | `tkb_get_period_odds` | Half / quarter / inning / set markets |
@@ -105,6 +107,10 @@ published or near-published error, documented in `docs/`.
   a bare newest-first array was once read backwards and published as its inverse.
 - **Warnings, not filters.** Stale samples and playing-time risk are surfaced with
   reasons; the writer decides. A tool that silently drops props teaches nothing.
+- **A missing rate is not a missing market.** `tkb_screen_props` cannot rank what it
+  cannot score, so on a sport with no rate source it returns an empty board while a
+  full one exists. `tkb_get_prop_board` prints that board. Being unable to grade a
+  market is not a reason to hide that it is priced.
 - **An unanswerable question gets a refusal, not a plausible answer.** This is why
   capability flags exist, and why an empty injury filter can return CANNOT VERIFY.
 
@@ -136,5 +142,9 @@ archive/tools/        removed in v2.0.0, kept for reference only
   ranking field, so pass `rankedTeams` from a live search.
 - **Player props appear close to game time.** An empty roster means "not priced
   yet", not "no players". Build threads inside the normal pre-game window.
+- **No CFB or WNBA hit rates from BALLDONTLIE**, and in the opening weeks of any
+  season there is no current-year sample to count at all. Those threads run on
+  preview language and team markets. `tkb_get_prop_board` and `tkb_get_game_lines`
+  are the two tools that still work in that state.
 - **Tennis grading is unconfirmed against live data.** The code path exists and
   needs one finished match to validate. See `docs/CHANGES-v2_6_0.md`.

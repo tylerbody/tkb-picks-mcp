@@ -25,6 +25,8 @@ import { registerBatchGradeTool } from "./tools/gradeSlate.js";
 import { registerStreakScanTool } from "./tools/streakScan.js";
 import { registerLineMovementTool } from "./tools/lineMovement.js";
 import { registerLiveMonitorTool } from "./tools/liveMonitor.js";
+import { registerPropBoardTool } from "./tools/propBoard.js";
+import { registerGameLinesTool } from "./tools/gameLines.js";
 
 // ---- Environment / config ----
 
@@ -75,7 +77,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.6.3";
+const SERVER_VERSION = "2.6.4";
 
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -102,6 +104,8 @@ function buildServer(): McpServer {
   registerStreakScanTool(server, bdl);
   registerLineMovementTool(server, sgo);
   registerLiveMonitorTool(server, sgo);
+  registerPropBoardTool(server, sgo);
+  registerGameLinesTool(server, sgo);
 
   return server;
 }

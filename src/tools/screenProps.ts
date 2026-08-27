@@ -47,10 +47,9 @@ import {
  *      evidence, and is filtered out rather than surfaced with a caveat.
  *
  * MEMORY DISCIPLINE: this reads the event's full odds map, which on a game near
- * first pitch can exceed 1,000 markets. That is one bounded object for one event,
- * which is one bounded object for one event. What is NOT
- * done is a per-candidate event fetch, which would multiply that by several
- * hundred and reproduce the historical OOM crashes.
+ * first pitch can exceed 1,000 markets. That is one bounded object for one event.
+ * What is NOT done is a per-candidate event fetch, which would multiply that by
+ * several hundred and reproduce the historical OOM crashes.
  */
 
 const HIT_RATE_CONCURRENCY = 3;
@@ -895,6 +894,11 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
             `and none met ${filterSummary}. This is a real answer, not an ` +
             `error - build this thread from team-level markets rather than padding it ` +
             `with a coin-flip prop.` +
+            `\n\nTO SEE THE BOARD ANYWAY, use tkb_get_prop_board. It prints every priced ` +
+            `market with no hit-rate requirement. That is the right call when the sport ` +
+            `has no rate source at all - early-season CFB, or any WNBA market while BDL ` +
+            `gates player stats - where this screener will always return empty no matter ` +
+            `how low the thresholds go.` +
             (bookFilter
               ? `\n\nNOTE: priced against ${bookFilter} only. A market that exists but ` +
                 `was only priced by an excluded venue is invisible here BY DESIGN, so ` +
