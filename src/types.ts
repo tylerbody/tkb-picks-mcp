@@ -204,14 +204,22 @@ export interface BDLGamesResponse {
 export interface BDLStanding {
   team: BDLTeam;
   season?: number;
-  wins?: number;
-  losses?: number;
-  ties?: number;
+  // NULLABLE, not merely optional. BDL returns wins: null before a season starts,
+  // which broke a `!== undefined` guard and produced the string "null-0".
+  wins?: number | null;
+  losses?: number | null;
+  ties?: number | null;
 
   // ---- NFL-style field names ----
   overall_record?: string;
   home_record?: string;
   road_record?: string;
+  // ---- NCAAF-style field names (CONFIRMED DIFFERENT AGAIN, 27 Aug 2026) ----
+  // NCAAF returns `away_record` where NFL returns `road_record` and MLB returns
+  // `road`. A THIRD variant for the same value. Reading only the first two nulled
+  // the road column on every CFB standings row.
+  away_record?: string;
+  away?: string;
   division_record?: string;
   conference_record?: string;
   win_streak?: number;

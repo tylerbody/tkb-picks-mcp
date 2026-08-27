@@ -78,6 +78,13 @@ function describeShape(value: unknown): string {
 
 /** A small, safe sample of a value. Never more than a couple of KB. */
 function cappedSample(value: unknown, maxChars = 2000): string {
+  // ABSENT AND UNSERIALISABLE ARE DIFFERENT ANSWERS. JSON.stringify(undefined)
+  // returns undefined, so the first live run reported the missing lineups field
+  // as "not serialisable" - which reads like the probe failed rather than like
+  // the field is not there. On a tool whose entire job is distinguishing "absent"
+  // from "present but empty", that wording was actively misleading.
+  if (value === undefined) return "absent - this key is not present on the event";
+  if (value === null) return "null - the key exists and its value is null";
   try {
     const json = JSON.stringify(value, null, 2);
     if (json === undefined) return "not serialisable";

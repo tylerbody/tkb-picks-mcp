@@ -44,6 +44,33 @@ function firstDefined<T>(...vals: (T | undefined | null)[]): T | null {
   return null;
 }
 
+/**
+ * Compose "W-L" ONLY when both halves are real numbers.
+ *
+ * THE BUG THIS FIXES, found live 2026-08-27 the first time tkb_get_standings ran
+ * against NCAAF. The overall record was built with:
+ *
+ *   s.wins !== undefined && s.losses !== undefined ? `${s.wins}-${s.losses}` : undefined
+ *
+ * BDL's NCAAF standings return `wins: null` before a season starts, not
+ * `undefined`. `null !== undefined` is TRUE, so the guard passed and the template
+ * interpolated the null, producing the string **"null-0"** on all 17 ACC rows.
+ *
+ * That is not a cosmetic defect. It is a fully-populated, plausible-shaped,
+ * completely wrong value of exactly the kind this connector exists to prevent -
+ * and unlike a missing field it would have printed the literal word "null" into a
+ * published thread.
+ *
+ * The rest of this file already used firstDefined(), which rejects null properly.
+ * This one call site hand-rolled its own check and got it wrong, which is the
+ * argument for having the helper in the first place.
+ */
+function composeRecord(wins: unknown, losses: unknown): string | undefined {
+  return typeof wins === "number" && typeof losses === "number"
+    ? `${wins}-${losses}`
+    : undefined;
+}
+
 export function teamDisplayName(t: BDLTeam | undefined): string {
   if (!t) return "unknown";
   return (
@@ -56,8 +83,17 @@ export function teamDisplayName(t: BDLTeam | undefined): string {
 }
 
 export function normalizeStanding(s: BDLStanding): NormalizedStanding {
+  // THIRD NAMING VARIANT, found live 2026-08-27. This file's own header documents
+  // NFL (`road_record`) versus MLB (`road`) and says the fix is to check every
+  // known alias rather than branch on sport. NCAAF then arrived with `away_record`
+  // and nulled the road column on every CFB row - silently, because a null road
+  // record is indistinguishable from "this sport does not report it".
+  //
+  // Adding the alias here rather than special-casing CFB in the tool is the same
+  // reasoning as before: a fourth variant should be a one-line addition, not an
+  // audit.
   const homeStr = firstDefined(s.home_record, s.home);
-  const roadStr = firstDefined(s.road_record, s.road);
+  const roadStr = firstDefined(s.road_record, s.away_record, s.road, s.away);
   const homeParsed = parseRecord(homeStr ?? undefined);
   const roadParsed = parseRecord(roadStr ?? undefined);
 
@@ -72,7 +108,7 @@ export function normalizeStanding(s: BDLStanding): NormalizedStanding {
     overallRecord: firstDefined(
       s.overall_record,
       s.total,
-      s.wins !== undefined && s.losses !== undefined ? `${s.wins}-${s.losses}` : undefined
+      composeRecord(s.wins, s.losses)
     ),
     homeRecord:
       homeStr ??

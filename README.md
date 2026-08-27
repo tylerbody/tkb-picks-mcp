@@ -1,4 +1,4 @@
-# TKB Picks MCP Server (v2.6.5)
+# TKB Picks MCP Server (v2.6.6)
 
 MCP server wrapping **SportsGameOdds** (odds, schedules, props, results) and
 **BALLDONTLIE** (stats, injuries, standings) for building TKB Picks betting
@@ -17,8 +17,8 @@ Render Web Service, Node environment:
 Then verify rather than assume:
 
 ```bash
-npm test                                        # 86 tests, no network needed
-node scripts/verify-deploy.mjs --expect 2.6.5
+npm test                                        # 91 tests, no network needed
+node scripts/verify-deploy.mjs --expect 2.6.6
 node scripts/verify-deploy.mjs --screen <mlbEventID>   # measures entity cost
 ```
 
@@ -143,6 +143,10 @@ archive/tools/        removed in v2.0.0, kept for reference only
 - **WNBA and NCAAF player stats** are GOAT-gated on BDL, so their hit rates fall
   back to SGO. A 401 disables the BDL path for 30 minutes and heals itself, so an
   upgrade takes effect without a redeploy.
+- **SGO events carry no `lineups` field.** Confirmed live 2026-08-27 via
+  `tkb_probe_event_fields` against an upcoming MLB game: the event has 11 top-level
+  keys and `lineups` is not among them, despite SGO's schema browser listing it.
+  Confirmed starting pitchers still require a live web search, per game, per date.
 - **Retractable roofs are never assumed.** Roof status is a same-day team
   decision; those stadiums are flagged for manual verification.
 - **CFB rankings now come from BALLDONTLIE**, not a live search. SGO still does not

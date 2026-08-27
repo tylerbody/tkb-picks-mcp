@@ -211,12 +211,27 @@ Error Handling:
           trend: r.trend ?? null,
         }));
 
-        const movers = table.filter((t) => t.trend && t.trend !== "-").length;
+        // "NR" MEANS NOT PREVIOUSLY RANKED, NOT "MOVED". A preseason poll returns
+        // NR for all 25 teams because there is no previous week, so counting it as
+        // movement reported "25 team(s) moved from last week" on a poll where
+        // nothing had moved because nothing had happened yet. Caught live on the
+        // first run, 2026-08-27.
+        const NON_MOVES = new Set(["-", "NR", ""]);
+        const movers = table.filter((t) => t.trend && !NON_MOVES.has(t.trend)).length;
+        const newEntries = table.filter((t) => t.trend === "NR").length;
+        const preseason = newEntries === table.length;
+
+        const movementLine = preseason
+          ? `Every team is marked NR (no previous poll), so this is the PRESEASON poll - ` +
+            `these are expectations, not results. Every record is 0-0.`
+          : `${movers} team(s) moved from last week` +
+            (newEntries ? `, ${newEntries} newly ranked` : "") +
+            `.`;
 
         const summary =
           `AP Top ${rows.length}, season ${season}` +
           (rows[0]?.week ? `, week ${rows[0].week}` : ", current week") +
-          `. ${movers} team(s) moved from last week.\n\n` +
+          `. ${movementLine}\n\n` +
           `rankedTeams (paste into tkb_get_schedule):\n${rankedTeamsParam}\n\n` +
           `NOTE: this is a DECAYING fact. It is correct as of right now and wrong ` +
           `next Sunday. Re-pull rather than reusing it across weeks.`;
