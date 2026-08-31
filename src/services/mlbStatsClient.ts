@@ -86,6 +86,22 @@ export interface MlbGameMatchup {
   detailedState: string;
   homeTeam: string;
   awayTeam: string;
+  /**
+   * TEAM IDS ARE THE JOIN KEY, NOT NAMES (added v2.8.2).
+   *
+   * v2.8.1 matched a player to a game by team NAME, read from the player index's
+   * currentTeam.name. Verified broken the same day: for season 2026 that endpoint
+   * returns currentTeam as {"id":144} with NO name field, while for 2025 it returns
+   * both. So every 2026 player resolved to a null team and every query answered
+   * "team not scheduled" - including Matt Olson, whose Braves were playing that
+   * night. That is the v2.8.0 bug inverted: one confident wrong answer traded for
+   * another, in the opposite direction.
+   *
+   * Numeric IDs are present in both the schedule and the player index, are stable
+   * across seasons, and need no fuzzy matching. Names remain for display only.
+   */
+  homeTeamId: number | null;
+  awayTeamId: number | null;
   homeProbablePitcher: MlbProbablePitcher | null;
   awayProbablePitcher: MlbProbablePitcher | null;
   /** Empty until the lineup is posted, typically 3 to 4 hours before first pitch. */
@@ -314,12 +330,16 @@ export function normaliseGame(g: Record<string, unknown>): MlbGameMatchup {
   const homeTeamObj = (home.team ?? {}) as Record<string, unknown>;
   const awayTeamObj = (away.team ?? {}) as Record<string, unknown>;
 
+  const numOrNull = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : null);
+
   return {
     gamePk: Number(g.gamePk),
     gameDate: firstString(g.gameDate) ?? "unknown",
     detailedState: firstString(status.detailedState, status.abstractGameState) ?? "unknown",
     homeTeam: firstString(homeTeamObj.name) ?? "unknown",
     awayTeam: firstString(awayTeamObj.name) ?? "unknown",
+    homeTeamId: numOrNull(homeTeamObj.id),
+    awayTeamId: numOrNull(awayTeamObj.id),
     homeProbablePitcher: readPitcher(home),
     awayProbablePitcher: readPitcher(away),
     homeLineup: readLineup(lineups.homePlayers),
@@ -368,6 +388,7 @@ export type PlayerLineupStatus =
   | { kind: "not_in_posted_lineup"; teamName: string }
   | { kind: "lineup_pending"; teamName: string; opponent: string }
   | { kind: "team_not_scheduled"; teamName: string }
+  | { kind: "team_unresolved" }
   | { kind: "player_unknown" }
   | { kind: "ambiguous"; candidates: MlbPlayerRef[] };
 
@@ -385,17 +406,38 @@ export function resolvePlayerLineupStatus(
   const player = candidates[0];
 
   // 2. IS HIS TEAM EVEN PLAYING? The premise v2.8.0 never checked.
-  const game = player.teamName
-    ? games.find(
-        (g) => teamNamesMatch(g.homeTeam, player.teamName!) || teamNamesMatch(g.awayTeam, player.teamName!)
-      )
-    : undefined;
+  //
+  // MATCH ON ID FIRST. v2.8.1 matched on name and broke the moment the player index
+  // stopped returning currentTeam.name for the current season, silently answering
+  // "team not scheduled" for every player in the league. The numeric id is present
+  // on both sides and needs no normalisation; the name path survives only as a
+  // fallback for a feed that omits the id instead.
+  const byId =
+    player.teamId !== null
+      ? games.find((g) => g.homeTeamId === player.teamId || g.awayTeamId === player.teamId)
+      : undefined;
+
+  const byName =
+    !byId && player.teamName
+      ? games.find(
+          (g) => teamNamesMatch(g.homeTeam, player.teamName!) || teamNamesMatch(g.awayTeam, player.teamName!)
+        )
+      : undefined;
+
+  const game = byId ?? byName;
 
   if (!game) {
-    return { kind: "team_not_scheduled", teamName: player.teamName ?? "unknown team" };
+    // NO ID AND NO NAME IS NOT THE SAME AS "NOT PLAYING". If the index gave us
+    // neither, we cannot place him, and saying his team is off would be exactly the
+    // confident falsehood this whole release exists to remove.
+    if (player.teamId === null && !player.teamName) {
+      return { kind: "team_unresolved" };
+    }
+    return { kind: "team_not_scheduled", teamName: player.teamName ?? `team ${player.teamId}` };
   }
 
-  const isHome = teamNamesMatch(game.homeTeam, player.teamName!);
+  const isHome =
+    player.teamId !== null ? game.homeTeamId === player.teamId : teamNamesMatch(game.homeTeam, player.teamName!);
   const teamName = isHome ? game.homeTeam : game.awayTeam;
   const opponent = isHome ? game.awayTeam : game.homeTeam;
   const lineup = isHome ? game.homeLineup : game.awayLineup;

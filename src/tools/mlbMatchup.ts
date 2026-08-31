@@ -185,6 +185,14 @@ export function registerMlbMatchupTool(server: McpServer, mlb: MLBStatsClient): 
                 `player from a team that is actually on the slate.`
               );
 
+            case "team_unresolved":
+              return (
+                `CANNOT PLACE THIS PLAYER: "${input.playerName}" matches an MLB player, ` +
+                `but the roster feed returned neither a team id nor a team name for him, ` +
+                `so there is no way to tell which game he would be in.\n\nThis is NOT a ` +
+                `statement that he is out or that his team is off. Confirm manually.`
+              );
+
             case "player_unknown":
               return (
                 `NO SUCH PLAYER: "${input.playerName}" does not match any player on an MLB ` +

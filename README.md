@@ -1,4 +1,4 @@
-# TKB Picks MCP Server (v2.8.1)
+# TKB Picks MCP Server (v2.8.2)
 
 MCP server wrapping **SportsGameOdds** (odds, schedules, props, results) and
 **BALLDONTLIE** (stats, injuries, standings) for building TKB Picks betting
@@ -17,8 +17,8 @@ Render Web Service, Node environment:
 Then verify rather than assume:
 
 ```bash
-npm test                                        # 144 tests, no network needed
-node scripts/verify-deploy.mjs --expect 2.8.1
+npm test                                        # 149 tests, no network needed
+node scripts/verify-deploy.mjs --expect 2.8.2
 node scripts/verify-deploy.mjs --screen <mlbEventID>   # measures entity cost
 ```
 

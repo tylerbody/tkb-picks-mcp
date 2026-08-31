@@ -26,12 +26,22 @@ import {
  * nothing to check against, and absence of a way to verify became absence of doubt.
  */
 
+const TEAM_IDS: Record<string, number> = {
+  "San Francisco Giants": 137,
+  "Atlanta Braves": 144,
+  "New York Mets": 121,
+  "Tampa Bay Rays": 139,
+  "Los Angeles Dodgers": 119,
+};
+
 const game = (away: string, home: string, awayLineup: string[] = [], homeLineup: string[] = []): MlbGameMatchup => ({
   gamePk: 1,
   gameDate: "2026-08-31T22:05:00Z",
   detailedState: "Scheduled",
   awayTeam: away,
   homeTeam: home,
+  awayTeamId: TEAM_IDS[away] ?? null,
+  homeTeamId: TEAM_IDS[home] ?? null,
   awayProbablePitcher: null,
   homeProbablePitcher: null,
   awayLineup: awayLineup.map((n, i) => ({
@@ -48,11 +58,25 @@ const game = (away: string, home: string, awayLineup: string[] = [], homeLineup:
   })),
 });
 
+/**
+ * The player index gives a team ID and, for the CURRENT season, no team name.
+ * Verified live 2026-08-31: currentTeam came back as {"id":144} with no name for
+ * 2026, while 2025 carried both. Fixtures reflect that, because assuming the name
+ * would be present is what broke v2.8.1.
+ */
 const ref = (fullName: string, teamName: string | null): MlbPlayerRef => ({
   id: 1,
   fullName,
-  teamId: teamName ? 1 : null,
+  teamId: teamName ? (TEAM_IDS[teamName] ?? null) : null,
   teamName,
+});
+
+/** A player as the 2026 index actually returns him: id only, no team name. */
+const refIdOnly = (fullName: string, teamId: number): MlbPlayerRef => ({
+  id: 1,
+  fullName,
+  teamId,
+  teamName: null,
 });
 
 /** Tonight's slate. The Dodgers are deliberately NOT on it. */
@@ -130,9 +154,13 @@ describe("posted lineups", () => {
     if (s.kind === "in_lineup") assert.equal(s.slot.battingOrder, 1);
   });
 
-  test("a player with no known team cannot be placed, and says so rather than guessing", () => {
+  test("a player with no known team is UNRESOLVED, not 'his team is off'", () => {
+    // Updated in v2.8.2. This previously asserted team_not_scheduled, which was the
+    // weaker answer: with neither an id nor a name we cannot place him, and claiming
+    // his team has no game is a confident falsehood rather than an absence of data.
     const s = resolvePlayerLineupStatus(posted, [ref("Free Agent", null)], "Free Agent");
-    assert.equal(s.kind, "team_not_scheduled");
+    assert.equal(s.kind, "team_unresolved");
+    assert.notEqual(s.kind, "team_not_scheduled");
   });
 });
 
@@ -140,5 +168,50 @@ describe("normaliseName", () => {
   test("strips accents, case and punctuation consistently", () => {
     assert.equal(normaliseName("Ronald Acuña Jr."), normaliseName("ronald acuna jr"));
     assert.equal(normaliseName("  Jazz  Chisholm Jr. "), "jazz chisholm jr");
+  });
+});
+
+describe("team matching survives a feed that drops currentTeam.name", () => {
+  /**
+   * THE v2.8.1 REGRESSION. Matching on team NAME broke the moment the player index
+   * stopped returning currentTeam.name for the current season. Every player in the
+   * league resolved to a null team and answered "team not scheduled" - including
+   * Matt Olson, whose Braves were playing that night. One confident wrong answer
+   * traded for another, in the opposite direction.
+   */
+  test("REGRESSION: a player with a team ID but NO team name still resolves to his game", () => {
+    const s = resolvePlayerLineupStatus(slate, [refIdOnly("Matt Olson", 144)], "Matt Olson");
+    assert.equal(s.kind, "lineup_pending");
+    if (s.kind === "lineup_pending") {
+      assert.equal(s.teamName, "Atlanta Braves");
+      assert.equal(s.opponent, "San Francisco Giants");
+    }
+    // The bug returned team_not_scheduled here for a team that was playing.
+    assert.notEqual(s.kind, "team_not_scheduled");
+  });
+
+  test("an ID-only player whose team is genuinely off still says not scheduled", () => {
+    const s = resolvePlayerLineupStatus(slate, [refIdOnly("Mookie Betts", 119)], "Mookie Betts");
+    assert.equal(s.kind, "team_not_scheduled");
+  });
+
+  test("ID matching works for the away side too", () => {
+    const s = resolvePlayerLineupStatus(slate, [refIdOnly("Heliot Ramos", 137)], "Heliot Ramos");
+    assert.equal(s.kind, "lineup_pending");
+    if (s.kind === "lineup_pending") assert.equal(s.teamName, "San Francisco Giants");
+  });
+
+  test("neither id nor name is UNRESOLVED, never 'not playing'", () => {
+    const s = resolvePlayerLineupStatus(slate, [{ id: 1, fullName: "Ghost", teamId: null, teamName: null }], "Ghost");
+    assert.equal(s.kind, "team_unresolved");
+    // Saying his team is off would be the same confident falsehood in a new coat.
+    assert.notEqual(s.kind, "team_not_scheduled");
+  });
+
+  test("an ID-only player resolves his slot in a POSTED lineup", () => {
+    const posted = [game("San Francisco Giants", "Atlanta Braves", [], ["Ronald Acuna Jr.", "Matt Olson"])];
+    const s = resolvePlayerLineupStatus(posted, [refIdOnly("Matt Olson", 144)], "Matt Olson");
+    assert.equal(s.kind, "in_lineup");
+    if (s.kind === "in_lineup") assert.equal(s.slot.battingOrder, 2);
   });
 });
