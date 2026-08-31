@@ -475,6 +475,16 @@ export class BDLClient {
   private playerStatsCache = new Map<string, { rows: Record<string, unknown>[]; at: number }>();
   private static readonly PLAYER_TTL_MS = 15 * 60 * 1000;
 
+  /**
+   * Page cap for player search. Matches getAllPlayerGameStats' 6-page ceiling, so
+   * ~600 rows. Chosen against a real measurement rather than a feeling: the
+   * largest NCAAF surname sampled ("Washington") exceeded one 100-row page, and
+   * six pages covers any plausible surname while bounding the worst case at six
+   * throttled requests. An exact match exits early, so this ceiling is only ever
+   * reached on a name that genuinely is not in the index.
+   */
+  private static readonly MAX_SEARCH_PAGES = 6;
+
   private static fresh(at: number): boolean {
     return Date.now() - at < BDLClient.PLAYER_TTL_MS;
   }
@@ -498,11 +508,45 @@ export class BDLClient {
    * rather than one being picked - "Marte" alone spans Ketel, Starling, Noelvi
    * and Yunior, all active players. Resolving to the wrong one produces a fully
    * populated, plausible, completely wrong hit rate.
+   *
+   * PAGINATION, ADDED v2.8.4. This method requested per_page=100 and never
+   * followed the cursor, so any surname with more than 100 entries was silently
+   * truncated at page one.
+   *
+   * BDL RETURNS ROWS ASCENDING BY ID, so page one is the OLDEST entries. On a
+   * cumulative all-time NCAAF index that means page one is players from the
+   * 1990s and 2000s, and every current player is unreachable. Measured
+   * 2026-08-31: a "Washington" search returned exactly 100 rows, ids 197 to
+   * 29711, with Bryson Washington (a 2026 Auburn back) absent because he sits
+   * above id 50000. A "Cobb" search returned 80 rows - under the cap, therefore
+   * complete - and Jeremiah Cobb resolved correctly at id 54445. The only
+   * difference between the two was whether the list fit in one page.
+   *
+   * THIS IS THE v2.0.3 BUG, in a method v2.0.3 did not audit. That release fixed
+   * ascending-page truncation in getAllPlayerGameStats and getAllGames and wrote
+   * that a silent stop "is indistinguishable from 'there was only one page'".
+   * The same sentence applies here verbatim. Per v2.6.0: the fixes were correct,
+   * the audits were scoped to the file the symptom appeared in.
+   *
+   * The failure was invisible because the aggregator's refusal-to-guess rule
+   * absorbed it. A truncated page yields no exact match, the caller reports an
+   * ambiguous or missing name, and that reads like a naming problem rather than
+   * a paging one.
+   *
+   * COST: an exact match short-circuits after every page, so a name found on
+   * page one costs exactly one request, unchanged from before. Only genuinely
+   * common surnames pay more, capped at MAX_SEARCH_PAGES. `truncated` is
+   * returned so a caller can distinguish "not in the index" from "not in the
+   * pages we read", which are different answers.
    */
   async searchPlayers(
     sport: SportKey,
     search: string
-  ): Promise<{ data: { id: number; first_name: string; last_name: string; team?: BDLTeam }[] }> {
+  ): Promise<{
+    data: { id: number; first_name: string; last_name: string; team?: BDLTeam }[];
+    /** True when the cap was hit with a cursor still pending. Additive - existing callers ignore it. */
+    truncated?: boolean;
+  }> {
     const cacheKey = `${sport}|${search.trim().toLowerCase()}`;
     const hit = this.playerSearchCache.get(cacheKey);
     if (hit && BDLClient.fresh(hit.at)) return { data: hit.data };
@@ -515,22 +559,54 @@ export class BDLClient {
       // Try the most specific surname suffix first, widening only if needed.
       // Each attempt is throttled, so stopping early genuinely saves budget.
       let all: { id: number; first_name: string; last_name: string; team?: BDLTeam }[] = [];
+      let truncated = false;
+
       for (const term of searchTermsFor(search)) {
-        const response = await this.throttle(() => this.http.get<{
-          data: { id: number; first_name: string; last_name: string; team?: BDLTeam }[];
-        }>(this.buildPath(sport, "players"), {
-          params: { search: term, per_page: 100 },
-        }));
-        all = response.data.data ?? [];
-        // An exact accent-insensitive hit means this term was specific enough.
-        const exactHere = all.filter(
-          (p) =>
-            stripAccents(`${p.first_name} ${p.last_name}`.trim().toLowerCase()) === fullNorm
-        );
+        // ---- PAGINATE. See the block comment above this method. ----
+        const collected: {
+          id: number;
+          first_name: string;
+          last_name: string;
+          team?: BDLTeam;
+        }[] = [];
+        let cursor: number | undefined;
+        let pages = 0;
+        let exactHere: typeof collected = [];
+
+        do {
+          const response = await this.throttle(() => this.http.get<{
+            data: { id: number; first_name: string; last_name: string; team?: BDLTeam }[];
+            meta?: { next_cursor?: number | null };
+            next_cursor?: number | null;
+          }>(this.buildPath(sport, "players"), {
+            params: { search: term, per_page: 100, cursor },
+          }));
+
+          collected.push(...(response.data.data ?? []));
+          pages++;
+
+          // Check after EVERY page, so a hit on page 1 costs one request and the
+          // common case is unchanged from before this fix.
+          exactHere = collected.filter(
+            (p) =>
+              stripAccents(`${p.first_name} ${p.last_name}`.trim().toLowerCase()) === fullNorm
+          );
+          if (exactHere.length) break;
+
+          cursor = BDLClient.nextCursorOf(response.data);
+          if (cursor && pages >= BDLClient.MAX_SEARCH_PAGES) {
+            // TRUNCATION IS REPORTED, NEVER SILENT. A short list that looks
+            // complete is the whole failure this fix exists to end.
+            truncated = true;
+            break;
+          }
+        } while (cursor);
+
         if (exactHere.length) {
           this.playerSearchCache.set(cacheKey, { data: exactHere, at: Date.now() });
-          return { data: exactHere };
+          return { data: exactHere, truncated: false };
         }
+        all = collected;
         if (all.length) break; // term returned people, just not an exact match
       }
 
@@ -554,7 +630,7 @@ export class BDLClient {
       }
 
       this.playerSearchCache.set(cacheKey, { data: resolved, at: Date.now() });
-      return { data: resolved };
+      return { data: resolved, truncated };
     } catch (err) {
       throw formatBDLError(err, `${sport} player search "${search}"`, sport);
     }

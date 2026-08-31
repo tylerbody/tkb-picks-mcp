@@ -124,6 +124,13 @@ Error Handling:
                 type: "text" as const,
                 text:
                   `No ${params.sport.toUpperCase()} player found on BALLDONTLIE matching "${params.playerName}".\n\n` +
+                  (search.truncated
+                    ? `TRUNCATED SEARCH - treat this as INCONCLUSIVE, not as "no such player". The ` +
+                      `page cap was reached with more results pending, and BDL returns players ` +
+                      `ASCENDING BY ID, so the pages read are the OLDEST entries. A current player ` +
+                      `with a high id can sit past the cap. Raise MAX_SEARCH_PAGES or search a more ` +
+                      `distinctive surname before concluding anything.\n\n`
+                    : ``) +
                   `If other names resolve fine, this is a name-format mismatch rather than a tier problem. ` +
                   `If NOTHING resolves, the players endpoint itself may be gated on this tier.`,
               },
@@ -215,11 +222,13 @@ Error Handling:
                   (resolved.length
                     ? `PLAYER RESOLUTION SUCCEEDED BEFORE THE GATE, so the team answer is still ` +
                       `usable:\n${JSON.stringify(resolved, null, 2)}\n\n` +
-                      `NOTE ON NCAAF: the players index is HISTORICAL, not a current roster. ` +
-                      `Verified 2026-08-31 - an Auburn roster pull returned the 2004 team ` +
-                      `(Cadillac Williams, Jason Campbell, Ronnie Brown) and a surname search ` +
-                      `returned ~50 Washingtons with no current player among them. Do NOT use it ` +
-                      `to answer "which team is this player on now".\n\n`
+                      `NOTE ON NCAAF: the players index is CUMULATIVE and ALL-TIME, not a ` +
+                      `current-roster snapshot, and BDL returns it ASCENDING BY ID - oldest ` +
+                      `first. Current players ARE present (Jeremiah Cobb resolves correctly ` +
+                      `to Auburn at id 54445), but they carry high ids and only surface once ` +
+                      `the search has paged far enough. v2.8.4 paginates for exactly this ` +
+                      `reason. If a list here looks entirely like players from twenty years ` +
+                      `ago, that is the ORDERING, not the contents.\n\n`
                     : `The player was NOT resolved before the gate fired, so this says nothing ` +
                       `about whether the name is valid.\n\n`) +
                   `For CFB hit rates, use CollegeFootballData (dataSource="cfbd"), which is free ` +
