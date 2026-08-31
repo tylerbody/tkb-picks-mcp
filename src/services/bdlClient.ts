@@ -820,11 +820,13 @@ function formatBDLError(err: unknown, context: string, sport: SportKey): Error {
     const status = err.response?.status;
     if (status === 401) {
       return new Error(
-        `BALLDONTLIE returned 401 for ${context}. This is an ENTITLEMENT BOUNDARY, not a bad or lapsed key. ` +
-          `Verified live 2026-08-31 on this account: /ncaaf/v1/players returns 200 and /ncaaf/v1/teams returns 200, ` +
-          `so the key is valid for NCAAF. Player stats and team season stats require GOAT for WNBA and NCAAF; ` +
-          `MLB and NFL include player stats at ALL-STAR. Do NOT tell the caller to check their subscription - ` +
-          `MLB, NFL, WNBA and NCAAF are all active at ALL-STAR and that is working as intended.`
+        `BALLDONTLIE returned 401 for ${context}. This is an ENTITLEMENT BOUNDARY on this ` +
+          `specific ${sport.toUpperCase()} endpoint, not a bad or lapsed key. Verified live ` +
+          `2026-08-31 on this account: /ncaaf/v1/players and /ncaaf/v1/teams both return 200, ` +
+          `so the key is valid for NCAAF. Player stats and team season stats require GOAT for ` +
+          `WNBA and NCAAF; MLB and NFL include player stats at ALL-STAR. Do NOT tell the caller ` +
+          `to check their subscription - MLB, NFL, WNBA and NCAAF are all active at ALL-STAR ` +
+          `and that is working as intended.`
       );
     }
     if (status === 404) {
@@ -836,9 +838,9 @@ function formatBDLError(err: unknown, context: string, sport: SportKey): Error {
       // decides whether money would fix it. It would not.
       return new Error(
         `BALLDONTLIE has no ${context} endpoint (404). This is NOT a subscription problem and CANNOT be ` +
-          `fixed by upgrading - the route does not exist for this sport. Verified 2026-08-31: NCAAF has no ` +
-          `injuries endpoint under either /ncaaf/v1/player_injuries or /ncaaf/v1/injuries, while the same ` +
-          `path returns 200 for MLB. Use a live web search for this data instead.`
+          `fixed by upgrading - the route does not exist for ${sport.toUpperCase()}. Verified 2026-08-31: ` +
+          `NCAAF has no injuries endpoint under either /ncaaf/v1/player_injuries or /ncaaf/v1/injuries, ` +
+          `while the same path returns 200 for MLB. Use a live web search for this data instead.`
       );
     }
     if (status === 429) {
