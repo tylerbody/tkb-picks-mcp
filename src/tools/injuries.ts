@@ -101,8 +101,10 @@ late changes move props more than anything else in the sport. A clean report her
 on Thursday does NOT mean a player is confirmed active on Sunday.
 
 Args:
-  - sport ('mlb'|'wnba'|'nfl'): which sport. CFB and tennis have no injury feed on
-    the current plan and are refused with an explanation.
+  - sport ('mlb'|'wnba'|'nfl'): which sport. CFB and tennis are refused with an
+    explanation. For CFB the reason is that BALLDONTLIE has NO NCAAF injuries
+    endpoint (verified 2026-08-31: 404 on both known paths, while MLB returns 200 on
+    the same key), so this is not something a subscription upgrade would fix.
   - playerName (string, optional): narrow to one player
   - teamName (string, optional): narrow to one team's report
 

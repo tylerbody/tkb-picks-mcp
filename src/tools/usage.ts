@@ -89,14 +89,24 @@ Error Handling:
           if (!cfbd) return `CollegeFootballData: not configured (CFBD_API_KEY unset).`;
           const c = cfbd.getStats();
           return (
-            `CollegeFootballData: ${c.requests} request(s) this process, ${c.hits} cache ` +
+            `CollegeFootballData: ${c.requests} request(s) THIS PROCESS ONLY, ${c.hits} cache ` +
             `hit(s), ${c.misses} miss(es), ${c.coalesced} coalesced, ${c.errors} error(s). ` +
-            `${c.cachedWeeks} week(s) cached, ${c.permanentWeeks} of them permanent. ` +
-            `FREE TIER IS 1,000 REQUESTS PER MONTH (3,000 on a verified .edu key) and ` +
-            `does NOT reset daily. One request returns an entire week of box scores for ` +
-            `every game, so a full prior-season backfill is ~16 requests and an in-season ` +
-            `refresh is 1 a week. If this number is climbing faster than that, something ` +
-            `is fetching per game or per player instead of per week.`
+            `${c.cachedWeeks} week(s) cached, ${c.permanentWeeks} of them permanent.\n\n` +
+            `READ THAT COUNTER CAREFULLY - IT IS NOT YOUR MONTHLY TOTAL. It is in-memory and ` +
+            `resets on every restart, and this server runs on Render's free tier, which spins ` +
+            `down when idle. Several cold starts a day means this number can read near zero ` +
+            `while real monthly usage climbs. A budget you cannot observe is a budget you are ` +
+            `assuming, which is the exact reasoning behind every other counter here.\n\n` +
+            `THE AUTHORITATIVE NUMBER is CFBD's own account info endpoint (see the "info" ` +
+            `operations at api.collegefootballdata.com/api/info). Check it directly before ` +
+            `concluding there is headroom.\n\n` +
+            `The commonly cited free-tier limit is 1,000 requests a month (3,000 on a verified ` +
+            `.edu key), but CFBD's docs deliberately do NOT publish limits - they point to the ` +
+            `API tiers page and note the figures change. Treat 1,000 as an unverified planning ` +
+            `assumption, not a fact. The DESIGN holds either way: one request returns a whole ` +
+            `week of box scores, so a prior-season backfill is ~16 requests and an in-season ` +
+            `refresh is 1 a week. If this number climbs faster than that, something is fetching ` +
+            `per game or per player instead of per week.`
           );
         })();
 

@@ -86,9 +86,18 @@ export const SPORT_CONFIG = {
     label: "NCAAF",
     sgoLeagueID: "NCAAF",
     bdlPath: "ncaaf",
-    // CFB injuries are not available on the current BALLDONTLIE plan (see README
-    // known gaps). Stats are GOAT-gated for ncaaf too, so hit rates fall back to
-    // SGO rather than being unavailable - hitRates stays true.
+    // INJURIES: BALLDONTLIE has NO NCAAF injuries endpoint. Verified live
+    // 2026-08-31: /ncaaf/v1/player_injuries and /ncaaf/v1/injuries both return 404
+    // while /mlb/v1/player_injuries returns 200 on the same key and path shape. This
+    // is a missing product, not a missing entitlement, so upgrading to GOAT would
+    // NOT provide it. The earlier wording here ("not available on the current plan")
+    // implied it was buyable, which is worse than saying nothing.
+    //
+    // HIT RATES stay true, but they are served by CollegeFootballData, NOT by an SGO
+    // fallback. v2.7.0 removed that fallback deliberately: SGO carries CFB games but
+    // not CFB player box scores outside the playoff, so falling back to it reported
+    // started games as DNPs and produced Dante Moore at a 0.2 play rate. With no
+    // CFBD_API_KEY the CFB path REFUSES rather than degrading.
     supports: { ...TEAM_SPORT_CAPABILITIES, injuries: false },
   },
 
@@ -189,7 +198,7 @@ export function unsupportedMessage(
       : `Hit rates are not available for ${label}.`,
     injuries: isIndividualSport(sport)
       ? `No injury feed is available for ${label} on the current subscription. Tennis withdrawals and retirements are announced by the tournament, so check tour news directly before posting a ${label} pick.`
-      : `Injury data is not available for ${label} on the current BALLDONTLIE plan.`,
+      : `BALLDONTLIE has no ${label} injuries endpoint at all. Verified live 2026-08-31: both /ncaaf/v1/player_injuries and /ncaaf/v1/injuries return 404, while the same path returns 200 for MLB on the same key. This is a MISSING ENDPOINT, not a subscription limit, so it cannot be unlocked by upgrading. Check ${label} injury and availability news via live web search, and note that CFB availability also has to be confirmed from a depth chart because CollegeFootballData lists a player only where he recorded a stat.`,
     weather: isIndividualSport(sport)
       ? `Weather is not wired up for ${label}. Tour events move between venues week to week, so there is no fixed stadium table to look up, and guessing a location would be worse than returning nothing. Grand Slam roof status must be checked via live search.`
       : `Weather is not a factor for ${label}.`,

@@ -10,12 +10,15 @@ import type {
 } from "../types.js";
 
 /**
- * BALLDONTLIE API client - used ONLY for injuries in this build (per current scope;
- * SGO remains the sole source for odds/lines to avoid maintaining two odds pipelines).
+ * BALLDONTLIE API client. Serves injuries, player game stats, standings,
+ * conferences, teams, player search and the NCAAF AP poll. SGO remains the sole
+ * source for odds/lines to avoid maintaining two odds pipelines.
  *
- * One account, one API key. Access per sport depends on which sport's subscription
- * tier is active on the account - this client does not enforce that, the API itself
- * will 401 if a sport isn't subscribed at ALL-STAR or above.
+ * One account, one API key. THIS ACCOUNT HOLDS ALL-STAR FOR MLB, NFL, WNBA AND
+ * NCAAF, all active. A 401 here is an entitlement boundary on a specific endpoint,
+ * NOT a lapsed subscription - see the tier table above statsPathFor and the 401
+ * branch in formatBDLError. A 404 is a missing endpoint and is not buyable at any
+ * tier. Those are different answers and the error messages keep them separate.
  *
  * Base path is per-sport: https://api.balldontlie.io/{sport}/v1/...
  * NOTE: MLB/NFL/NBA/NHL historically used un-prefixed /v1/ paths for some endpoints
@@ -296,10 +299,24 @@ export class BDLClient {
    * Guessing one shared path would 404 on half the sports, which is the same class
    * of mistake as the injuries team-field bug that shipped twice.
    *
-   * TIER REQUIREMENT: player stats are listed as ALL-STAR ($9.99/sport), the tier
-   * already subscribed for MLB and WNBA. That is sourced from third-party
-   * documentation rather than BDL's own pricing page, so it is UNVERIFIED until a
-   * live call either returns data or 401s. tkb_debug_bdl_stats exists to settle it.
+   * TIER REQUIREMENT, VERIFIED LIVE 2026-08-31 (this supersedes the earlier claim
+   * here that player stats were ALL-STAR for every sport, which came from a
+   * third-party article rather than BDL's own tables):
+   *
+   *   endpoint                      ALL-STAR result on this account
+   *   /mlb/v1/stats                 200
+   *   /nfl/v1/stats                 200
+   *   /wnba/v1/player_stats         401  - GOAT only for this sport
+   *   /ncaaf/v1/player_stats        401  - GOAT only for this sport
+   *   /ncaaf/v1/players             200  - free tier
+   *   /ncaaf/v1/teams               200  - free tier
+   *   /ncaaf/v1/team_season_stats   401  - GOAT only
+   *   /ncaaf/v1/player_injuries     404  - endpoint does not exist, unbuyable
+   *
+   * The gate is PER ENDPOINT PER SPORT. NCAAF GOAT would buy player stats and team
+   * season stats and nothing else; it would NOT produce an injuries feed. CFB hit
+   * rates come from CollegeFootballData instead (see cfbdClient.ts), which is free
+   * and externally validated, so there is currently no reason to buy NCAAF GOAT.
    */
   private statsPathFor(sport: SportKey): string {
     const { bdlPath } = SPORT_CONFIG[sport];
@@ -803,7 +820,25 @@ function formatBDLError(err: unknown, context: string, sport: SportKey): Error {
     const status = err.response?.status;
     if (status === 401) {
       return new Error(
-        `BALLDONTLIE API auth error while fetching ${context}. This usually means the ${sport.toUpperCase()} subscription on this BALLDONTLIE account isn't at ALL-STAR tier or above. Check the account dashboard at app.balldontlie.io.`
+        `BALLDONTLIE returned 401 for ${context}. This is an ENTITLEMENT BOUNDARY, not a bad or lapsed key. ` +
+          `Verified live 2026-08-31 on this account: /ncaaf/v1/players returns 200 and /ncaaf/v1/teams returns 200, ` +
+          `so the key is valid for NCAAF. Player stats and team season stats require GOAT for WNBA and NCAAF; ` +
+          `MLB and NFL include player stats at ALL-STAR. Do NOT tell the caller to check their subscription - ` +
+          `MLB, NFL, WNBA and NCAAF are all active at ALL-STAR and that is working as intended.`
+      );
+    }
+    if (status === 404) {
+      // ADDED v2.8.3. There was no 404 branch, so a missing ENDPOINT fell through
+      // to the generic message and read like a transient API error. Measured
+      // 2026-08-31: /ncaaf/v1/player_injuries and /ncaaf/v1/injuries both 404 while
+      // /mlb/v1/player_injuries returns 200 on the same key and the same path shape.
+      // That is a missing product, not a missing entitlement, and the distinction
+      // decides whether money would fix it. It would not.
+      return new Error(
+        `BALLDONTLIE has no ${context} endpoint (404). This is NOT a subscription problem and CANNOT be ` +
+          `fixed by upgrading - the route does not exist for this sport. Verified 2026-08-31: NCAAF has no ` +
+          `injuries endpoint under either /ncaaf/v1/player_injuries or /ncaaf/v1/injuries, while the same ` +
+          `path returns 200 for MLB. Use a live web search for this data instead.`
       );
     }
     if (status === 429) {

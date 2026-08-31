@@ -200,14 +200,13 @@ Error Handling:
         ).length;
         const settled = wins + losses;
         const pct = settled > 0 ? ((wins / settled) * 100).toFixed(1) : "n/a";
-        const mismatches = graded.filter((g) => g.lineMismatch).length;
 
         const header =
           `${graded.length} pick(s) processed across ${byEvent.size} event(s).\n` +
           `Record: ${wins}-${losses}${pushes ? `-${pushes}` : ""} (${pct}% on settled picks)` +
           (ungraded ? ` | ${ungraded} not gradeable yet` : "") +
-          (mismatches
-            ? `\n\nWARNING: ${mismatches} pick(s) had a posted line differing from the closing line. Those were graded against YOUR posted line, which is correct for the record, but verify before publishing a public result.`
+          (graded.some((g) => g.result !== "NOT_FINAL" && g.closingLine === null)
+            ? `\n\nNOTE: closing lines are not available on this fetch path, so no posted-vs-closed comparison is made. Everything with a postedLine was graded against that line, which is the correct basis for your record.`
             : "");
 
         return {
@@ -304,10 +303,19 @@ function gradeOne(
     };
   }
 
-  const closeRaw = odd.closeOverUnder ?? odd.closeSpread ?? odd.bookOverUnder;
-  const closingLine =
-    typeof closeRaw === "string" ? parseFloat(closeRaw) : (closeRaw as number | undefined);
-  const lineUsed = p.postedLine ?? closingLine;
+  // CLOSING LINE IS NOT AVAILABLE ON THIS PATH. See the long note in gradePicks.ts.
+  // Measured 2026-08-31: a 16-1 final reported a "closing line" of 17.5, because
+  // closeOverUnder/closeSpread do not exist at the top level of an odd (they live
+  // under byBookmaker.<book> and require includeOpenCloseOdds=true), so the chain
+  // always fell through to bookOverUnder, which on a settled blowout holds the last
+  // LIVE number rather than the close. It was reporting the final score.
+  //
+  // Fall back to the feed's own line ONLY to grade when no postedLine was given.
+  // It is never presented as a close, and never used to compute a mismatch.
+  const feedLineRaw = odd.bookOverUnder ?? odd.bookSpread;
+  const feedLine =
+    typeof feedLineRaw === "string" ? parseFloat(feedLineRaw) : (feedLineRaw as number | undefined);
+  const lineUsed = p.postedLine ?? feedLine;
 
   if (lineUsed === undefined || lineUsed === null || Number.isNaN(lineUsed)) {
     return {
@@ -322,11 +330,9 @@ function gradeOne(
   else if (p.side === "over" || p.side === "home") result = actual > lineUsed ? "WIN" : "LOSS";
   else result = actual < lineUsed ? "WIN" : "LOSS";
 
-  const lineMismatch =
-    p.postedLine !== undefined &&
-    closingLine !== undefined &&
-    Number.isFinite(closingLine) &&
-    p.postedLine !== closingLine;
+  // No closing line is obtainable here, so no mismatch can be computed. Claiming one
+  // fired a warning on essentially every total and prop graded.
+  const lineMismatch = false;
 
   const label = p.playerName
     ? `${p.playerName} ${p.side.toUpperCase()} ${lineUsed} ${p.marketLabel ?? ""}`.trim()
@@ -337,10 +343,12 @@ function gradeOne(
     result,
     detail:
       `${label} - actual ${actual}.` +
-      (lineMismatch ? ` LINE MISMATCH: posted ${p.postedLine}, closed ${closingLine}.` : ""),
+      (p.postedLine === undefined
+        ? ` NOTE: graded against the feed's line (${lineUsed}), not a posted line. Pass postedLine for tracker or public results.`
+        : ""),
     actualValue: actual,
     lineGradedAgainst: lineUsed,
-    closingLine: Number.isFinite(closingLine as number) ? (closingLine as number) : null,
+    closingLine: null,
     lineMismatch,
   };
 }

@@ -11,7 +11,8 @@ import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
  * WHY THIS EXISTS: the CASHED reply, the miss reply, and the bet tracker are all
  * currently resolved by hand, game by game, after the fact. SGO already carries the
  * settlement data needed to do it automatically: finalized odds objects expose the
- * actual result (`score`) alongside the closing line (`closeOverUnder` / `closeSpread`),
+ * actual result (`score`). NOTE: it does NOT expose a usable closing line on this
+ * fetch path - see the note in the over/under branch below.
  * which is exactly the comparison a manual grade performs.
  *
  * DELIBERATE DESIGN CHOICE - GRADES AGAINST THE CLOSING LINE, NOT YOUR POSTED LINE:
@@ -227,10 +228,31 @@ Error Handling:
         }
 
         // ---- Over/under and spread: compare result against the line ----
-        const closeRaw = odd.closeOverUnder ?? odd.closeSpread ?? odd.bookOverUnder;
-        const closingLine = typeof closeRaw === "string" ? parseFloat(closeRaw) : (closeRaw as number);
+        //
+        // CLOSING LINE IS NOT AVAILABLE ON THIS PATH, AND PRETENDING OTHERWISE
+        // PRODUCED A CONFIDENT WRONG NUMBER. Measured 2026-08-31 on Red Sox @
+        // Yankees (final 16-1, 17 total runs): this code reported a "closing line"
+        // of 17.5. No MLB total closes at 17.5. `closeOverUnder` and `closeSpread`
+        // do not exist at the top level of an odd - per SGO's docs they live under
+        // byBookmaker.<book> and only when includeOpenCloseOdds=true is requested,
+        // which this fetch does not do. So the chain always fell through to
+        // `bookOverUnder`, which on a settled blowout carries the LAST LIVE value,
+        // not the pre-game close. It was tracking the final score.
+        //
+        // This also explains the "posted 16.5 / closed 34.5" style entries in the
+        // results workflow (Mabrey points, Cardoso rebounds, Tidwell Ks). Those were
+        // never line moves. They were this artifact.
+        //
+        // Reporting null is the correct answer until the byBookmaker path is
+        // verified live, per this connector's own rule: a stat that cannot be
+        // resolved returns null, never a plausible substitute.
+        // Fall back to the feed's own line ONLY to grade when no postedLine was
+        // given. It is never presented as a close and never used for a mismatch.
+        const feedLineRaw = odd.bookOverUnder ?? odd.bookSpread;
+        const feedLine =
+          typeof feedLineRaw === "string" ? parseFloat(feedLineRaw) : (feedLineRaw as number);
 
-        const lineUsed = params.postedLine ?? closingLine;
+        const lineUsed = params.postedLine ?? feedLine;
 
         if (lineUsed === undefined || lineUsed === null || Number.isNaN(lineUsed)) {
           return {
@@ -252,10 +274,9 @@ Error Handling:
           result = actual < lineUsed ? "WIN" : "LOSS";
         }
 
-        const lineMismatch =
-          params.postedLine !== undefined &&
-          Number.isFinite(closingLine) &&
-          params.postedLine !== closingLine;
+        // No closing line means no mismatch can be computed. Claiming one anyway is
+        // what produced a warning on essentially every total and prop.
+        const lineMismatch = false;
 
         const output = {
           result,
@@ -265,15 +286,17 @@ Error Handling:
           market: params.marketLabel,
           actualValue: actual,
           lineGradedAgainst: lineUsed,
-          closingLine: Number.isFinite(closingLine) ? closingLine : null,
+          closingLine: null,
+          closingLineUnavailable: true,
           gradedAgainstPostedLine: params.postedLine !== undefined,
           lineMismatch,
           eventID: event.eventID,
         };
 
-        const mismatchNote = lineMismatch
-          ? ` WARNING: your posted line (${params.postedLine}) differs from the closing line (${closingLine}). Graded against your posted line, which is correct for your record, but double-check before posting a public result.`
-          : "";
+        const mismatchNote =
+          params.postedLine === undefined
+            ? ` NOTE: no postedLine was supplied and no closing line is available on this path, so this was graded against whatever line the feed carried. Pass postedLine for anything going into the tracker or a public result.`
+            : "";
 
         const label = params.playerName
           ? `${params.playerName} ${params.side.toUpperCase()} ${lineUsed} ${params.marketLabel ?? ""}`.trim()

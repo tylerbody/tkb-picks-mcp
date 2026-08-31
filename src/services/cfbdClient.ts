@@ -15,11 +15,20 @@ import type { CfbdCategory } from "./cfbdStatMap.js";
  * hit-rate source for this sport at all. BALLDONTLIE gates NCAAF player stats behind
  * GOAT. CFBD is the remaining source, and its free tier covers player statistics.
  *
- * THE CALL BUDGET IS THE WHOLE DESIGN. The free tier is 1,000 requests a MONTH
- * (3,000 on a verified .edu key). That sounds tight against a 392-game season and is
- * not, because of one property of the API: /games/players accepts YEAR + WEEK with
- * no team filter, and returns every player's box score for every game that week in a
- * SINGLE request.
+ * THE CALL BUDGET IS THE WHOLE DESIGN. The commonly cited free-tier limit is 1,000
+ * requests a MONTH (3,000 on a verified .edu key).
+ *
+ * THAT FIGURE IS AN UNVERIFIED PLANNING ASSUMPTION, NOT A DOCUMENTED FACT. CFBD's
+ * docs deliberately decline to state limits: "The API tiers page is the source for
+ * current access levels, limits, and pricing. Those details can change, so they are
+ * not duplicated here." So the number this architecture is sized against is exactly
+ * the kind of decaying fact this repo forbids quoting from a secondary source. Check
+ * collegefootballdata.com/api-tiers, and CFBD's own /api/info operation for real
+ * usage, before treating any headroom estimate as real.
+ *
+ * The design does not depend on the exact number, which is why it survives being
+ * wrong: /games/players accepts YEAR + WEEK with no team filter, and returns every
+ * player's box score for every game that week in a SINGLE request.
  *
  *   A full 2025 season backfill          ~16 requests, once, ever
  *   In-season, one completed week        1 request per week, ~14 a season

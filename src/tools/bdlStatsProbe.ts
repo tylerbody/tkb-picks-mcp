@@ -15,16 +15,27 @@ import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
  * cap at all - only a per-minute request limit - so the migration removes the
  * binding constraint instead of shrinking it.
  *
- * TWO THINGS MUST BE CONFIRMED BEFORE ANY OF THAT CAN BE BUILT, and neither can
- * be answered from documentation:
+ * STATUS: THE MIGRATION SHIPPED. It landed in v2.0.0 and was hardened through
+ * v2.3.0; MLB and NFL hit rates are served by BALLDONTLIE today. This tool is now a
+ * DIAGNOSTIC for field names and entitlement boundaries, not a go/no-go gate. Earlier
+ * versions of this file told the reader not to build the migration until a tier
+ * question was resolved, which was years stale and actively misleading on a CFB probe.
  *
- *   1. TIER ACCESS. Player stats are reported to be included in ALL-STAR
- *      ($9.99/sport, already subscribed for MLB and WNBA), with odds and props
- *      requiring GOAT ($39.99). That comes from a third-party article, not BDL's
- *      own pricing page. A 401 here means the migration needs a paid upgrade and
- *      the economics change completely.
+ * TIER ACCESS, VERIFIED LIVE 2026-08-31 (supersedes the third-party article this
+ * file used to cite):
  *
- *   2. FIELD NAMES. SGO statIDs (batting_hits, batting_totalBases,
+ *   /mlb/v1/stats               200      /ncaaf/v1/players           200 (free)
+ *   /nfl/v1/stats               200      /ncaaf/v1/teams             200 (free)
+ *   /wnba/v1/player_stats       401      /ncaaf/v1/team_season_stats 401 (GOAT)
+ *   /ncaaf/v1/player_stats      401      /ncaaf/v1/player_injuries   404 (no route)
+ *
+ * The gate is PER ENDPOINT PER SPORT. A 401 does NOT mean the subscription lapsed -
+ * MLB, NFL, WNBA and NCAAF are all active at ALL-STAR on this account.
+ *
+ * ONE THING STILL MUST BE CONFIRMED PER SPORT, and it cannot be answered from
+ * documentation:
+ *
+ *   FIELD NAMES. SGO statIDs (batting_hits, batting_totalBases,
  *      pitching_strikeouts) have to map onto BDL's response fields. Those field
  *      names are not published in a form that can be relied on, and total bases
  *      in particular may not exist as a field at all - it may need computing from
@@ -93,6 +104,15 @@ Error Handling:
       },
     },
     async (params: ProbeInput) => {
+      // HOISTED SO A TIER GATE CANNOT THROW AWAY THE ANSWER. Step 1 resolves the
+      // player and their TEAM; step 2 fetches stats and may 401. Previously
+      // `candidates` was scoped inside the try, so on a gated sport the tool
+      // reported only "tier gate" and silently discarded the team affiliation it
+      // had already successfully resolved. That made two very different outcomes -
+      // "the player does not exist" and "the player resolved fine but stats are
+      // gated" - indistinguishable in the output.
+      let resolved: { bdlPlayerID: number; name: string; team: string }[] = [];
+
       try {
         // ---- Step 1: resolve name -> BDL numeric ID ----
         const search = await bdl.searchPlayers(params.sport, params.playerName);
@@ -116,6 +136,7 @@ Error Handling:
           name: `${p.first_name} ${p.last_name}`,
           team: p.team?.full_name ?? p.team?.display_name ?? p.team?.name ?? "unknown",
         }));
+        resolved = candidates;
 
         const chosen = search.data[0]!;
         const ambiguity =
@@ -188,10 +209,21 @@ Error Handling:
               type: "text" as const,
               text: isAuth
                 ? `TIER GATE CONFIRMED - this is the answer, not a malfunction.\n\n${msg}\n\n` +
-                  `Player game stats are NOT included on the current ${params.sport.toUpperCase()} ` +
-                  `subscription. Migrating hit rates to BALLDONTLIE would require an upgrade ` +
-                  `(reported at GOAT, $39.99/sport/month), which changes the economics versus ` +
-                  `staying on SportsGameOdds. Do not build the migration until this is resolved.`
+                  `Player game stats require GOAT for ${params.sport.toUpperCase()}. The ALL-STAR ` +
+                  `subscription on this account is VALID and ACTIVE for this sport - other endpoints ` +
+                  `on the same key return 200. Nothing is misconfigured.\n\n` +
+                  (resolved.length
+                    ? `PLAYER RESOLUTION SUCCEEDED BEFORE THE GATE, so the team answer is still ` +
+                      `usable:\n${JSON.stringify(resolved, null, 2)}\n\n` +
+                      `NOTE ON NCAAF: the players index is HISTORICAL, not a current roster. ` +
+                      `Verified 2026-08-31 - an Auburn roster pull returned the 2004 team ` +
+                      `(Cadillac Williams, Jason Campbell, Ronnie Brown) and a surname search ` +
+                      `returned ~50 Washingtons with no current player among them. Do NOT use it ` +
+                      `to answer "which team is this player on now".\n\n`
+                    : `The player was NOT resolved before the gate fired, so this says nothing ` +
+                      `about whether the name is valid.\n\n`) +
+                  `For CFB hit rates, use CollegeFootballData (dataSource="cfbd"), which is free ` +
+                  `and already wired up. There is no reason to buy GOAT for this.`
                 : `Error probing BDL stats: ${msg}`,
             },
           ],
