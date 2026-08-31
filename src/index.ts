@@ -6,6 +6,7 @@ import { SUPPORTED_SPORTS } from "./constants.js";
 import { SGOClient } from "./services/sgoClient.js";
 import { BDLClient } from "./services/bdlClient.js";
 import { CFBDClient } from "./services/cfbdClient.js";
+import { MLBStatsClient } from "./services/mlbStatsClient.js";
 import { WeatherClient } from "./services/weatherClient.js";
 import { registerScheduleTool } from "./tools/schedule.js";
 import { registerOddsTool } from "./tools/odds.js";
@@ -32,6 +33,7 @@ import { registerRankingsTool } from "./tools/rankings.js";
 import { registerStandingsTool } from "./tools/standings.js";
 import { registerEventProbeTool } from "./tools/eventProbe.js";
 import { registerCfbdStatsProbeTool } from "./tools/cfbdStatsProbe.js";
+import { registerMlbMatchupTool } from "./tools/mlbMatchup.js";
 
 // ---- Environment / config ----
 
@@ -66,6 +68,13 @@ const bdl = new BDLClient(BDL_API_KEY);
  */
 const CFBD_API_KEY = process.env.CFBD_API_KEY;
 const cfbd = CFBD_API_KEY ? new CFBDClient(CFBD_API_KEY) : null;
+
+/**
+ * NO KEY, SO NO CONDITIONAL. statsapi.mlb.com is unauthenticated and unmetered, so
+ * unlike SGO, BDL and CFBD there is nothing to configure and nothing to gate on.
+ * The tool fails soft at call time if the feed is unreachable.
+ */
+const mlbStats = new MLBStatsClient();
 if (!cfbd) {
   console.warn(
     "WARN: CFBD_API_KEY is not set. CFB hit rates will refuse rather than fall back " +
@@ -103,7 +112,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.7.0";
+const SERVER_VERSION = "2.8.0";
 
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -136,6 +145,7 @@ function buildServer(): McpServer {
   registerStandingsTool(server, bdl);
   registerEventProbeTool(server, sgo);
   if (cfbd) registerCfbdStatsProbeTool(server, cfbd);
+  registerMlbMatchupTool(server, mlbStats);
 
   return server;
 }

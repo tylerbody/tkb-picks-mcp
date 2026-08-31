@@ -41,6 +41,18 @@ const CFBD_BASE_URL = "https://api.collegefootballdata.com";
 /** A week whose games are all final never changes. Anything else gets a short TTL. */
 const IN_PROGRESS_TTL_MS = 30 * 60 * 1000;
 
+/** Game metadata from /games, used to attach REAL dates to box scores. */
+export interface CfbdGameMeta {
+  gameId: number;
+  startDate: string;
+  week: number;
+  seasonType: string;
+  season: number;
+  homeTeam: string;
+  awayTeam: string;
+  completed: boolean;
+}
+
 export interface CfbdGameBoxScore {
   gameId: number;
   teams: {
@@ -62,6 +74,7 @@ interface WeekCacheEntry {
 export class CFBDClient {
   private http: AxiosInstance;
   private weekCache = new Map<string, WeekCacheEntry>();
+  private seasonGamesCache = new Map<number, Map<number, CfbdGameMeta>>();
   private inFlight = new Map<string, Promise<CfbdGameBoxScore[]>>();
 
   /**
@@ -180,6 +193,66 @@ export class CFBDClient {
         );
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`CFBD request failed for ${year} week ${week}: ${msg}`);
+    }
+  }
+
+  /**
+   * EVERY GAME'S DATE FOR ONE SEASON, IN ONE REQUEST.
+   *
+   * WHY THIS EXISTS, and why it is worth its one request: /games/players returns a
+   * bare numeric game id and NOTHING else identifying the game - no date, no
+   * kickoff, no calendar position. Without a date the aggregator cannot sort by
+   * recency, cannot attribute a game to a season, and cannot compute staleness.
+   *
+   * THIS IS THE IDENTICAL BUG v2.0.2 FIXED ON THE BDL PATH, and it reappeared here
+   * for the identical reason. BDL's MLB stat rows also carried a bare game_id, and
+   * the consequences were: no sorting (every date compared equal, so the sort was a
+   * no-op), no recency, and a season-provenance guardrail that reported
+   * crossesSeasonBoundary FALSE while cross-season contamination was happening -
+   * because it keys off dates and there were none.
+   *
+   * Caught here on 2026-08-31 by the first live run: Dante Moore returned fifteen
+   * correct 2025 values with seasonWarning NULL, priorSeasonGames 0 and
+   * seasonsRepresented []. Every number right, the single most important label
+   * missing, on a sport where EVERY opening-weeks sample is prior-season by
+   * construction. Same family as the reversed-array bug in v2.1.0: a right value,
+   * wrongly narrated.
+   *
+   * One request per season, cached permanently, because a completed season's
+   * schedule does not change.
+   */
+  async getSeasonGames(year: number): Promise<Map<number, CfbdGameMeta>> {
+    const cached = this.seasonGamesCache.get(year);
+    if (cached) {
+      this.stats.hits++;
+      return cached;
+    }
+    this.stats.misses++;
+    this.stats.requests++;
+    try {
+      const res = await this.http.get("/games", { params: { year } });
+      const rows = Array.isArray(res.data) ? res.data : [];
+      const map = new Map<number, CfbdGameMeta>();
+      for (const g of rows as Record<string, unknown>[]) {
+        const id = Number(g.id);
+        if (!Number.isFinite(id)) continue;
+        map.set(id, {
+          gameId: id,
+          startDate: String(g.startDate ?? ""),
+          week: Number(g.week ?? 0),
+          seasonType: String(g.seasonType ?? "regular"),
+          season: Number(g.season ?? year),
+          homeTeam: String(g.homeTeam ?? ""),
+          awayTeam: String(g.awayTeam ?? ""),
+          completed: Boolean(g.completed),
+        });
+      }
+      this.seasonGamesCache.set(year, map);
+      return map;
+    } catch (err) {
+      this.stats.errors++;
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`CFBD /games failed for ${year}: ${msg}`);
     }
   }
 

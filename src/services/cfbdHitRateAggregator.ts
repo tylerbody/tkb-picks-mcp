@@ -1,4 +1,4 @@
-import type { CFBDClient, CfbdGameBoxScore } from "./cfbdClient.js";
+import type { CFBDClient, CfbdGameBoxScore, CfbdGameMeta } from "./cfbdClient.js";
 import type { GameLogEntry, HitRateResult } from "../types.js";
 import { lookupCfbdStat, isCfbdStatSupported, supportedCfbdStatIDs } from "./cfbdStatMap.js";
 import { summarizeSeasons } from "./seasonBoundary.js";
@@ -124,6 +124,27 @@ export async function getCfbdPlayerHitRate(
     }
   }
 
+  // REAL DATES, JOINED BEFORE ANYTHING IS COUNTED.
+  //
+  // /games/players returns a bare numeric game id and nothing else identifying the
+  // game. Without a date there is no sorting, no season attribution and no
+  // staleness check - and critically, summarizeSeasons reports
+  // crossesSeasonBoundary FALSE when it receives dates it cannot parse, so the
+  // prior-season warning goes SILENT exactly when every game is prior-season.
+  //
+  // Caught by the first live run of this aggregator: fifteen correct 2025 values
+  // returned with seasonWarning null. Same bug, same cause and same fix as v2.0.2
+  // on the BDL path. One request per season, cached permanently.
+  const gameDates = new Map<number, CfbdGameMeta>();
+  for (const year of params.seasons) {
+    try {
+      const meta = await cfbd.getSeasonGames(year);
+      for (const [id, g] of meta) gameDates.set(id, g);
+    } catch {
+      // Fall through - the hard refusal below catches an unusable result.
+    }
+  }
+
   const log: GameLogEntry[] = [];
   const matchedFields = new Set<string>();
   let overHits = 0;
@@ -176,7 +197,7 @@ export async function getCfbdPlayerHitRate(
         // stat. Recorded as an absence, never as a zero.
         log.push({
           eventID: String(game.gameId),
-          date: `${w.year}-W${w.week}`,
+          date: gameDates.get(game.gameId)?.startDate ?? "unknown",
           opponent,
           isHome: team.homeAway === "home",
           statValue: null,
@@ -194,7 +215,7 @@ export async function getCfbdPlayerHitRate(
 
       log.push({
         eventID: String(game.gameId),
-        date: `${w.year}-W${w.week}`,
+        date: gameDates.get(game.gameId)?.startDate ?? "unknown",
         opponent,
         isHome: team.homeAway === "home",
         statValue: lookup.value,
@@ -206,7 +227,32 @@ export async function getCfbdPlayerHitRate(
   }
 
   const gamesHit = params.direction === "over" ? overHits : underHits;
-  const seasons = summarizeSeasons("cfb", log.filter((g) => g.statValue !== null).map((g) => g.date));
+
+  const countedDates = log.filter((g) => g.statValue !== null).map((g) => g.date);
+
+  // HARD REFUSAL, not a warning. v2.0.2 established the rule on the BDL path: an
+  // unsortable sample is not a recent-form hit rate, and returning one anyway is
+  // the precise failure this connector exists to prevent - a fully populated,
+  // plausible, wrong number. If nothing resolved to a date, the season and
+  // staleness guardrails are both blind and CANNOT be trusted to fire.
+  if (countedDates.length > 0 && countedDates.every((d) => d === "unknown")) {
+    throw new Error(
+      `DATE RESOLUTION FAILED: ${countedDates.length} CFBD stat row(s) for ` +
+        `${params.playerName} could not be matched to a game date, so season ` +
+        `provenance and staleness cannot be assessed. Refusing to return a rate - ` +
+        `an unsortable sample is not a recent-form hit rate.`
+    );
+  }
+
+  // Newest first, so the log reads the way every other path in this repo reads and
+  // log[0] is genuinely the most recent appearance.
+  log.sort((a, b) => {
+    const ta = a.date === "unknown" ? 0 : new Date(a.date).getTime();
+    const tb = b.date === "unknown" ? 0 : new Date(b.date).getTime();
+    return tb - ta;
+  });
+
+  const seasons = summarizeSeasons("cfb", countedDates);
   const sufficient = appearances >= minSufficient;
 
   const sampleWarning = !playerID

@@ -1,4 +1,4 @@
-# TKB Picks MCP Server (v2.7.0)
+# TKB Picks MCP Server (v2.8.0)
 
 MCP server wrapping **SportsGameOdds** (odds, schedules, props, results) and
 **BALLDONTLIE** (stats, injuries, standings) for building TKB Picks betting
@@ -17,8 +17,8 @@ Render Web Service, Node environment:
 Then verify rather than assume:
 
 ```bash
-npm test                                        # 121 tests, no network needed
-node scripts/verify-deploy.mjs --expect 2.7.0
+npm test                                        # 124 tests, no network needed
+node scripts/verify-deploy.mjs --expect 2.8.0
 node scripts/verify-deploy.mjs --screen <mlbEventID>   # measures entity cost
 ```
 
@@ -47,7 +47,7 @@ on an event rather than roster positions, so `event.players` is permanently empt
 and player props cannot be addressed by playerID. This is structural, not
 unfinished. Use `tkb_get_odds` with `marketType="moneyline"`.
 
-## Tools (25)
+## Tools (26)
 
 **Picks**
 
