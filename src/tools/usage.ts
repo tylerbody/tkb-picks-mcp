@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
+import type { CFBDClient } from "../services/cfbdClient.js";
 
 /**
  * API QUOTA MONITOR.
@@ -25,7 +26,11 @@ const UsageInputSchema = z.object({}).strict();
 
 type UsageInput = z.infer<typeof UsageInputSchema>;
 
-export function registerUsageTool(server: McpServer, sgo: SGOClient) {
+export function registerUsageTool(
+  server: McpServer,
+  sgo: SGOClient,
+  cfbd: CFBDClient | null
+) {
   server.registerTool(
     "tkb_get_api_usage",
     {
@@ -77,12 +82,30 @@ Error Handling:
               `three screener workers could miss the same not-yet-written cache key ` +
               `simultaneously and all three got billed.`;
 
+        // CFBD IS BUDGETED PER MONTH, NOT PER MINUTE, so an unnoticed miss loop
+        // costs days rather than sixty seconds. That asymmetry is why this is
+        // surfaced next to the SGO numbers rather than hidden in a debug tool.
+        const cfbdLine = (() => {
+          if (!cfbd) return `CollegeFootballData: not configured (CFBD_API_KEY unset).`;
+          const c = cfbd.getStats();
+          return (
+            `CollegeFootballData: ${c.requests} request(s) this process, ${c.hits} cache ` +
+            `hit(s), ${c.misses} miss(es), ${c.coalesced} coalesced, ${c.errors} error(s). ` +
+            `${c.cachedWeeks} week(s) cached, ${c.permanentWeeks} of them permanent. ` +
+            `FREE TIER IS 1,000 REQUESTS PER MONTH (3,000 on a verified .edu key) and ` +
+            `does NOT reset daily. One request returns an entire week of box scores for ` +
+            `every game, so a full prior-season backfill is ~16 requests and an in-season ` +
+            `refresh is 1 a week. If this number is climbing faster than that, something ` +
+            `is fetching per game or per player instead of per week.`
+          );
+        })();
+
         return {
           content: [
             {
               type: "text" as const,
               text:
-                `SportsGameOdds account usage:\n\n${truncated}\n\n${cacheLine}\n\n` +
+                `SportsGameOdds account usage:\n\n${truncated}\n\n${cacheLine}\n\n${cfbdLine}\n\n` +
                 `Reminder: billing is per EVENT OBJECT returned, not per market. Hit-rate ` +
                 `checks are the heaviest consumer in this connector, which is why identical ` +
                 `team-history fetches are cached.`,

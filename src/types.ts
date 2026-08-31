@@ -362,12 +362,55 @@ export interface NormalizedInjury {
   updatedAt?: string;
 }
 
+/**
+ * WHY A NULL statValue IS NOT ONE THING (added v2.7.0).
+ *
+ * This field was documented as "did not play / DNP", and the aggregator counted
+ * every null as a DNP. That collapses three genuinely different situations into
+ * one, and the difference is the difference between a real playing-time warning
+ * and a fabricated one.
+ *
+ * MEASURED 2026-08-31, the case that forced this: Dante Moore, Oregon's returning
+ * starting quarterback, started every game of the 2025 season. Asked for his
+ * passing-yards history the connector reported playRate 0.2 and
+ *
+ *   "appeared in only 3 of the last 15 team games (12 DNPs)"
+ *
+ * Every one of those 12 "DNPs" is a game he started. SGO simply does not carry
+ * CFB player box scores for regular-season games - only for playoff games. The
+ * absence of DATA was being read as the absence of a PLAYER. Maddux Madsen came
+ * back at playRate 0.07 the same way.
+ *
+ * That is a fully populated, plausible-shaped, confidently wrong output, which is
+ * the same family as the p_k batting/pitching collision (v2.0.1), the "null-0"
+ * team record (v2.6.6) and the year-stale window (v2.6.1). Nothing errors, no
+ * guardrail fires, and the number reads like diligence.
+ *
+ * dataStatus records WHICH of the three it was, so a coverage gap can never again
+ * masquerade as a playing-time risk.
+ */
+export type GameDataStatus =
+  /** The player has a settled value for this stat in this game. */
+  | "value"
+  /** The provider carries no player box score for this game at all. NOT a DNP. */
+  | "no_box_score"
+  /** The box score exists and lists other players, but not this one. A REAL DNP. */
+  | "player_absent"
+  /** The player is in the box score but this particular stat is unsettled. NOT a DNP. */
+  | "stat_unsettled";
+
 export interface GameLogEntry {
   eventID: string;
   date: string;
   opponent: string;
   isHome: boolean;
-  statValue: number | null; // null = player had no recorded value (did not play / DNP)
+  /** null whenever dataStatus is anything other than "value". */
+  statValue: number | null;
+  /**
+   * WHY THIS EXISTS: a null statValue alone cannot distinguish "he did not play"
+   * from "the provider has no box score for this game". See GameDataStatus above.
+   */
+  dataStatus?: GameDataStatus;
   /** Which season this game belongs to (year the season started). */
   seasonYear?: number;
 }
@@ -407,10 +450,18 @@ export interface HitRateResult {
   recentAvailability: {
     gamesPlayed: number;
     teamGamesScanned: number;
+    /** Scanned games that actually carry a box score. The play-rate denominator. */
+    gamesWithData: number;
     playRate: number;
-    flag: "OK" | "IRREGULAR" | "ROTATION_NORMAL";
+    flag: "OK" | "IRREGULAR" | "ROTATION_NORMAL" | "UNKNOWN";
     note: string | null;
   };
+  /** Scanned games where the provider carries no player results at all. NOT DNPs. */
+  gamesWithoutBoxScore?: number;
+  /** Scanned games where the player appears but this stat is unsettled. NOT DNPs. */
+  gamesStatUnsettled?: number;
+  /** Set when the provider's coverage, rather than playing time, limited the sample. */
+  coverageWarning?: string | null;
   // Season provenance - prevents prior-season games being written up as current form.
   currentSeasonGames: number;
   priorSeasonGames: number;
@@ -426,3 +477,19 @@ export interface TeamSplitRecord {
   losses: number;
   context: string; // e.g. "home", "road", "vs DET last 3 seasons"
 }
+
+
+/**
+ * OUTCOME OF ONE CollegeFootballData BOX-SCORE LOOKUP.
+ *
+ * Mirrors StatLookup on the SGO path: a bare `number | null` cannot say WHY it is
+ * null, and the four reasons need four different responses. "stat_not_mapped" is a
+ * code fix, "unparseable" is a provider shape change, "player_absent" is real, and
+ * "no_box_score" means the week was never ingested.
+ */
+export type CfbdStatLookup =
+  | { kind: "value"; value: number; matchedCategory: string; matchedType: string }
+  | { kind: "player_absent"; note: string }
+  | { kind: "stat_not_mapped"; note: string }
+  | { kind: "unparseable"; note: string }
+  | { kind: "no_box_score"; note: string };

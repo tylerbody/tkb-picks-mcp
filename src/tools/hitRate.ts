@@ -2,8 +2,18 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import type { BDLClient } from "../services/bdlClient.js";
-import { getPlayerHitRate } from "../services/hitRateAggregator.js";
-import { getBdlPlayerHitRate } from "../services/bdlHitRateAggregator.js";
+import {
+  getPlayerHitRate,
+  PRIOR_SEASON_LOOKBACK,
+} from "../services/hitRateAggregator.js";
+import { getCfbdPlayerHitRate } from "../services/cfbdHitRateAggregator.js";
+import { isCfbdStatSupported } from "../services/cfbdStatMap.js";
+import type { CFBDClient } from "../services/cfbdClient.js";
+import { currentSeason } from "../services/seasonBoundary.js";
+import {
+  getBdlPlayerHitRate,
+  priorSeasonBdlLookback,
+} from "../services/bdlHitRateAggregator.js";
 import { isStatSupported } from "../services/bdlStatMap.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 
@@ -34,10 +44,16 @@ const HitRateInputSchema = z
         "How many games the PLAYER ACTUALLY APPEARED IN to collect (not team games). The server scans backward through team games until it has this many real appearances. Defaults by role: 10 for starting pitchers, 15 for batters, 12 for skaters. For a starting pitcher this may scan ~5x this many team games."
       ),
     dataSource: z
-      .enum(["auto", "bdl", "sgo"])
+      .enum(["auto", "bdl", "sgo", "cfbd"])
       .default("auto")
       .describe(
-        "Which provider computes the rate. 'auto' (default) tries BALLDONTLIE first and falls back to SportsGameOdds - BDL has no monthly object cap, so it is roughly 20x cheaper. 'sgo' forces the original path. Results are equivalent; only cost and DNP visibility differ."
+        "Which provider computes the rate. 'auto' (default) tries BALLDONTLIE first and falls back to SportsGameOdds - BDL has no monthly object cap, so it is roughly 20x cheaper. For CFB, 'auto' uses CollegeFootballData, because SGO carries CFB games but NOT CFB player box scores outside the playoff (measured 2026-08-31: Dante Moore had 3 box scores across 15 started games) and BDL gates NCAAF stats behind GOAT. 'sgo' forces the original path. 'cfbd' forces CollegeFootballData."
+      ),
+    includePriorSeason: z
+      .boolean()
+      .default(false)
+      .describe(
+        "Widen the lookback to its 400-day ceiling so the PREVIOUS season is in range. Use in the OPENING WEEKS of a season, when the default window sits in empty offseason and returns nothing. ONE FLAG RATHER THAN RAW NUMBERS on purpose: raising lookbackGames alone is clamped to a 225-day window that reaches the playoffs and misses the regular season, which looks like it worked. Every rate returned will carry the prior-season warning, and that language is mandatory in the thread. Turn it off once the current season is 4 to 6 games old."
       ),
     maxTeamGamesScanned: z
       .number()
@@ -53,7 +69,12 @@ const HitRateInputSchema = z
 
 type HitRateInput = z.infer<typeof HitRateInputSchema>;
 
-export function registerHitRateTool(server: McpServer, sgo: SGOClient, bdl: BDLClient) {
+export function registerHitRateTool(
+  server: McpServer,
+  sgo: SGOClient,
+  bdl: BDLClient,
+  cfbd: CFBDClient | null
+) {
   server.registerTool(
     "tkb_get_player_hit_rate",
     {
@@ -116,6 +137,93 @@ Error Handling:
           };
         }
 
+        // ---- CFB ROUTES TO CollegeFootballData, AND HAS TO ----
+        //
+        // This is not a preference. Measured 2026-08-31 across two teams: SGO
+        // returned every 2025 team game but a box score for almost none of them.
+        // Dante Moore, who started all 15 games for Oregon, had a settled passing
+        // line in 3 - the three playoff games. Maddux Madsen: 1 of 14, also a
+        // playoff game. SGO carries CFB GAMES but not CFB PLAYER BOX SCORES outside
+        // the postseason, and BALLDONTLIE gates NCAAF player stats behind GOAT.
+        //
+        // Falling back to SGO here would not degrade cost, it would manufacture a
+        // wrong answer: those empty games read as DNPs and produced a 0.2 play rate
+        // for a returning starter. So a missing CFBD key REFUSES rather than falls
+        // back, per the rule this connector is built on - an unanswerable question
+        // gets a refusal, not a plausible answer.
+        const wantsCfbd =
+          params.sport === "cfb" && params.dataSource !== "sgo" && params.dataSource !== "bdl";
+
+        if (wantsCfbd) {
+          if (!cfbd) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `CFB HIT RATES ARE UNAVAILABLE: CFBD_API_KEY is not set on this ` +
+                    `server, so CollegeFootballData cannot be reached.\n\n` +
+                    `This does NOT fall back to SportsGameOdds, deliberately. SGO carries ` +
+                    `CFB games but not CFB player box scores outside the playoff, so the ` +
+                    `fallback would report started games as DNPs and return a confident ` +
+                    `wrong number rather than no number.\n\n` +
+                    `Set CFBD_API_KEY in the environment (free tier at ` +
+                    `collegefootballdata.com/key), or build this thread from ` +
+                    `tkb_get_prop_board and tkb_get_game_lines, which need no rate source.`,
+                },
+              ],
+            };
+          }
+          if (!isCfbdStatSupported(params.statID)) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `"${params.statID}" has no CollegeFootballData mapping, so no CFB hit ` +
+                    `rate can be counted for it. Do NOT substitute a value or fall back ` +
+                    `to SGO, which has no CFB box scores outside the playoff.`,
+                },
+              ],
+            };
+          }
+
+          const thisSeason = currentSeason("cfb").seasonYear;
+          const cfbdResult = await getCfbdPlayerHitRate(cfbd, {
+            teamName: params.teamID,
+            playerName: params.playerName,
+            statID: params.statID,
+            line: params.line,
+            direction: params.direction,
+            // In the opening weeks the current season has nothing to count, so the
+            // prior season is the only sample that exists. Labelled, never hidden.
+            seasons: params.includePriorSeason
+              ? [thisSeason, thisSeason - 1]
+              : [thisSeason],
+            targetAppearances: params.lookbackGames,
+          });
+
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  (cfbdResult.sampleWarning ? `${cfbdResult.sampleWarning}\n\n` : "") +
+                  `${cfbdResult.playerName}: ${cfbdResult.gamesHit} of ` +
+                  `${cfbdResult.gamesConsidered} ${params.direction} ${params.line} ` +
+                  `${params.statID}\n\n` +
+                  `Source: CollegeFootballData` +
+                  (cfbdResult.matchedFields.length
+                    ? ` (read from ${cfbdResult.matchedFields.join(", ")})`
+                    : "") +
+                  `.\n\nNOTE: ${cfbdResult.recentAvailability.note}\n\n` +
+                  JSON.stringify(cfbdResult, null, 2),
+              },
+            ],
+            structuredContent: cfbdResult,
+          };
+        }
+
         // ---- BDL-FIRST ROUTING ----
         // SGO bills per event object and a hit rate needs a whole team history,
         // so one thread measured at 211 entities and daily builds projected over
@@ -134,6 +242,9 @@ Error Handling:
               line: params.line,
               direction: params.direction,
               lookbackGames: params.lookbackGames,
+              // BDL bounds its window BOTH by days and by season. Widening only the
+              // days would still ask the current season for games it has not played.
+              ...(params.includePriorSeason ? priorSeasonBdlLookback(params.sport) : {}),
             });
 
             const chosen = bdlResult.gamesHit;
@@ -189,7 +300,12 @@ Error Handling:
             // problem (tier gate, bad field mapping, ambiguous name) is visible
             // rather than quietly costing quota on every call.
             const reason = bdlErr instanceof Error ? bdlErr.message : String(bdlErr);
-            const sgoFallback = await getPlayerHitRate(sgo, params);
+            const sgoFallback = await getPlayerHitRate(sgo, {
+              ...params,
+              // Both numbers or neither - a half-applied widening lands on a
+              // 225-day window that reaches the playoffs and misses the season.
+              ...(params.includePriorSeason ? PRIOR_SEASON_LOOKBACK : {}),
+            });
             return {
               content: [
                 {
@@ -208,7 +324,10 @@ Error Handling:
           }
         }
 
-        const result = await getPlayerHitRate(sgo, params);
+        const result = await getPlayerHitRate(sgo, {
+          ...params,
+          ...(params.includePriorSeason ? PRIOR_SEASON_LOOKBACK : {}),
+        });
 
         if (!result.sampleSufficient) {
           return {

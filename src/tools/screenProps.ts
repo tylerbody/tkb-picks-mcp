@@ -8,8 +8,15 @@ import {
   impliedProbability,
   computeEdge,
 } from "../services/oddsPricing.js";
-import { getPlayerHitRate } from "../services/hitRateAggregator.js";
-import { getBdlPlayerHitRate } from "../services/bdlHitRateAggregator.js";
+import { getPlayerHitRate, PRIOR_SEASON_LOOKBACK } from "../services/hitRateAggregator.js";
+import {
+  getBdlPlayerHitRate,
+  priorSeasonBdlLookback,
+} from "../services/bdlHitRateAggregator.js";
+import { getCfbdPlayerHitRate } from "../services/cfbdHitRateAggregator.js";
+import { isCfbdStatSupported } from "../services/cfbdStatMap.js";
+import type { CFBDClient } from "../services/cfbdClient.js";
+import { currentSeason } from "../services/seasonBoundary.js";
 import { isStatSupported } from "../services/bdlStatMap.js";
 import { describeRecency, STARTING_PITCHER_THRESHOLDS } from "../services/sampleRecency.js";
 import { parseOddID } from "../services/oddIdParser.js";
@@ -374,7 +381,12 @@ export function diversifyByPlayer<T extends { playerID: string }>(
   return { kept, suppressed };
 }
 
-export function registerScreenPropsTool(server: McpServer, sgo: SGOClient, bdl: BDLClient) {
+export function registerScreenPropsTool(
+  server: McpServer,
+  sgo: SGOClient,
+  bdl: BDLClient,
+  cfbd: CFBDClient | null
+) {
   server.registerTool(
     "tkb_screen_props",
     {
@@ -459,6 +471,12 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           .default(DEFAULT_BOOKMAKERS)
           .describe(
             "Comma-separated bookmaker IDs to price against. DEFAULTS to 'draftkings,fanduel,betmgm,caesars' - the books this account's audience can actually bet. Pass a different list to override, or 'all' to disable the filter entirely (diagnostic only, not for building threads). Without a filter the screen prices each prop from whichever book appears first in SGO's response: measured across 6 MLB games on 2026-08-24, only 69% of props came from DraftKings or FanDuel, with the rest split across Hard Rock, ProphetX, ESPN Bet and Bovada. Edge is computed from that price, so an unbettable one silently corrupts the RANKING, not just the display."
+          ),
+        includePriorSeason: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Widen the hit-rate lookback to its 400-day ceiling so the PREVIOUS season is in range. Use in the OPENING WEEKS of a season, when the default window sits in empty offseason and every prop returns an uncomputable rate. Measured 2026-08-31 on the NFL Week 1 opener: 70 priced markets screened, 0 qualified, because the 173-day default window reached back only to mid-March. With this on, the same players return real counted samples. ONE FLAG, NOT TWO NUMBERS, on purpose: raising lookbackGames alone is clamped to a 225-day window that catches the playoffs and misses the regular season, which looks like it worked. TAKE IT OFF AROUND WEEK 5 - cost roughly doubles once the window holds two seasons, and current-season form is the better signal 4 to 6 games in. Every returned rate will carry the prior-season warning; that language is mandatory in the thread."
           ),
         limit: z.number().int().max(25).default(12),
       },
@@ -671,6 +689,7 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       const availabilityByTeam = new Map<string, Map<string, AvailabilityInfo>>();
       let bdlServed = 0;
       let sgoFallback = 0;
+      let cfbdServed = 0;
       const bdlFailures = new Map<string, number>();
 
       const availabilityFor = async (
@@ -736,6 +755,49 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
             // projected 100, and the output gave no indication why. A fallback
             // that hides its own cause is indistinguishable from a fallback that
             // never fires.
+            // ---- CFB GOES TO CollegeFootballData BEFORE ANYTHING ELSE ----
+            //
+            // SGO carries CFB games but not CFB player box scores outside the
+            // playoff (measured 2026-08-31), and BDL gates NCAAF stats behind GOAT.
+            // So on this sport the SGO fallback does not merely cost more, it
+            // manufactures DNPs out of missing data. Route it away entirely.
+            if (
+              input.sport === "cfb" &&
+              cfbd &&
+              isCfbdStatSupported(c.statID)
+            ) {
+              try {
+                const thisSeason = currentSeason("cfb").seasonYear;
+                const cfbdRate = await getCfbdPlayerHitRate(cfbd, {
+                  teamName: teamNames[player.teamID] ?? player.teamID,
+                  playerName: player.name,
+                  statID: c.statID,
+                  line: c.line,
+                  direction: c.side,
+                  seasons: input.includePriorSeason
+                    ? [thisSeason, thisSeason - 1]
+                    : [thisSeason],
+                });
+                cfbdServed++;
+                return cfbdRate as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                const bucket = msg.includes("AMBIGUOUS PLAYER")
+                  ? "cfbd ambiguous name"
+                  : msg.includes("no CollegeFootballData mapping")
+                    ? "cfbd stat not mapped"
+                    : msg.includes("401")
+                      ? "cfbd auth"
+                      : msg.includes("429")
+                        ? "cfbd quota"
+                        : "cfbd other";
+                bdlFailures.set(bucket, (bdlFailures.get(bucket) ?? 0) + 1);
+                // DO NOT FALL THROUGH TO SGO ON CFB. See above - a wrong number is
+                // worse than no number, and SGO cannot produce a right one here.
+                return undefined as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
+              }
+            }
+
             if (isStatSupported(input.sport as SportKey, c.statID)) {
               try {
                 const bdlRate = await getBdlPlayerHitRate(bdl, {
@@ -745,6 +807,11 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
                   line: c.line,
                   direction: c.side,
                   teamName: teamNames[player.teamID] ?? undefined,
+                  // BDL is the PRIMARY path for MLB and NFL. Widening only the SGO
+                  // fallback would leave the flag inert exactly where it is needed.
+                  ...(input.includePriorSeason
+                    ? priorSeasonBdlLookback(input.sport as SportKey)
+                    : {}),
                 });
                 rate = bdlRate as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
                 bdlServed++;
@@ -773,6 +840,15 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
               );
             }
             if (!rate) {
+              if (input.sport === "cfb") {
+                // Reached only when CFBD is unavailable or the stat is unmapped.
+                // Refusing keeps a fabricated DNP pattern out of the board.
+                bdlFailures.set(
+                  "cfb has no rate source",
+                  (bdlFailures.get("cfb has no rate source") ?? 0) + 1
+                );
+                return undefined as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
+              }
               rate = await getPlayerHitRate(sgo, {
                 sport: input.sport as SportKey,
                 teamID: player.teamID,
@@ -781,6 +857,9 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
                 statID: c.statID,
                 line: c.line,
                 direction: c.side,
+                // Both numbers or neither - see PRIOR_SEASON_LOOKBACK for why a
+                // half-applied widening silently lands on the wrong window.
+                ...(input.includePriorSeason ? PRIOR_SEASON_LOOKBACK : {}),
               });
               sgoFallback++;
             }
@@ -932,16 +1011,34 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           `maxPlayers if this game matters.`
         : "";
 
+      // SAY IT LOUDLY WHEN THE WINDOW IS WIDENED. Every rate on this board is then
+      // drawn from a PRIOR season, and a board that does not announce that invites
+      // last year's form being written as current. Same argument as the book filter
+      // line: a behaviour you cannot observe is one you are assuming.
+      const priorSeasonLine = input.includePriorSeason
+        ? ` PRIOR-SEASON WINDOW ON: the lookback is widened to 400 days, so these ` +
+          `rates may be drawn wholly or partly from LAST season. Check seasonWarning ` +
+          `on each prop and say "last season" explicitly in any reasoning bullet. ` +
+          `Turn this off once the current season is 4 to 6 games old.`
+        : "";
+
       const bookLine = bookFilter
         ? `Priced against: ${bookFilter}.`
         : `Priced against ALL venues - book filter disabled. Diagnostic only; ` +
           `do NOT publish prices from this board without re-pulling at your books.`;
 
       const routing =
-        bdlServed + sgoFallback === 0
-          ? `\n\n${bookLine}${rosterLine}${diversityLine}`
-          : `\n\n${bookLine}${rosterLine}${diversityLine} Rate sources: ${bdlServed} from BALLDONTLIE (no SGO quota), ` +
-            `${sgoFallback} from SportsGameOdds.` +
+        bdlServed + sgoFallback + cfbdServed === 0
+          ? `\n\n${bookLine}${priorSeasonLine}${rosterLine}${diversityLine}` +
+            (input.sport === "cfb" && !cfbd
+              ? ` NO CFB RATE SOURCE: CFBD_API_KEY is not set, so no CFB prop can be ` +
+                `scored. This board is empty for that reason, NOT because the market ` +
+                `is empty - run tkb_get_prop_board to see what is actually priced.`
+              : "")
+          : `\n\n${bookLine}${priorSeasonLine}${rosterLine}${diversityLine} Rate sources: ${bdlServed} from BALLDONTLIE (no SGO quota), ` +
+            `${sgoFallback} from SportsGameOdds` +
+            (cfbdServed ? `, ${cfbdServed} from CollegeFootballData` : "") +
+            `.` +
             (bdlFailures.size
               ? ` BDL fallback reasons: ` +
                 [...bdlFailures.entries()]

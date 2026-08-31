@@ -142,6 +142,26 @@ export async function resolveBdlPlayerID(
   );
 }
 
+/**
+ * THE SAME OPENING-WEEKS WIDENING, FOR THE BDL PATH.
+ *
+ * Easy to miss, and missing it would have made the screener flag inert for NFL:
+ * BDL is the PRIMARY rate source for MLB and NFL, so a widening applied only to
+ * the SGO fallback would never fire on the path that actually serves. This window
+ * has two independent bounds, and BOTH have to move - lookbackDays defaults to 75,
+ * and `seasons` defaults to the CURRENT season alone, so widening only the days
+ * would still ask the 2026 season for games it has not played.
+ *
+ * See PRIOR_SEASON_LOOKBACK in hitRateAggregator.ts for the measured case.
+ */
+export function priorSeasonBdlLookback(sport: SportKey): {
+  lookbackDays: number;
+  seasons: number[];
+} {
+  const current = currentSeason(sport).seasonYear;
+  return { lookbackDays: 400, seasons: [current - 1, current] };
+}
+
 export async function getBdlPlayerHitRate(
   bdl: BDLClient,
   params: {
@@ -390,6 +410,10 @@ export async function getBdlPlayerHitRate(
     recentAvailability: {
       gamesPlayed: appearances,
       teamGamesScanned: datedRows.length,
+      // BDL only ever returns games the player appeared in, so every row it gives
+      // back carries data by construction. There is no coverage-gap case on this
+      // path, which is why this equals teamGamesScanned rather than being derived.
+      gamesWithData: datedRows.length,
       playRate: datedRows.length > 0 ? appearances / datedRows.length : 0,
       // BDL returns only games the player actually appeared in, so a DNP ratio
       // cannot be computed here the way it could from team game logs. Reporting

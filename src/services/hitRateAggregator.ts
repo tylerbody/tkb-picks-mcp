@@ -94,6 +94,43 @@ export function inferPlayerRole(statID: string, _sport: SportKey): PlayerRole {
  * client, so nothing could assert on it. A cost change that alters WHICH data
  * comes back is a correctness change and needs a test.
  */
+/**
+ * THE OPENING-WEEKS PROBLEM, AND WHY THIS IS ONE FLAG RATHER THAN TWO NUMBERS.
+ *
+ * sizeLookbackWindow is built for a season in progress. An NFL position player
+ * needs ~23 team games, which at 7.5 days a game is a 173-day window. That is
+ * correct in November and useless in Week 1: 173 days before the 2026 opener is
+ * mid-March 2026, which is empty offseason, so the window returns three preseason
+ * games in which the starters sat.
+ *
+ * MEASURED 2026-08-31: tkb_screen_props on the Week 1 opener screened 70 priced
+ * markets and qualified ZERO, because not one of them had a computable rate. That
+ * is the identical shape of the CFB Week 0 failure that produced tkb_get_prop_board
+ * in v2.6.4 - a full board discarded at the last step and reported as an answer.
+ *
+ * Widening to the 400-day ceiling reaches 2025 and returns real samples
+ * (Jaxon Smith-Njigba, 14 of 21 on receiving yards, sampleSufficient true).
+ *
+ * WHY BOTH NUMBERS ARE NEEDED, which is exactly why this is a flag: raising
+ * lookbackGames alone is silently clamped by the position_player defaultMaxScan of
+ * 30, capping the window at 225 days. 225 days lands in January 2026, which
+ * catches the NFL PLAYOFFS and misses the entire regular season - a half-applied
+ * widening that looks like it worked. A single boolean cannot be half-applied.
+ *
+ * TAKE THIS OFF AROUND WEEK 5. Two independent reasons converge: cost roughly
+ * doubles once a 400-day window holds a full prior season PLUS the current one,
+ * and per seasonBoundary.ts current-season form overtakes prior-season form four
+ * to six games in. Leaving it on past that point is both more expensive and less
+ * accurate.
+ */
+export const PRIOR_SEASON_LOOKBACK = {
+  lookbackGames: 40,
+  maxTeamGamesScanned: 100,
+} as const;
+
+/** The window cap, in days. Exported so a test can assert the flag actually reaches it. */
+export const MAX_WINDOW_DAYS = 400;
+
 export function sizeLookbackWindow(params: {
   sport: SportKey;
   targetAppearances: number;
@@ -106,7 +143,7 @@ export function sizeLookbackWindow(params: {
     params.maxScan
   );
   const windowDays = Math.min(
-    400,
+    MAX_WINDOW_DAYS,
     Math.max(30, Math.ceil(teamGamesNeeded * DAYS_PER_TEAM_GAME[params.sport]))
   );
   return { teamGamesNeeded, windowDays };
@@ -194,6 +231,12 @@ export async function getPlayerHitRate(
   let underHits = 0;
   let pushCount = 0;
   let gamesExcludedDNP = 0;
+  // GAMES THE PROVIDER HAS NO BOX SCORE FOR. Deliberately NOT counted as DNPs -
+  // see GameDataStatus in types.ts. These are excluded from the playing-time
+  // denominator entirely, because a game with no data says nothing either way
+  // about whether this player was on the field.
+  let gamesWithoutBoxScore = 0;
+  let gamesStatUnsettled = 0;
   let appearances = 0;
   let teamGamesScanned = 0;
 
@@ -204,7 +247,7 @@ export async function getPlayerHitRate(
 
     teamGamesScanned++;
 
-    const statValue = extractPlayerStat(event, params.playerID, params.statID);
+    const lookup = lookupPlayerStat(event, params.playerID, params.statID);
     const isHome = event.teams.home.teamID === params.teamID;
     const opponentTeamID = isHome ? event.teams.away.teamID : event.teams.home.teamID;
     const opponentName =
@@ -214,19 +257,27 @@ export async function getPlayerHitRate(
     const gameDate = event.status?.startsAt ?? "unknown";
     const season = gameDate !== "unknown" ? seasonForDate(params.sport, gameDate) : null;
 
-    if (statValue === null) {
-      gamesExcludedDNP++;
+    if (lookup.kind !== "value") {
+      // ONLY "player_absent" IS A DNP. A missing box score and an unsettled stat
+      // are provider coverage gaps, and counting them as missed games is what
+      // produced a 0.2 play rate for a quarterback who started every game.
+      if (lookup.kind === "player_absent") gamesExcludedDNP++;
+      else if (lookup.kind === "no_box_score") gamesWithoutBoxScore++;
+      else gamesStatUnsettled++;
+
       log.push({
         eventID: event.eventID,
         date: gameDate,
         opponent: opponentName,
         isHome,
         statValue: null,
+        dataStatus: lookup.kind,
         ...(season ? { seasonYear: season.seasonYear } : {}),
       });
       continue;
     }
 
+    const statValue = lookup.value;
     appearances++;
 
     // FIXED: a push on a whole-number line (outs at 15, hits at 1) was previously
@@ -241,6 +292,7 @@ export async function getPlayerHitRate(
       opponent: opponentName,
       isHome,
       statValue,
+      dataStatus: "value",
       ...(season ? { seasonYear: season.seasonYear } : {}),
     });
   }
@@ -259,6 +311,8 @@ export async function getPlayerHitRate(
     teamGamesScanned,
     hitScanCeiling,
     seasonWarning: seasons.warning,
+    windowDays,
+    gamesWithoutData: gamesWithoutBoxScore + gamesStatUnsettled,
   });
 
   // WITHIN-SEASON STALENESS. summarizeSeasons above only fires across a SEASON
@@ -271,8 +325,24 @@ export async function getPlayerHitRate(
     log,
     role === "starting_pitcher" ? STARTING_PITCHER_THRESHOLDS : {}
   );
+  // A COVERAGE GAP IS NOT A PLAYING-TIME STORY, and it must not be silent either.
+  // If most of the scanned window has no box score, the honest answer is that this
+  // provider cannot describe this player's form, not that he barely played.
+  const gamesWithoutData = gamesWithoutBoxScore + gamesStatUnsettled;
+  const coverageWarning =
+    gamesWithoutData > 0
+      ? `PROVIDER COVERAGE GAP: ${gamesWithoutData} of the ${teamGamesScanned} team ` +
+        `games scanned carry no box score for this stat ` +
+        `(${gamesWithoutBoxScore} with no player results at all, ` +
+        `${gamesStatUnsettled} where the player appears but the stat is unsettled). ` +
+        `Those games are NOT counted as DNPs and are excluded from the play-rate ` +
+        `denominator, because missing data says nothing about whether he played. ` +
+        `The counted sample is drawn only from the ${teamGamesScanned - gamesWithoutData} ` +
+        `game(s) that do carry data.`
+      : null;
+
   const combinedWarning =
-    [warning, recency.warning].filter(Boolean).join(" ") || null;
+    [warning, recency.warning, coverageWarning].filter(Boolean).join(" ") || null;
 
   return {
     playerName: params.playerName,
@@ -291,7 +361,16 @@ export async function getPlayerHitRate(
     sampleSufficient: sufficient,
     sampleWarning: combinedWarning,
     playerRole: role,
-    recentAvailability: assessAvailability(appearances, teamGamesScanned, gamesExcludedDNP, role),
+    recentAvailability: assessAvailability(
+      appearances,
+      teamGamesScanned,
+      gamesExcludedDNP,
+      gamesWithoutBoxScore + gamesStatUnsettled,
+      role
+    ),
+    gamesWithoutBoxScore,
+    gamesStatUnsettled,
+    coverageWarning,
     currentSeasonGames: seasons.current,
     priorSeasonGames: seasons.prior,
     seasonsRepresented: seasons.seasonsRepresented,
@@ -312,6 +391,8 @@ function assessSample(input: {
   teamGamesScanned: number;
   hitScanCeiling: boolean;
   seasonWarning: string | null;
+  windowDays: number;
+  gamesWithoutData: number;
 }): { sufficient: boolean; warning: string | null } {
   const roleLabel = input.role.replace(/_/g, " ");
 
@@ -326,10 +407,30 @@ function assessSample(input: {
   }
 
   if (input.appearances < input.minSufficient) {
+    // WHY THIS WORDING CHANGED (v2.7.0). This branch used to read "The team's
+    // available history is exhausted. This is all the data that exists." That was
+    // written when cost was controlled by an EVENT CEILING, where not hitting the
+    // ceiling really did mean the history had run out. v2.6.1 replaced the ceiling
+    // with a sized WINDOW and did not revisit this string, so ever since, a window
+    // that simply did not reach far enough has been reported as an absence of data.
+    //
+    // It is a confident, checkable, wrong claim, and it cost real time: the empty
+    // NFL and CFB samples of 2026-08-31 were read as "SGO holds no prior season",
+    // when in fact widening the window to its 400-day ceiling returned the entire
+    // 2025 season for both. Same lesson v2.6.0 named - the fix was right, the audit
+    // was scoped to the file the symptom appeared in.
     const tail = input.hitScanCeiling
       ? `The scan ceiling of ${input.teamGamesScanned} team games was reached. Raise ` +
         `maxTeamGamesScanned if this player has a longer history.`
-      : `The team's available history is exhausted. This is all the data that exists.`;
+      : input.gamesWithoutData > 0
+        ? `The ${input.windowDays}-day lookback window held ${input.teamGamesScanned} team ` +
+          `game(s), but ${input.gamesWithoutData} of them carry no box score for this stat. ` +
+          `This is a PROVIDER COVERAGE GAP, not proof the games were missed. Widening the ` +
+          `window will not help if the provider does not settle this stat for this sport.`
+        : `The ${input.windowDays}-day lookback window contained no further games. This is ` +
+          `the limit of the WINDOW, not necessarily of the provider's history - raise ` +
+          `lookbackGames and maxTeamGamesScanned to reach further back (the window is ` +
+          `capped at 400 days).`;
     return {
       sufficient: false,
       warning:
@@ -407,24 +508,53 @@ const COMPONENT_DERIVATIONS: Record<string, string[][]> = {
   "rushing+receiving_yards": [["rushing_yards"], ["receiving_yards"]],
 };
 
-function extractPlayerStat(
+/**
+ * A NULL IS THREE DIFFERENT ANSWERS. See GameDataStatus in types.ts for the
+ * measured case that forced this apart (Dante Moore, 12 started games reported as
+ * 12 DNPs).
+ *
+ * THE DISCRIMINATOR IS COMPUTED FROM THE EVENT, NOT ASSUMED. Rather than hardcode
+ * what a CFB results object looks like, this asks the data: does this period carry
+ * player-keyed entries for ANYONE on the event roster? If it carries none, the
+ * provider has no box score for this game and no conclusion about any individual
+ * can be drawn from it. If it carries entries for others but not this player, that
+ * is a genuine absence. Deriving it this way means the check keeps working when a
+ * provider changes shape, which is the failure mode this repo keeps hitting.
+ */
+export type StatLookup =
+  | { kind: "value"; value: number }
+  | { kind: "no_box_score" }
+  | { kind: "player_absent" }
+  | { kind: "stat_unsettled" };
+
+export function lookupPlayerStat(
   event: SGOEvent,
   playerID: string,
   statID: string
-): number | null {
+): StatLookup {
   const periodResults = event.results?.[PERIOD_ID_FULL_GAME];
-  if (!periodResults) return null;
+  if (!periodResults) return { kind: "no_box_score" };
+
+  // Does this game carry player-level results for ANYONE? event.players is the
+  // roster SGO attached to the event, so it is the right set to test against.
+  const rosterIDs = Object.keys(event.players ?? {});
+  const carriesAnyPlayerResults = rosterIDs.some(
+    (id) => periodResults[id] !== undefined
+  );
+  if (!carriesAnyPlayerResults) return { kind: "no_box_score" };
 
   const playerResults = periodResults[playerID];
-  if (!playerResults) return null;
+  if (!playerResults) return { kind: "player_absent" };
 
   const value = playerResults[statID];
-  if (typeof value === "number") return value;
+  if (typeof value === "number") return { kind: "value", value };
 
   // Composite market with no settled value. Sum its components instead, but only
   // if EVERY component resolves - see the note above on partial sums.
   const components = COMPONENT_DERIVATIONS[statID];
-  if (!components) return null;
+  // The player IS in this box score, so this is an unsettled stat rather than an
+  // absence. Reporting it as a DNP would understate his playing time.
+  if (!components) return { kind: "stat_unsettled" };
 
   let sum = 0;
   for (const candidates of components) {
@@ -436,10 +566,10 @@ function extractPlayerStat(
         break;
       }
     }
-    if (resolved === null) return null;
+    if (resolved === null) return { kind: "stat_unsettled" };
     sum += resolved;
   }
-  return sum;
+  return { kind: "value", value: sum };
 }
 
 /**
@@ -457,24 +587,55 @@ function extractPlayerStat(
  * Starting pitchers are exempt from the ratio test - a starter appearing in 20% of
  * team games is a healthy starter on normal rest, not a red flag.
  */
-function assessAvailability(
+/**
+ * EXPORTED SO IT CAN BE TESTED WITHOUT A NETWORK, for the reason v2.6.1 learned the
+ * hard way and v2.6.3 restated: logic that changes WHICH DATA REACHES THE USER is
+ * correctness logic, and burying it inside a function that needs an API client makes
+ * it unassertable. The 91-test suite passed against the broken v2.6.0 window for
+ * exactly that reason.
+ */
+export function assessAvailability(
   appearances: number,
   teamGamesScanned: number,
   dnpCount: number,
+  gamesWithoutData: number,
   role: PlayerRole
 ): {
   gamesPlayed: number;
   teamGamesScanned: number;
+  gamesWithData: number;
   playRate: number;
-  flag: "OK" | "IRREGULAR" | "ROTATION_NORMAL";
+  flag: "OK" | "IRREGULAR" | "ROTATION_NORMAL" | "UNKNOWN";
   note: string | null;
 } {
-  const playRate = teamGamesScanned > 0 ? appearances / teamGamesScanned : 0;
+  // ONLY GAMES THAT ACTUALLY CARRY DATA CAN SPEAK TO PLAYING TIME. Dividing by
+  // every scanned game counted provider coverage gaps as missed games, which is
+  // how a quarterback who started 15 of 15 was reported at a 0.2 play rate.
+  const gamesWithData = Math.max(0, teamGamesScanned - gamesWithoutData);
+  const playRate = gamesWithData > 0 ? appearances / gamesWithData : 0;
+
+  // NO DATA IS NOT A CLEAN BILL OF HEALTH EITHER. With nothing to measure, the
+  // honest answer is that availability is unknown, not OK.
+  if (gamesWithData === 0) {
+    return {
+      gamesPlayed: appearances,
+      teamGamesScanned,
+      gamesWithData,
+      playRate: 0,
+      flag: "UNKNOWN",
+      note:
+        `AVAILABILITY UNKNOWN: none of the ${teamGamesScanned} team games scanned ` +
+        `carry a box score for this stat, so playing time cannot be assessed from ` +
+        `this source at all. Do NOT read this as a clean record - confirm the ` +
+        `posted lineup before using any prop on this player.`,
+    };
+  }
 
   if (role === "starting_pitcher") {
     return {
       gamesPlayed: appearances,
       teamGamesScanned,
+      gamesWithData,
       playRate,
       flag: "ROTATION_NORMAL",
       note: null,
@@ -485,11 +646,12 @@ function assessAvailability(
     return {
       gamesPlayed: appearances,
       teamGamesScanned,
+      gamesWithData,
       playRate,
       flag: "IRREGULAR",
       note:
         `PLAYING TIME RISK: appeared in only ${appearances} of the last ` +
-        `${teamGamesScanned} team games (${dnpCount} DNPs). This player is not an ` +
+        `${gamesWithData} team games that carry data (${dnpCount} DNPs). This player is not an ` +
         `everyday lock. CONFIRM THE POSTED LINEUP before using this prop, and do ` +
         `not describe the hit rate as current form without noting the missed time.`,
     };
@@ -498,6 +660,7 @@ function assessAvailability(
   return {
     gamesPlayed: appearances,
     teamGamesScanned,
+    gamesWithData,
     playRate,
     flag: "OK",
     note: null,

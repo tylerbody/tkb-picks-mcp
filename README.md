@@ -1,4 +1,4 @@
-# TKB Picks MCP Server (v2.6.6)
+# TKB Picks MCP Server (v2.7.0)
 
 MCP server wrapping **SportsGameOdds** (odds, schedules, props, results) and
 **BALLDONTLIE** (stats, injuries, standings) for building TKB Picks betting
@@ -10,15 +10,15 @@ Render Web Service, Node environment:
 
 - Build: `npm install && npm run build`
 - Start: `npm start`
-- Env vars: `SGO_API_KEY`, `BDL_API_KEY`
+- Env vars: `SGO_API_KEY`, `BDL_API_KEY`, `CFBD_API_KEY` (CFBD optional: without it every other tool works and CFB hit rates refuse rather than fall back)
 - MCP endpoint: `https://<your-app>.onrender.com/mcp`
 - Health check: `/health`
 
 Then verify rather than assume:
 
 ```bash
-npm test                                        # 91 tests, no network needed
-node scripts/verify-deploy.mjs --expect 2.6.6
+npm test                                        # 121 tests, no network needed
+node scripts/verify-deploy.mjs --expect 2.7.0
 node scripts/verify-deploy.mjs --screen <mlbEventID>   # measures entity cost
 ```
 
@@ -34,7 +34,7 @@ constant was forgotten.
 | MLB | `mlb` | yes | yes | yes | yes | yes |
 | WNBA | `wnba` | yes | yes | yes | indoors | yes |
 | NFL | `nfl` | yes | yes | yes | yes | yes |
-| CFB | `cfb` | yes | yes | not on plan | yes | yes |
+| CFB | `cfb` | yes | yes (CollegeFootballData) | not on plan | yes | yes |
 | ATP | `atp` | no | no | no | no | no |
 | WTA | `wta` | no | no | no | no | no |
 
@@ -47,7 +47,7 @@ on an event rather than roster positions, so `event.players` is permanently empt
 and player props cannot be addressed by playerID. This is structural, not
 unfinished. Use `tkb_get_odds` with `marketType="moneyline"`.
 
-## Tools (24)
+## Tools (25)
 
 **Picks**
 
@@ -92,6 +92,7 @@ unfinished. Use `tkb_get_odds` with `marketType="moneyline"`.
 | `tkb_get_api_usage` | SGO quota, plus cache hit/miss/coalesce counters |
 | `tkb_debug_bdl_stats` | Diagnostic: BDL tier access and real field names |
 | `tkb_probe_event_fields` | Diagnostic: which keys an SGO event carries. Never dumps odds |
+| `tkb_debug_cfbd_stats` | Diagnostic: the real CFBD category/type literals. RUN ONCE before trusting a CFB rate |
 
 ## Design rules this connector actually enforces
 
@@ -155,9 +156,17 @@ archive/tools/        removed in v2.0.0, kept for reference only
   string into `tkb_get_schedule`.
 - **Player props appear close to game time.** An empty roster means "not priced
   yet", not "no players". Build threads inside the normal pre-game window.
-- **No CFB or WNBA hit rates from BALLDONTLIE**, and in the opening weeks of any
-  season there is no current-year sample to count at all. Those threads run on
-  preview language and team markets. `tkb_get_prop_board` and `tkb_get_game_lines`
-  are the two tools that still work in that state.
+- **SGO carries no CFB player box scores outside the playoff.** Measured 2026-08-31:
+  Dante Moore started all 15 of Oregon's 2025 games and had a settled passing line in
+  3, all playoff games; Maddux Madsen, 1 of 14. CFB hit rates therefore come from
+  CollegeFootballData, and with no `CFBD_API_KEY` set they REFUSE rather than fall
+  back - an SGO fallback would report started games as DNPs.
+- **In the opening weeks of any season there is no current-year sample.** Pass
+  `includePriorSeason: true` to widen the lookback to its 400-day ceiling and reach
+  last season, and take it off around Week 5. `tkb_get_prop_board` and
+  `tkb_get_game_lines` still work with no rate source at all.
+- **CFBD lists a player only where he recorded a stat**, so absence cannot separate
+  "did not play" from "quiet game". CFB availability returns UNKNOWN rather than a
+  false OK, and depth-chart confirmation stays manual.
 - **Tennis grading is unconfirmed against live data.** The code path exists and
   needs one finished match to validate. See `docs/CHANGES-v2_6_0.md`.

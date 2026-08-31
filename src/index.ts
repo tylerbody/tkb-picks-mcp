@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { SUPPORTED_SPORTS } from "./constants.js";
 import { SGOClient } from "./services/sgoClient.js";
 import { BDLClient } from "./services/bdlClient.js";
+import { CFBDClient } from "./services/cfbdClient.js";
 import { WeatherClient } from "./services/weatherClient.js";
 import { registerScheduleTool } from "./tools/schedule.js";
 import { registerOddsTool } from "./tools/odds.js";
@@ -30,6 +31,7 @@ import { registerGameLinesTool } from "./tools/gameLines.js";
 import { registerRankingsTool } from "./tools/rankings.js";
 import { registerStandingsTool } from "./tools/standings.js";
 import { registerEventProbeTool } from "./tools/eventProbe.js";
+import { registerCfbdStatsProbeTool } from "./tools/cfbdStatsProbe.js";
 
 // ---- Environment / config ----
 
@@ -50,6 +52,27 @@ if (!BDL_API_KEY) {
 
 const sgo = new SGOClient(SGO_API_KEY);
 const bdl = new BDLClient(BDL_API_KEY);
+
+/**
+ * CFBD IS OPTIONAL, UNLIKE SGO AND BDL, AND THE SERVER MUST STILL BOOT WITHOUT IT.
+ *
+ * Exiting here would take all 24 existing tools down over a key that only CFB hit
+ * rates need. The CFB path instead returns a clear refusal naming the missing key
+ * (see tools/hitRate.ts), which is the same rule the capability flags follow: an
+ * unanswerable question gets a refusal, never a plausible answer.
+ *
+ * Set CFBD_API_KEY in the Render environment alongside SGO_API_KEY and BDL_API_KEY.
+ * Free tier: collegefootballdata.com/key
+ */
+const CFBD_API_KEY = process.env.CFBD_API_KEY;
+const cfbd = CFBD_API_KEY ? new CFBDClient(CFBD_API_KEY) : null;
+if (!cfbd) {
+  console.warn(
+    "WARN: CFBD_API_KEY is not set. CFB hit rates will refuse rather than fall back " +
+      "to SportsGameOdds, which carries no CFB player box scores outside the playoff. " +
+      "Every other tool is unaffected."
+  );
+}
 const weather = new WeatherClient(); // no API key needed - free public NWS API
 
 // ---- Build MCP server and register tools ----
@@ -80,7 +103,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.6.6";
+const SERVER_VERSION = "2.7.0";
 
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -90,16 +113,16 @@ function buildServer(): McpServer {
 
   registerScheduleTool(server, sgo);
   registerOddsTool(server, sgo);
-  registerHitRateTool(server, sgo, bdl);
+  registerHitRateTool(server, sgo, bdl, cfbd);
   registerInjuriesTool(server, bdl);
   registerSplitsTool(server, sgo, bdl);
   registerYesNoPropsTool(server, sgo);
   registerPeriodOddsTool(server, sgo);
   registerWeatherTool(server, weather);
   registerPlayersTool(server, sgo);
-  registerUsageTool(server, sgo);
+  registerUsageTool(server, sgo, cfbd);
   registerGradePicksTool(server, sgo);
-  registerScreenPropsTool(server, sgo, bdl);
+  registerScreenPropsTool(server, sgo, bdl, cfbd);
   registerCoverPlayerTool(server, sgo, bdl);
   registerTweetCharsTool(server);
   registerBdlStatsProbeTool(server, bdl);
@@ -112,6 +135,7 @@ function buildServer(): McpServer {
   registerRankingsTool(server, bdl);
   registerStandingsTool(server, bdl);
   registerEventProbeTool(server, sgo);
+  if (cfbd) registerCfbdStatsProbeTool(server, cfbd);
 
   return server;
 }
