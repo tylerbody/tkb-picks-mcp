@@ -1,7 +1,11 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MLBStatsClient, MlbGameMatchup } from "../services/mlbStatsClient.js";
-import { teamNamesMatch } from "../services/mlbStatsClient.js";
+import {
+  teamNamesMatch,
+  normaliseName,
+  resolvePlayerLineupStatus,
+} from "../services/mlbStatsClient.js";
 
 /**
  * CONFIRMED STARTERS AND POSTED LINEUPS, FROM MLB DIRECTLY.
@@ -108,52 +112,101 @@ export function registerMlbMatchupTool(server: McpServer, mlb: MLBStatsClient): 
         };
       }
 
-      // ---- Single-player question, answered directly ----
+      // ---- Single-player question, answered through the four-state resolver ----
+      //
+      // v2.8.0 answered this by scanning posted lineups and, finding none, replying
+      // "not posted yet" - which was a confident falsehood for a player whose team
+      // was not playing, and for a name that resolved to nobody at all. The premise
+      // is now checked before the lineup state.
       if (input.playerName) {
-        const want = input.playerName.trim().toLowerCase();
-        for (const g of filtered) {
-          for (const [side, lineup] of [
-            ["away", g.awayLineup],
-            ["home", g.homeLineup],
-          ] as const) {
-            const slot = lineup.find((s) => s.fullName.toLowerCase() === want);
-            if (slot) {
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text:
-                      `CONFIRMED IN LINEUP: ${slot.fullName} is batting ` +
-                      `${slot.battingOrder}${ordinalSuffix(slot.battingOrder)} ` +
-                      `(${slot.position ?? "position unknown"}) for the ` +
-                      `${side === "home" ? g.homeTeam : g.awayTeam} vs ` +
-                      `${side === "home" ? g.awayTeam : g.homeTeam}.\n\n` +
-                      `${slotContext(slot.battingOrder)}\n\n` +
-                      JSON.stringify({ game: summarise(g), slot }, null, 2),
-                  },
-                ],
-              };
-            }
-          }
+        let candidates;
+        try {
+          const season = new Date(input.date).getUTCFullYear();
+          const index = await mlb.getPlayerIndex(
+            Number.isFinite(season) ? season : new Date().getUTCFullYear()
+          );
+          candidates = index.get(normaliseName(input.playerName));
+        } catch (err) {
+          // The index is what makes the answer trustworthy. Without it, refuse
+          // rather than fall back to v2.8.0's behaviour, which is the bug.
+          const msg = err instanceof Error ? err.message : String(err);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `CANNOT VERIFY: the MLB player index is unavailable (${msg}), so this ` +
+                  `tool cannot confirm that "${input.playerName}" exists or that his team ` +
+                  `is playing today.\n\nIt deliberately does NOT fall back to reporting ` +
+                  `"lineup not posted yet", because that message is indistinguishable from ` +
+                  `an off day or a misspelt name. Confirm the lineup manually.`,
+              },
+            ],
+          };
         }
 
-        const anyPosted = filtered.some((g) => g.homeLineup.length || g.awayLineup.length);
+        // Resolve against the FULL slate, not the team-filtered subset: a team that
+        // is playing but excluded by the filter must not read as "not scheduled".
+        const status = resolvePlayerLineupStatus(games, candidates, input.playerName);
+
+        const text = (() => {
+          switch (status.kind) {
+            case "in_lineup":
+              return (
+                `CONFIRMED IN LINEUP: ${status.slot.fullName} is batting ` +
+                `${status.slot.battingOrder}${ordinalSuffix(status.slot.battingOrder)} ` +
+                `(${status.slot.position ?? "position unknown"}) for the ${status.teamName} ` +
+                `vs ${status.opponent}.\n\n${slotContext(status.slot.battingOrder)}`
+              );
+
+            case "not_in_posted_lineup":
+              return (
+                `NOT IN THE POSTED LINEUP: the ${status.teamName} lineup IS posted for ` +
+                `${input.date} and "${input.playerName}" is not in it. This is real ` +
+                `information: he is out, resting, or has been moved off the roster. Treat ` +
+                `it as a scratch and do not publish a prop on him.`
+              );
+
+            case "lineup_pending":
+              return (
+                `LINEUP NOT POSTED YET: the ${status.teamName} play ${status.opponent} on ` +
+                `${input.date}, and "${input.playerName}" is on the roster, but the lineup ` +
+                `has not been announced.\n\nThis is NOT evidence he is out. Lineups post ` +
+                `roughly 3 to 4 hours before first pitch. Re-run closer to game time; do ` +
+                `NOT publish a hitter prop describing the lineup as confirmed.`
+              );
+
+            case "team_not_scheduled":
+              return (
+                `TEAM NOT PLAYING: the ${status.teamName} have no game on ${input.date}, so ` +
+                `there is no lineup to wait for.\n\nThis is the answer v2.8.0 got wrong - ` +
+                `it reported "lineup not posted yet" here, which would leave a polling job ` +
+                `waiting forever for a game that does not exist. Check the date, or pick a ` +
+                `player from a team that is actually on the slate.`
+              );
+
+            case "player_unknown":
+              return (
+                `NO SUCH PLAYER: "${input.playerName}" does not match any player on an MLB ` +
+                `roster for this season.\n\nThis is a NAME problem, not a lineup problem. ` +
+                `Check the spelling against MLB's own spelling before treating it as a ` +
+                `scratch. No conclusion about anyone's availability can be drawn from this.`
+              );
+
+            case "ambiguous":
+              return (
+                `AMBIGUOUS PLAYER: ${status.candidates.length} players match ` +
+                `"${input.playerName}" (${status.candidates
+                  .map((c) => `${c.fullName}, ${c.teamName ?? "no team"}`)
+                  .join("; ")}).\n\nRefusing to guess. A lineup answer attached to the ` +
+                `wrong player is worse than no answer. Pass the full name as MLB spells it.`
+              );
+          }
+        })();
+
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: anyPosted
-                ? `NOT IN THE POSTED LINEUP: "${input.playerName}" does not appear in any ` +
-                  `posted lineup for ${input.date}. A lineup IS posted for at least one of ` +
-                  `these games, so this is real information: either he is out, or the name ` +
-                  `does not match MLB's spelling. Verify the spelling before treating it as ` +
-                  `a scratch.`
-                : `LINEUP NOT POSTED YET for ${input.date}. This is NOT evidence that ` +
-                  `"${input.playerName}" is out - nothing has been announced. Lineups post ` +
-                  `roughly 3 to 4 hours before first pitch. Re-run this closer to game time; ` +
-                  `do NOT publish a hitter prop describing the lineup as confirmed.`,
-            },
-          ],
+          content: [{ type: "text" as const, text: `${text}\n\n${JSON.stringify(status, null, 2)}` }],
+          structuredContent: { status },
         };
       }
 
@@ -197,7 +250,24 @@ export function registerMlbMatchupTool(server: McpServer, mlb: MLBStatsClient): 
   );
 }
 
+/**
+ * THE WARNING HAS TO REACH A MACHINE READER, NOT JUST A HUMAN ONE.
+ *
+ * v2.8.0 put all its careful "not posted yet" prose in the TEXT content and left
+ * structuredContent as `lineupsPosted: false` plus two bare empty arrays. Verified
+ * as a real gap: anything consuming the JSON rather than the prose got no warning at
+ * all, and an empty array is exactly the shape that reads as "nobody is playing".
+ *
+ * So the status and its explanation are fields now. A consumer that never reads a
+ * word of prose still cannot mistake "not announced" for "not playing".
+ *
+ * probablePitcherStatus exists for the same reason. The nullable pitcher object
+ * STAYS null when unknown - substituting the string "TBD" into a typed field is the
+ * exact class of thing the "null, never 0" rule forbids - but a consumer should not
+ * have to infer meaning from a null, so the meaning is stated alongside it.
+ */
 function summarise(g: MlbGameMatchup) {
+  const lineupsPosted = g.awayLineup.length > 0 || g.homeLineup.length > 0;
   return {
     gamePk: g.gamePk,
     gameDate: g.gameDate,
@@ -206,7 +276,15 @@ function summarise(g: MlbGameMatchup) {
     homeTeam: g.homeTeam,
     awayProbablePitcher: g.awayProbablePitcher,
     homeProbablePitcher: g.homeProbablePitcher,
-    lineupsPosted: g.awayLineup.length > 0 || g.homeLineup.length > 0,
+    awayProbablePitcherStatus: g.awayProbablePitcher ? "confirmed" : "tbd",
+    homeProbablePitcherStatus: g.homeProbablePitcher ? "confirmed" : "tbd",
+    lineupsPosted,
+    lineupStatus: lineupsPosted ? "posted" : "not_posted",
+    lineupStatusNote: lineupsPosted
+      ? "Lineups are posted. An absence from these arrays is real information."
+      : "LINEUPS NOT POSTED YET. These arrays are empty because nothing has been " +
+        "announced, NOT because players are out. Lineups post roughly 3 to 4 hours " +
+        "before first pitch. Do not treat an empty array as a scratch report.",
     awayLineup: g.awayLineup,
     homeLineup: g.homeLineup,
   };
