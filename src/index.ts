@@ -34,6 +34,7 @@ import { registerStandingsTool } from "./tools/standings.js";
 import { registerEventProbeTool } from "./tools/eventProbe.js";
 import { registerCfbdStatsProbeTool } from "./tools/cfbdStatsProbe.js";
 import { registerMlbMatchupTool } from "./tools/mlbMatchup.js";
+import { registerVerifyRosterTool } from "./tools/verifyRoster.js";
 
 // ---- Environment / config ----
 
@@ -112,7 +113,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.8.2";
+const SERVER_VERSION = "2.8.5";
 
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -146,6 +147,7 @@ function buildServer(): McpServer {
   registerEventProbeTool(server, sgo);
   if (cfbd) registerCfbdStatsProbeTool(server, cfbd);
   registerMlbMatchupTool(server, mlbStats);
+  registerVerifyRosterTool(server, bdl);
 
   return server;
 }
