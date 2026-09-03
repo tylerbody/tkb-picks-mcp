@@ -28,6 +28,91 @@ import { describeRecency } from "./sampleRecency.js";
 /** Regular-season weeks to walk when reconstructing a season. */
 const MAX_REGULAR_WEEKS = 15;
 
+/**
+ * CFBD writes these differently from a naive title-case of an SGO teamID.
+ * Deliberately short and explicit rather than clever - see deriveCfbdTeamName.
+ */
+const CFBD_NAME_OVERRIDES: Record<string, string> = {
+  UMASS: "UMass",
+  UCONN: "UConn",
+  "OLE MISS": "Ole Miss",
+  "MIAMI OHIO": "Miami (OH)",
+  "SAN JOSE STATE": "San Jose State",
+  HAWAII: "Hawai'i",
+  "TEXAS AM": "Texas A&M",
+};
+
+/** Programs CFBD keeps fully capitalised. */
+const CFBD_ALL_CAPS = new Set([
+  "BYU", "LSU", "TCU", "UCF", "UCLA", "UNLV", "USC", "UTSA", "SMU", "UAB",
+  "UTEP", "FIU", "NC", "SMU", "UTSA",
+]);
+
+/**
+ * SGO teamID -> the team NAME CollegeFootballData uses in a box score.
+ *
+ * ================== THE BUG THIS FIXES (v2.8.6) ==================
+ *
+ * tools/hitRate.ts passed `params.teamID` straight into this aggregator's
+ * `teamName` field. SGO teamIDs look like COLORADO_NCAAF. CFBD box scores say
+ * "Colorado". resolveCfbdPlayer below compares them with an EXACT normalised
+ * match, so "colorado_ncaaf" never equalled "colorado", the player never
+ * resolved, and EVERY CFB hit rate requested through that tool returned NO
+ * SAMPLE - since v2.7.0, silently.
+ *
+ * MEASURED 2026-09-02. Julian Lewis, teamID COLORADO_NCAAF, passing_yards:
+ *
+ *   sampleWarning: 'NO SAMPLE. "Julian Lewis" was not found on COLORADO_NCAAF
+ *                   in any scanned week.'
+ *   cfbdPlayerID: null,  teamGamesScanned: 0
+ *
+ * The message was echoing the mismatch straight back and reading as "this player
+ * has no history". Fully populated, plausible, confidently wrong - the same
+ * family as the p_k collision (v2.0.1), the reversed newest-first array (v2.1.0)
+ * and the year-stale window (v2.6.1).
+ *
+ * WHY NOTHING CAUGHT IT: tools/screenProps.ts was never affected, because it
+ * passes teamNames[player.teamID] - the display name. So the one path that works
+ * is the one the nightly CFB task explicitly forbids, and the broken path is the
+ * one it mandates. Nothing errored, and an empty CFB sample looks completely
+ * ordinary in the opening weeks when every sample is prior-season anyway.
+ *
+ * ================== WHAT THIS IS AND IS NOT ==================
+ *
+ * A FALLBACK, NEVER THE PRIMARY ROUTE. An explicit teamName always wins. This
+ * only runs when a caller passed a teamID and nothing else.
+ *
+ * IT CANNOT COVER EVERY PROGRAM and does not pretend to. CFBD writes "Miami" and
+ * "Miami (OH)", "Hawai'i" with an apostrophe, "Texas A&M" with an ampersand. The
+ * overrides above cover the ones this account actually posts; anything else falls
+ * through to title-casing. That is why tools/hitRate.ts now REPORTS THE NAME IT
+ * SEARCHED whenever a lookup comes back empty, so a miss is diagnosable in one
+ * read instead of looking like an absent player.
+ *
+ * Exported and pure so it is assertable without a network, per the rule v2.6.1
+ * learned and v2.6.3, v2.7.0, v2.8.4 and v2.8.5 each restated.
+ */
+export function deriveCfbdTeamName(sgoTeamID: string): string {
+  const stripped = sgoTeamID
+    .replace(/_NCAAF$/i, "")
+    .replace(/_/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!stripped) return sgoTeamID;
+
+  const override = CFBD_NAME_OVERRIDES[stripped.toUpperCase()];
+  if (override) return override;
+
+  return stripped
+    .split(" ")
+    .map((w) =>
+      CFBD_ALL_CAPS.has(w.toUpperCase())
+        ? w.toUpperCase()
+        : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+    )
+    .join(" ");
+}
+
 export interface CfbdHitRateParams {
   teamName: string;
   playerName: string;

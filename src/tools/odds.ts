@@ -4,7 +4,7 @@ import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { extractPricedLine } from "../services/oddsPricing.js";
-import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
 import type { NormalizedOddsLine } from "../types.js";
 
 const OddsInputSchema = z
@@ -46,9 +46,9 @@ const OddsInputSchema = z
       ),
     preferredBookmakers: z
       .string()
-      .optional()
+      .default(DEFAULT_BOOKMAKERS)
       .describe(
-        "Optional comma-separated bookmaker IDs to prefer (e.g. 'fanduel,draftkings'). If omitted, returns whichever bookmaker SGO includes by default. Narrowing this reduces response size and gives consistent book selection across calls."
+        "Comma-separated bookmaker IDs to price against. DEFAULTS to the shared DEFAULT_BOOKMAKERS list in src/constants.ts (draftkings, fanduel, betmgm, caesars, hardrockbet). Pass 'all' to disable the filter for diagnosis only - never publish a price from an unfiltered board. BEHAVIOUR CHANGE IN v2.8.6: this was previously optional with NO default, so a caller who omitted it got whichever book SGO happened to return first - which on a soft board is routinely an offshore or pick'em venue. v2.6.2 made the book list a policy rather than a parameter and applied it to three tools; this one was missed."
       ),
   })
   .strict();
@@ -197,12 +197,20 @@ Error Handling:
         const leagueID = sgo.leagueIDFor(params.sport);
         const todayISO = new Date().toISOString().slice(0, 10) + "T00:00:00Z";
 
+        // "all" is an explicit diagnostic opt-out, matching gameLines/propBoard/
+        // screenProps. Anything else is passed to SGO as a server-side filter,
+        // which also shrinks the payload.
+        const bookFilter =
+          params.preferredBookmakers.trim().toLowerCase() === "all"
+            ? undefined
+            : params.preferredBookmakers;
+
         const events = params.eventID
           ? await sgo.getAllEvents({
               leagueID,
               eventIDs: params.eventID,
               oddIDs: oddIDsToFetch.join(","),
-              bookmakerID: params.preferredBookmakers,
+              bookmakerID: bookFilter,
             })
           : await sgo.getAllEvents({
               leagueID,
@@ -210,7 +218,7 @@ Error Handling:
               finalized: false,
               startsAfter: todayISO,
               oddIDs: oddIDsToFetch.join(","),
-              bookmakerID: params.preferredBookmakers,
+              bookmakerID: bookFilter,
               limit: 50,
             });
 

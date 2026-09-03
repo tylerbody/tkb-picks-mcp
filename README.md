@@ -1,4 +1,4 @@
-# TKB Picks MCP Server (v2.8.2)
+# TKB Picks MCP Server (v2.8.6)
 
 MCP server wrapping **SportsGameOdds** (odds, schedules, props, results) and
 **BALLDONTLIE** (stats, injuries, standings) for building TKB Picks betting
@@ -17,8 +17,8 @@ Render Web Service, Node environment:
 Then verify rather than assume:
 
 ```bash
-npm test                                        # 149 tests, no network needed
-node scripts/verify-deploy.mjs --expect 2.8.2
+npm test                                        # no network needed
+node scripts/verify-deploy.mjs --expect 2.8.6
 node scripts/verify-deploy.mjs --screen <mlbEventID>   # measures entity cost
 ```
 
@@ -47,7 +47,7 @@ on an event rather than roster positions, so `event.players` is permanently empt
 and player props cannot be addressed by playerID. This is structural, not
 unfinished. Use `tkb_get_odds` with `marketType="moneyline"`.
 
-## Tools (26)
+## Tools (27)
 
 **Picks**
 
@@ -60,13 +60,15 @@ unfinished. Use `tkb_get_odds` with `marketType="moneyline"`.
 | `tkb_get_game_lines` | Moneyline, spread and total across a whole slate in one call |
 | `tkb_get_rankings` | Live AP Top 25. Replaces the manual rankedTeams step. Zero SGO cost |
 | `tkb_get_standings` | Full standings table, records and point differential. Zero SGO cost |
-| `tkb_get_player_hit_rate` | Real counted hit rate, DNP-excluded, season- and recency-labelled |
+| `tkb_get_player_hit_rate` | Real counted hit rate, DNP-excluded, season- and recency-labelled. **CFB: pass `teamName`** |
+| `tkb_verify_roster` | Is this player actually on the team the odds feed claims? Zero SGO cost |
 | `tkb_get_yes_no_prop` | Milestone markets (first TD, any HR, double-double) |
 | `tkb_get_period_odds` | Half / quarter / inning / set markets |
 | `tkb_get_players` | Roster and playerIDs for an event |
 | `tkb_get_injuries` | Injury reports, multi-shape team resolution |
 | `tkb_get_team_split` | Home/road via BDL standings; head-to-head via events |
 | `tkb_get_game_weather` | MLB + NFL + CFB, roof-aware |
+| `tkb_get_mlb_matchup` | Confirmed probable pitchers and posted lineups, from MLB directly |
 
 **Content**
 
@@ -75,7 +77,7 @@ unfinished. Use `tkb_get_odds` with `marketType="moneyline"`.
 | `tkb_scan_streaks` | Active streaks and standout games. Non-pick content. Zero SGO quota |
 | `tkb_get_line_movement` | Opening versus current line. Rides an existing fetch |
 | `tkb_get_cover_player` | Cover-photo subject, availability-gated |
-| `tkb_count_tweet_chars` | True X-weighted length (URLs cost 23, emoji cost 2) |
+| `tkb_count_tweet_chars` | True X-weighted length (URLs cost 23, emoji cost 2), plus the raw "Show more" count via `rawLimit` |
 
 **Results**
 
@@ -100,9 +102,17 @@ These are not aspirations. Each one exists because its absence caused a specific
 published or near-published error, documented in `docs/`.
 
 - **A price is only usable if a named sportsbook posted it.** SGO's modelled
-  `fairOdds` is never returned as odds. Pick'em apps (Underdog, PrizePicks,
-  Sleeper, Betr, Dabble, ParlayPlay) and Fliff are blocked at the pricing layer,
-  so no call site can source from them.
+  `fairOdds` is never returned as odds. Four categories are blocked at the pricing
+  layer so no call site can source from them, kept in separate sets because the
+  REASON decides what to expect: pick'em apps (Underdog, PrizePicks, Sleeper, Betr,
+  Dabble, ParlayPlay) distort by being flat; Fliff is real but unbettable here;
+  prediction markets (Polymarket, Kalshi, PredictIt, Manifold) price contracts that
+  are not comparable to an over/under; and offshore books (BetOnline, Bovada,
+  MyBookie, BetUS and peers, added v2.8.6) post real prices a US follower cannot
+  legally bet.
+- **The book filter is one constant, imported everywhere.** `DEFAULT_BOOKMAKERS` in
+  `src/constants.ts`. All six odds tools use it, so changing which books this
+  account prices against is a one-line edit in one file.
 - **Hit rates are counted, never estimated.** Sample size is the real number of
   appearances, DNPs excluded rather than counted as misses.
 - **A stat that cannot be resolved returns `null`, never `0`.** A missing field
@@ -140,6 +150,16 @@ archive/tools/        removed in v2.0.0, kept for reference only
 
 ## Known gaps
 
+- **CFB hit rates need a team NAME, not an SGO teamID.** CollegeFootballData keys
+  box scores by name, so `tkb_get_player_hit_rate` takes an optional `teamName` and
+  falls back to deriving one from the teamID. Pass it explicitly for CFB. Until
+  v2.8.6 the teamID went through unconverted and every CFB hit rate returned NO
+  SAMPLE.
+- **CFB availability is never probed.** SGO carries no CFB player box scores
+  outside the playoff, so `tkb_screen_props` skips the playing-time probe for CFB
+  rather than spending ~60 entities a game to return an empty map. Confirm CFB
+  availability from a published depth chart, and run `tkb_verify_roster` first to
+  catch a stale team field.
 - **CFB injuries** are unavailable through BALLDONTLIE on the current plan.
 - **WNBA and NCAAF player stats** are GOAT-gated on BDL, so their hit rates fall
   back to SGO. A 401 disables the BDL path for 30 minutes and heals itself, so an

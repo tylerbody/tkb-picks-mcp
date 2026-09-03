@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
 import type { SGOEvent } from "../types.js";
 
 /**
@@ -70,9 +70,9 @@ const GameLinesInputSchema = z
       ),
     preferredBookmakers: z
       .string()
-      .default("draftkings,fanduel,betmgm,caesars")
+      .default(DEFAULT_BOOKMAKERS)
       .describe(
-        "Comma-separated bookmaker IDs. Pass 'all' to disable the filter for diagnosis only."
+        "Comma-separated bookmaker IDs to price against. DEFAULTS to the shared DEFAULT_BOOKMAKERS list in src/constants.ts (draftkings, fanduel, betmgm, caesars, hardrockbet). Pass 'all' to disable the filter for diagnosis only - never publish a price from an unfiltered board."
       ),
   })
   .strict();

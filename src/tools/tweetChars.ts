@@ -31,6 +31,31 @@ const URL_PATTERN =
 
 const TCO_LENGTH = 23;
 
+/**
+ * PLAIN CODEPOINT COUNT - the OTHER ceiling, and the one nothing here measured.
+ *
+ * WHY IT EXISTS (v2.8.6). X's 280 limit is the WEIGHTED count above. But a post
+ * carrying MEDIA can be cut off with "Show more" well before 280, and the CFB and
+ * NFL thread formats therefore impose a second, tighter ceiling on the opener -
+ * currently 200 PLAIN characters, counted with emoji as 1 and URLs at their real
+ * length, which is a completely different number from the weighted one.
+ *
+ * MEASURED 2026-09-02 while building the Week 1 CFB threads: the opener needed six
+ * separate round trips, because tkb_count_tweet_chars answered the 280 question and
+ * the 200 question had to be answered by writing the text to a file and running
+ * `python3 -c "print(len(open('f.txt').read()))"` after every single edit. Two
+ * ceilings, two tools, and a guess-and-check loop between them.
+ *
+ * Python's len() on a str counts CODEPOINTS, and JavaScript's spread iterates a
+ * string by codepoint, so [...text].length reproduces that reference count exactly
+ * - including counting a variation selector (U+FE0F, the invisible codepoint that
+ * makes an emoji render in colour) as its own character, which the weighted count
+ * deliberately treats as free.
+ */
+export function rawCharacterLength(text: string): number {
+  return [...text].length;
+}
+
 export function weightedTweetLength(text: string): {
   weighted: number;
   urlsFound: string[];
@@ -86,7 +111,13 @@ export function registerTweetCharsTool(server: McpServer) {
         "URLs cost a flat 23 regardless of length, most emoji cost 2, variation " +
         "selectors cost 0. ALWAYS run this on opener tweets and standalone posts " +
         "before delivering them - posts routinely look short enough by eye and " +
-        "come back 20-80 characters over the 280 limit.",
+        "come back 20-80 characters over the 280 limit. " +
+        "PASS rawLimit TO CHECK BOTH CEILINGS AT ONCE: a post carrying MEDIA can be " +
+        "cut off with 'Show more' well before 280, so thread openers with a cover " +
+        "photo also have a PLAIN-codepoint ceiling (200 in the CFB and NFL formats). " +
+        "rawLength is always returned; passing rawLimit makes a post fail unless it " +
+        "clears both. Without it the raw count has to be computed separately, which " +
+        "on 2026-09-02 turned one opener into six round trips.",
       inputSchema: {
         posts: z
           .array(z.string())
@@ -97,7 +128,14 @@ export function registerTweetCharsTool(server: McpServer) {
           .number()
           .int()
           .default(280)
-          .describe("Character ceiling. 280 standard, 25000 for X Premium long posts."),
+          .describe("Weighted character ceiling. 280 standard, 25000 for X Premium long posts."),
+        rawLimit: z
+          .number()
+          .int()
+          .optional()
+          .describe(
+            "OPTIONAL SECOND CEILING, counted as PLAIN CODEPOINTS rather than X-weighted - emoji count 1, URLs count their real length, variation selectors count 1. This is the 'Show more' ceiling that applies to a post carrying MEDIA, which can be truncated well before 280. Pass 200 when checking a thread OPENER that will have a cover photo attached. Both counts are returned and a post is only OK when it clears BOTH."
+          ),
       },
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
@@ -105,11 +143,31 @@ export function registerTweetCharsTool(server: McpServer) {
       const results = input.posts.map((text, i) => {
         const { weighted, urlsFound, emojiCount } = weightedTweetLength(text);
         const over = weighted - input.limit;
+        const raw = rawCharacterLength(text);
+        const rawOver = input.rawLimit !== undefined ? raw - input.rawLimit : 0;
+        // A post is OK only when it clears BOTH ceilings. Reporting them
+        // separately but judging them together is the whole point - the six-round
+        // -trip loop this replaces came from clearing one and discovering the other.
+        const failsRaw = input.rawLimit !== undefined && rawOver > 0;
         return {
           index: i + 1,
           weighted,
           limit: input.limit,
-          status: over > 0 ? `OVER by ${over}` : "OK",
+          weightedStatus: over > 0 ? `OVER by ${over}` : "OK",
+          rawLength: raw,
+          ...(input.rawLimit !== undefined
+            ? {
+                rawLimit: input.rawLimit,
+                rawStatus: rawOver > 0 ? `RAW OVER by ${rawOver}` : "OK",
+                rawRemaining: rawOver > 0 ? 0 : -rawOver,
+              }
+            : {}),
+          status:
+            over > 0
+              ? `OVER by ${over}`
+              : failsRaw
+                ? `RAW OVER by ${rawOver}`
+                : "OK",
           remaining: over > 0 ? 0 : -over,
           urlsCounted: urlsFound.length,
           urlCostEach: urlsFound.length > 0 ? TCO_LENGTH : 0,
@@ -119,10 +177,14 @@ export function registerTweetCharsTool(server: McpServer) {
       });
 
       const overCount = results.filter((r) => r.status !== "OK").length;
+      const limitLabel =
+        input.rawLimit !== undefined
+          ? `${input.limit} weighted / ${input.rawLimit} raw`
+          : `${input.limit}`;
       const header =
         overCount === 0
-          ? `All ${results.length} post(s) within ${input.limit}.`
-          : `${overCount} of ${results.length} post(s) OVER the ${input.limit} limit. Trim before publishing.`;
+          ? `All ${results.length} post(s) within ${limitLabel}.`
+          : `${overCount} of ${results.length} post(s) OVER ${limitLabel}. Trim before publishing.`;
 
       return {
         content: [

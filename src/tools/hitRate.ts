@@ -6,7 +6,10 @@ import {
   getPlayerHitRate,
   PRIOR_SEASON_LOOKBACK,
 } from "../services/hitRateAggregator.js";
-import { getCfbdPlayerHitRate } from "../services/cfbdHitRateAggregator.js";
+import {
+  getCfbdPlayerHitRate,
+  deriveCfbdTeamName,
+} from "../services/cfbdHitRateAggregator.js";
 import { isCfbdStatSupported } from "../services/cfbdStatMap.js";
 import type { CFBDClient } from "../services/cfbdClient.js";
 import { currentSeason } from "../services/seasonBoundary.js";
@@ -23,10 +26,16 @@ const HitRateInputSchema = z
     teamID: z
       .string()
       .describe(
-        "The player's current team ID (SGO teamID). Get this from tkb_get_odds or tkb_get_schedule output."
+        "The player's current team ID (SGO teamID), e.g. 'COLORADO_NCAAF'. Get this from tkb_get_odds or tkb_get_schedule output. FOR CFB, ALSO PASS teamName - CollegeFootballData keys its box scores by team NAME, not by SGO teamID, and a teamID alone has to be converted by a best-effort derivation that cannot cover every program."
       ),
     playerID: z.string().describe("SGO playerID for the player being checked."),
     playerName: z.string().describe("Player's display name, for output labeling."),
+    teamName: z
+      .string()
+      .optional()
+      .describe(
+        "CFB ONLY, and STRONGLY RECOMMENDED there. The team's display name exactly as CollegeFootballData writes it, e.g. 'Colorado', 'Ole Miss', 'Miami (OH)', 'Texas A&M'. Use the homeTeam/awayTeam string from tkb_get_schedule. CFBD matches box scores on team NAME; passing only an SGO teamID like 'COLORADO_NCAAF' makes the server derive a name, which works for most programs and silently misses on the awkward ones. Ignored for every other sport, which key on teamID."
+      ),
     statID: z
       .string()
       .describe("The statID to check (e.g. 'batting_hits', 'points', 'passing_yards')."),
@@ -188,9 +197,24 @@ Error Handling:
             };
           }
 
+          // ---- CFBD KEYS BOX SCORES BY TEAM NAME, NOT BY SGO teamID ----
+          //
+          // This line used to read `teamName: params.teamID`, which handed
+          // "COLORADO_NCAAF" to a matcher comparing it against CFBD's "Colorado".
+          // Exact normalised compare, never equal, player never resolved, and the
+          // tool returned NO SAMPLE for every CFB player ever asked for. See the
+          // long note above deriveCfbdTeamName for the measured case.
+          //
+          // An explicit teamName wins. The derivation is a fallback, and whichever
+          // name was used is REPORTED below whenever the lookup comes back empty,
+          // so a name mismatch can never again masquerade as an absent player.
+          const explicitTeamName = params.teamName?.trim();
+          const cfbdTeamName = explicitTeamName || deriveCfbdTeamName(params.teamID);
+          const teamNameWasDerived = !explicitTeamName;
+
           const thisSeason = currentSeason("cfb").seasonYear;
           const cfbdResult = await getCfbdPlayerHitRate(cfbd, {
-            teamName: params.teamID,
+            teamName: cfbdTeamName,
             playerName: params.playerName,
             statID: params.statID,
             line: params.line,
@@ -216,11 +240,32 @@ Error Handling:
                   (cfbdResult.matchedFields.length
                     ? ` (read from ${cfbdResult.matchedFields.join(", ")})`
                     : "") +
-                  `.\n\nNOTE: ${cfbdResult.recentAvailability.note}\n\n` +
+                  `.\n\nNOTE: ${cfbdResult.recentAvailability.note}` +
+                  // NAME THE TEAM ACTUALLY SEARCHED WHEN NOTHING RESOLVED. An empty
+                  // CFB sample has two very different causes - the player really
+                  // recorded nothing, or the team string never matched - and only
+                  // one of them is about the player. Stating it turns a silent miss
+                  // into a one-line fix.
+                  (cfbdResult.cfbdPlayerID === null
+                    ? `\n\nTEAM SEARCHED: "${cfbdTeamName}"` +
+                      (teamNameWasDerived
+                        ? ` - DERIVED from teamID "${params.teamID}" because no teamName ` +
+                          `was passed. CollegeFootballData keys box scores by team NAME. ` +
+                          `If that derived name is wrong for this program, pass teamName ` +
+                          `explicitly (CFBD writes "Ole Miss", "Miami (OH)", "Texas A&M", ` +
+                          `"Hawai'i") and retry BEFORE concluding this player has no history.`
+                        : ` - passed explicitly, so the name is not the problem. This ` +
+                          `player recorded no ${params.statID} in any scanned week.`)
+                    : "") +
+                  `\n\n` +
                   JSON.stringify(cfbdResult, null, 2),
               },
             ],
-            structuredContent: cfbdResult,
+            structuredContent: {
+              ...cfbdResult,
+              cfbdTeamNameSearched: cfbdTeamName,
+              cfbdTeamNameWasDerived: teamNameWasDerived,
+            },
           };
         }
 

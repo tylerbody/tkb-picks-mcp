@@ -8,6 +8,52 @@ export const SGO_BASE_URL = "https://api.sportsgameodds.com/v2";
 export const BDL_BASE_URL = "https://api.balldontlie.io";
 
 /**
+ * THE BOOKS THIS ACCOUNT'S AUDIENCE CAN ACTUALLY BET.
+ *
+ * ONE DEFINITION, IMPORTED EVERYWHERE (v2.8.6). This string previously existed as
+ * THREE copies: a const in tools/screenProps.ts, an identical const in
+ * tools/propBoard.ts, and a third written inline into tools/gameLines.ts's zod
+ * .default(). Three copies of a value that must agree is the same drift that put
+ * SERVER_VERSION out of step with /health three separate times, and it is exactly
+ * why v2.5.4 collapsed STARTING_PITCHER_THRESHOLDS into one exported constant.
+ *
+ * IT ALSO WAS NOT APPLIED EVERYWHERE. v2.6.2 called this "a policy rather than a
+ * parameter" and then applied it to three call sites. Three more were missed:
+ *   - tools/odds.ts declared preferredBookmakers optional with NO default
+ *   - tools/yesNoProps.ts accepted no book parameter at all
+ *   - tools/lineMovement.ts accepted no book parameter at all
+ * v2.8.3 recorded the symptom of the last one (a test priced off BetOnline) and
+ * filed it as a missing argument rather than as the pattern it is. All six call
+ * sites now import this.
+ *
+ * ---- hardrockbet ADDED IN v2.8.6, AND IT IS A JUDGEMENT CALL ----
+ *
+ * v2.5.3 and v2.6.2 both measured Hard Rock among the venues polluting an
+ * unfiltered board and deliberately left it out. That was an AUDIENCE-REACH call,
+ * not a legitimacy one - it is a regulated US book, live in far fewer states than
+ * the other four.
+ *
+ * WHAT CHANGED IS CFB. Measured 2026-09-02 on the Week 1 Thursday slate:
+ *
+ *   UAB @ Illinois           4-book default: 18 priced rows, ZERO two-sided
+ *                            + hardrockbet:  36 priced rows, 22 two-sided
+ *   Colorado @ Georgia Tech  4-book default: 12 priced rows,  4 two-sided
+ *                            + hardrockbet:  27 priced rows, 17 two-sided
+ *
+ * Early-season CFB player markets are almost entirely Hard Rock right now; the
+ * other four post one-sided touchdown longshots. Without it a CFB player-prop
+ * thread has no publishable two-way number to build on AT ALL, which is a bigger
+ * problem than the reach caveat. Revisit once CFB boards fill out later in the
+ * season - this is one string in one file now, which is the point.
+ *
+ * NOTE ON THE ID: SGO's public bookmakers page does not list Hard Rock Bet, but
+ * live responses return the key `hardrockbet`. Live data beats the doc page, which
+ * is demonstrably incomplete (it also omits keys the API returns).
+ */
+export const DEFAULT_BOOKMAKERS =
+  "draftkings,fanduel,betmgm,caesars,hardrockbet";
+
+/**
  * WHAT A SPORT CAN ACTUALLY DO.
  *
  * WHY THIS EXISTS (added v2.6.0 with the tennis build): adding ATP/WTA widened

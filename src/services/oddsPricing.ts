@@ -134,13 +134,57 @@ const NON_PUBLISHABLE_BOOKS = new Set(["fliff"]);
  */
 const PREDICTION_MARKETS = new Set(["polymarket", "kalshi", "predictit", "manifold"]);
 
+/**
+ * OFFSHORE AND UNREGULATED BOOKS - blocked for a FOURTH distinct reason.
+ *
+ * WHY THIS SET DID NOT EXIST UNTIL v2.8.6, AND WHY ITS ABSENCE WAS LOAD-BEARING.
+ * `betonline` and `bovada` appear in NONE of the three sets above, so
+ * isRealBookmaker has always accepted them as publishable prices. They stayed out
+ * of threads only because the three tools that mattered happened to send a
+ * preferredBookmakers filter to SGO, which excluded them SERVER-SIDE before they
+ * ever reached this function.
+ *
+ * THAT IS PROTECTION BY CONVENTION RATHER THAN BY CONSTRUCTION, and it has already
+ * failed once. v2.8.3 recorded tkb_get_line_movement returning a price from
+ * BetOnline and filed it as a missing-parameter problem. The parameter was half of
+ * it. The other half is that the pricing layer had no opinion about offshore books
+ * at all, so when a tool sent no filter there was nothing left to catch it.
+ *
+ * v2.8.6 does BOTH: the missing defaults are added AND this set exists. A default
+ * can be overridden, forgotten on a future tool, or switched off with "all" for
+ * diagnosis. This set cannot be bypassed by any call site - the same argument that
+ * moved "never publish fair odds" out of prose and into extractPricedLine.
+ *
+ * THE REASON DECIDES THE SET, per this file's existing convention. These are
+ * genuine two-way sportsbooks posting realistic juice, so unlike a flat pick'em
+ * board or a prediction-market contract they do NOT corrupt the edge maths. They
+ * are blocked because a US follower cannot legally bet them - the same reason as
+ * Fliff. Fliff is kept separate because it is a sweepstakes product rather than an
+ * offshore one, and if a venue ever needs unblocking the reason is what tells you
+ * which set to look in.
+ *
+ * IDs taken from SportsGameOdds' published bookmakers list, checked 2026-09-02.
+ */
+const OFFSHORE_BOOKS = new Set([
+  "betonline",
+  "bovada",
+  "mybookie",
+  "betus",
+  "everygame",
+  "lowvig",
+  "betanysports",
+  "sportsbetting_ag",
+  "bookmakereu",
+]);
+
 function isRealBookmaker(key: string): boolean {
   const k = key.trim().toLowerCase();
   return (
     !NON_BOOKMAKER_KEYS.has(k) &&
     !PICKEM_APPS.has(k) &&
     !NON_PUBLISHABLE_BOOKS.has(k) &&
-    !PREDICTION_MARKETS.has(k)
+    !PREDICTION_MARKETS.has(k) &&
+    !OFFSHORE_BOOKS.has(k)
   );
 }
 

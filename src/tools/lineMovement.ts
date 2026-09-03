@@ -4,7 +4,7 @@ import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
 
 /**
  * LINE MOVEMENT
@@ -44,6 +44,12 @@ const LineMovementInputSchema = z
     marketLabel: z.string().optional().describe("Required for player_prop, e.g. 'Hits'."),
     playerID: z.string().optional().describe("Required for player_prop."),
     playerName: z.string().optional(),
+    preferredBookmakers: z
+      .string()
+      .default(DEFAULT_BOOKMAKERS)
+      .describe(
+        "Comma-separated bookmaker IDs to price against. DEFAULTS to the shared list in src/constants.ts. ADDED IN v2.8.6 - this tool previously accepted no book parameter at all and sent no bookmakerID, so it priced against whichever venue SGO returned first. Pass 'all' to disable for diagnosis only."
+      ),
   })
   .strict();
 
@@ -146,11 +152,21 @@ Error Handling:
           side: params.side,
         });
 
+        // v2.8.3 MEASURED THIS TOOL PRICING OFF BetOnline and recorded it as a
+        // missing-parameter problem. It was half that. The other half was that the
+        // pricing layer had no offshore set, so with no filter there was nothing
+        // left to catch it. v2.8.6 fixes both ends.
+        const bookFilter =
+          params.preferredBookmakers.trim().toLowerCase() === "all"
+            ? undefined
+            : params.preferredBookmakers;
+
         const events = await sgo.getAllEvents({
           leagueID: sgo.leagueIDFor(params.sport),
           eventIDs: params.eventID,
           oddIDs: oddID,
           includeOpenCloseOdds: true,
+          bookmakerID: bookFilter,
         });
 
         if (!events.length) {

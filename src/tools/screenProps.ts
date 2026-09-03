@@ -25,6 +25,7 @@ import {
   SUPPORTED_SPORTS,
   supportsCapability,
   unsupportedMessage,
+  DEFAULT_BOOKMAKERS,
   type SportKey,
 } from "../constants.js";
 
@@ -63,27 +64,18 @@ import {
 const HIT_RATE_CONCURRENCY = 3;
 
 /**
- * THE BOOKS THIS ACCOUNT'S AUDIENCE CAN ACTUALLY BET.
+ * THE BOOK LIST NOW LIVES IN constants.ts (v2.8.6).
  *
- * A DEFAULT RATHER THAN A PROMPT ARGUMENT, DELIBERATELY. Passing this from the
- * nightly tasks was listed as an open follow-up in v2.5.3 and again in v2.5.4,
- * and was still not being passed as of v2.6.1. Two releases is enough evidence
- * that a thing which must be remembered every time will not be. There is no
- * situation where this account wants a board ranked against a book its followers
- * cannot bet, so this is a policy rather than a parameter, and policies belong in
- * code - the same reasoning that moved "never publish fair odds" out of prose and
- * into extractPricedLine.
+ * It was declared here AND identically in tools/propBoard.ts AND a third time
+ * inline in tools/gameLines.ts. See DEFAULT_BOOKMAKERS in src/constants.ts for the
+ * full reasoning, including why hardrockbet was added for CFB.
  *
- * FANDUEL STAYS IN THE LIST. Every WNBA prop screened on 2026-08-19 was priced by
- * FanDuel, and five of six again on 2026-08-24. Dropping it empties that board.
- *
- * BEHAVIOUR CHANGE WORTH KNOWING: this WILL sometimes return fewer props, or an
- * empty board, on games where only excluded venues priced a market. That is the
- * correct answer - "nothing bettable here" beats a prop priced at Bovada - and the
- * empty-result message says which of the two happened so it never reads as a
- * silent failure.
+ * BEHAVIOUR NOTE THAT STILL APPLIES: filtering WILL sometimes return fewer props,
+ * or an empty board, on games where only excluded venues priced a market. That is
+ * the correct answer - "nothing bettable here" beats a prop priced at Bovada - and
+ * the empty-result message below says which of the two happened so it never reads
+ * as a silent failure.
  */
-const DEFAULT_BOOKMAKERS = "draftkings,fanduel,betmgm,caesars";
 
 /**
  * HOW MANY PLAYERS TO SCREEN, BY SPORT.
@@ -697,6 +689,28 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
         playerID: string,
         statID: string
       ): Promise<AvailabilityInfo | null> => {
+        // ---- CFB SKIPS THE PROBE ENTIRELY, DELIBERATELY (v2.8.6) ----
+        //
+        // probeTeamAvailability reads player-level entries out of event.results on
+        // 30 finalized SGO events per team. SGO CARRIES NO CFB PLAYER BOX SCORES
+        // outside the playoff - the same fact that made v2.7.0 remove the SGO
+        // fallback from the CFB hit-rate path, after it reported Dante Moore at a
+        // 0.2 play rate for a season he started every game of.
+        //
+        // So on CFB the probe walks two full team histories and can only ever
+        // return an empty map. Measured cost: roughly 60 SGO entities per game, and
+        // roughly 2,160 across a 36-game Saturday, spent to learn nothing and then
+        // print "AVAILABILITY UNAVAILABLE".
+        //
+        // The hit-rate path got this treatment in v2.7.0; the probe added in v2.4.0
+        // never did. Per v2.6.0: the fixes were correct, the audits were scoped to
+        // the file the symptom appeared in.
+        //
+        // Returning null rather than a fabricated OK is the point - CFB availability
+        // is genuinely unknown from any wired source, and the routing line below
+        // says so instead of implying a clean bill of health.
+        if (input.sport === "cfb") return null;
+
         let team = availabilityByTeam.get(teamID);
         if (!team) {
           const rosterIDs = new Set(
@@ -1060,6 +1074,18 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
                 (n, m) => n + [...m.values()].filter((a) => a.flag === "IRREGULAR").length,
                 0
               );
+              // CFB IS NOT A FAILED PROBE, IT IS A SKIPPED ONE, and the two must not
+              // read the same. "Unavailable" invites a retry; "structurally
+              // impossible, here is what to do instead" does not.
+              if (input.sport === "cfb") {
+                return ` Availability: NOT PROBED for CFB, deliberately. SportsGameOdds ` +
+                  `carries no CFB player box scores outside the playoff, so the probe can ` +
+                  `only ever return empty - it cost ~60 entities per game to learn nothing. ` +
+                  `CFB availability must be confirmed from a published depth chart, which ` +
+                  `CollegeFootballData also cannot substitute for (it lists a player only ` +
+                  `where he recorded a stat, so a quiet game and a DNP look identical). ` +
+                  `Run tkb_verify_roster to catch a stale team field before you do.`;
+              }
               return covered === 0
                 ? ` AVAILABILITY UNAVAILABLE: the playing-time probe returned no data for ` +
                   `${availabilityByTeam.size} team(s), so no IRREGULAR flag can be trusted ` +

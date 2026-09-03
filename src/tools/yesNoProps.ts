@@ -4,7 +4,7 @@ import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { YES_NO_MARKETS } from "../services/marketCatalog.js";
 import { extractPricedLine } from "../services/oddsPricing.js";
-import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
 
 const YesNoInputSchema = z
   .object({
@@ -26,6 +26,12 @@ const YesNoInputSchema = z
       .optional()
       .describe(
         "For team/game-wide markets instead of a player: 'home', 'away', or 'all'. Omit if using playerID."
+      ),
+    preferredBookmakers: z
+      .string()
+      .default(DEFAULT_BOOKMAKERS)
+      .describe(
+        "Comma-separated bookmaker IDs to price against. DEFAULTS to the shared list in src/constants.ts. ADDED IN v2.8.6 - this tool previously accepted no book parameter at all and sent no bookmakerID, so it priced against whichever venue SGO returned first. Pass 'all' to disable for diagnosis only."
       ),
   })
   .strict();
@@ -118,6 +124,17 @@ Error Handling:
         });
 
         const leagueID = sgo.leagueIDFor(params.sport);
+        // PRICE AGAINST THE BOOKS THIS AUDIENCE CAN BET (v2.8.6). This tool sent
+        // no bookmakerID at all, so extractPricedLine's firstAvailableBook took
+        // whichever venue SGO listed first. That was survivable only because the
+        // pricing layer blocked pick'em apps and prediction markets - it had no
+        // offshore set until v2.8.6, so BetOnline and Bovada passed straight
+        // through. Same gap tkb_get_line_movement was caught on in v2.8.3.
+        const bookFilter =
+          params.preferredBookmakers.trim().toLowerCase() === "all"
+            ? undefined
+            : params.preferredBookmakers;
+
         const events = await sgo.getAllEvents({
           leagueID,
           eventIDs: params.eventID,
@@ -125,6 +142,7 @@ Error Handling:
           // Request only this exact market instead of the event's full 1000+
           // markets - same fix applied to tkb_get_odds.
           oddIDs: yesOddID,
+          bookmakerID: bookFilter,
         });
 
         if (!events.length) {

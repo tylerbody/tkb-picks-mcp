@@ -8,6 +8,7 @@ import {
   SUPPORTED_SPORTS,
   supportsCapability,
   unsupportedMessage,
+  DEFAULT_BOOKMAKERS,
   type SportKey,
 } from "../constants.js";
 
@@ -81,12 +82,11 @@ import {
  */
 
 /**
- * Same default as screenProps, and a policy rather than a parameter for the same
- * reason stated there: passing it from the nightly tasks was an open follow-up in
- * v2.5.3, v2.5.4 and v2.6.1 and never happened. There is no situation where this
- * account wants to look at a board priced by a book its followers cannot bet.
+ * The book list moved to src/constants.ts in v2.8.6 - it was declared identically
+ * here and in screenProps.ts and a third time inline in gameLines.ts. See
+ * DEFAULT_BOOKMAKERS there for the reasoning, including why hardrockbet was added
+ * and what it does to an early-season CFB board.
  */
-const DEFAULT_BOOKMAKERS = "draftkings,fanduel,betmgm,caesars";
 
 /**
  * Re-exported so existing callers and tests keep one import site. The parser
@@ -229,7 +229,7 @@ const PropBoardInputSchema = z
       .string()
       .default(DEFAULT_BOOKMAKERS)
       .describe(
-        "Comma-separated bookmaker IDs to price against. DEFAULTS to 'draftkings,fanduel,betmgm,caesars'. Pass 'all' to disable the filter for diagnosis - never publish a price from an unfiltered board."
+        "Comma-separated bookmaker IDs to price against. DEFAULTS to the shared DEFAULT_BOOKMAKERS list in src/constants.ts (draftkings, fanduel, betmgm, caesars, hardrockbet). Pass 'all' to disable the filter for diagnosis only - never publish a price from an unfiltered board."
       ),
     maxPlayers: z
       .number()
