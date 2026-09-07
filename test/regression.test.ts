@@ -543,12 +543,26 @@ describe("bookmaker blocklist", () => {
 
   test("real books observed in live testing are NOT blocked", () => {
     // Every venue seen across the 6-game 2026-08-24 sweep that is a real
-    // sportsbook. Exchanges are excluded from screening by the preferredBookmakers
-    // default, NOT by this blocklist - ProphetX is an affiliate partner and its
-    // prices are realistic, so blocking it here would be the wrong layer.
-    for (const book of ["draftkings", "fanduel", "betmgm", "caesars", "hardrockbet", "espnbet", "bovada", "prophetexchange"]) {
+    // sportsbook a US follower can legally bet. Exchanges are excluded from
+    // screening by the preferredBookmakers default, NOT by this blocklist -
+    // ProphetX is an affiliate partner and its prices are realistic, so blocking
+    // it here would be the wrong layer.
+    //
+    // BOVADA WAS DELIBERATELY REMOVED FROM THIS LIST IN v2.8.7.
+    // It was written here in v2.6.2 as "a real book", which was true of its
+    // prices and false of its usefulness. v2.8.6 added OFFSHORE_BOOKS and blocked
+    // it on the ground that the price is real but the follower cannot legally
+    // place the bet - the same reasoning that separated Fliff from the pick'em
+    // apps in v2.5.3. That release shipped without updating this assertion, so
+    // test/v2_8_6.test.ts asserted bovada IS blocked while this one asserted it
+    // is NOT, and `npm test` has been red on a direct self-contradiction ever
+    // since. The v2.8.6 intent is the correct one; this is the stale half.
+    for (const book of ["draftkings", "fanduel", "betmgm", "caesars", "hardrockbet", "espnbet", "prophetexchange"]) {
       assert.equal(isBlockedBookmaker(book), false, `${book} must NOT be blocked`);
     }
+    // Pinned so the two halves can never drift apart again: the venue that moved
+    // is asserted in its new category right here, next to the list it left.
+    assert.equal(isBlockedBookmaker("bovada"), true, "bovada is offshore and blocked since v2.8.6");
   });
 
   test("a real book still prices normally", () => {
