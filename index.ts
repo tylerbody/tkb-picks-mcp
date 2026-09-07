@@ -2,8 +2,11 @@ import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
+import { SUPPORTED_SPORTS } from "./constants.js";
 import { SGOClient } from "./services/sgoClient.js";
 import { BDLClient } from "./services/bdlClient.js";
+import { CFBDClient } from "./services/cfbdClient.js";
+import { MLBStatsClient } from "./services/mlbStatsClient.js";
 import { WeatherClient } from "./services/weatherClient.js";
 import { registerScheduleTool } from "./tools/schedule.js";
 import { registerOddsTool } from "./tools/odds.js";
@@ -24,6 +27,14 @@ import { registerBatchGradeTool } from "./tools/gradeSlate.js";
 import { registerStreakScanTool } from "./tools/streakScan.js";
 import { registerLineMovementTool } from "./tools/lineMovement.js";
 import { registerLiveMonitorTool } from "./tools/liveMonitor.js";
+import { registerPropBoardTool } from "./tools/propBoard.js";
+import { registerGameLinesTool } from "./tools/gameLines.js";
+import { registerRankingsTool } from "./tools/rankings.js";
+import { registerStandingsTool } from "./tools/standings.js";
+import { registerEventProbeTool } from "./tools/eventProbe.js";
+import { registerCfbdStatsProbeTool } from "./tools/cfbdStatsProbe.js";
+import { registerMlbMatchupTool } from "./tools/mlbMatchup.js";
+import { registerVerifyRosterTool } from "./tools/verifyRoster.js";
 
 // ---- Environment / config ----
 
@@ -44,6 +55,34 @@ if (!BDL_API_KEY) {
 
 const sgo = new SGOClient(SGO_API_KEY);
 const bdl = new BDLClient(BDL_API_KEY);
+
+/**
+ * CFBD IS OPTIONAL, UNLIKE SGO AND BDL, AND THE SERVER MUST STILL BOOT WITHOUT IT.
+ *
+ * Exiting here would take all 24 existing tools down over a key that only CFB hit
+ * rates need. The CFB path instead returns a clear refusal naming the missing key
+ * (see tools/hitRate.ts), which is the same rule the capability flags follow: an
+ * unanswerable question gets a refusal, never a plausible answer.
+ *
+ * Set CFBD_API_KEY in the Render environment alongside SGO_API_KEY and BDL_API_KEY.
+ * Free tier: collegefootballdata.com/key
+ */
+const CFBD_API_KEY = process.env.CFBD_API_KEY;
+const cfbd = CFBD_API_KEY ? new CFBDClient(CFBD_API_KEY) : null;
+
+/**
+ * NO KEY, SO NO CONDITIONAL. statsapi.mlb.com is unauthenticated and unmetered, so
+ * unlike SGO, BDL and CFBD there is nothing to configure and nothing to gate on.
+ * The tool fails soft at call time if the feed is unreachable.
+ */
+const mlbStats = new MLBStatsClient();
+if (!cfbd) {
+  console.warn(
+    "WARN: CFBD_API_KEY is not set. CFB hit rates will refuse rather than fall back " +
+      "to SportsGameOdds, which carries no CFB player box scores outside the playoff. " +
+      "Every other tool is unaffected."
+  );
+}
 const weather = new WeatherClient(); // no API key needed - free public NWS API
 
 // ---- Build MCP server and register tools ----
@@ -60,8 +99,21 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * DEPLOYCHECK.md already records the same class of failure from 2.0.1-2.0.3,
  * where /health reported 2.0.0 across three builds and testing was ambiguous.
  * One constant makes the drift impossible rather than merely unlikely.
+ *
+ * IT HAPPENED A THIRD TIME ANYWAY. The deployed repo still declared 2.5.3 after
+ * the 2.5.4 changes shipped. The one-constant fix solved "two copies in one file
+ * disagree"; it did not solve "someone has to remember to edit the constant",
+ * which is the failure that actually keeps recurring.
+ *
+ * SO /health NOW CARRIES EVIDENCE, NOT JUST A CLAIM. The lesson recorded in
+ * CHANGESv2.5.4.md is that a version string is an assertion ABOUT the build and
+ * the authoritative test is behavioural. toolCount, tools and sports are all
+ * derived from the running server at request time, so they cannot be stale
+ * independently of the code. If the version says 2.5.3 but `sports` contains atp,
+ * the build is new and only the string was forgotten - and that is now
+ * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.5.3";
+const SERVER_VERSION = "2.8.7";
 
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -71,16 +123,16 @@ function buildServer(): McpServer {
 
   registerScheduleTool(server, sgo);
   registerOddsTool(server, sgo);
-  registerHitRateTool(server, sgo, bdl);
+  registerHitRateTool(server, sgo, bdl, cfbd);
   registerInjuriesTool(server, bdl);
   registerSplitsTool(server, sgo, bdl);
   registerYesNoPropsTool(server, sgo);
   registerPeriodOddsTool(server, sgo);
   registerWeatherTool(server, weather);
   registerPlayersTool(server, sgo);
-  registerUsageTool(server, sgo);
+  registerUsageTool(server, sgo, cfbd);
   registerGradePicksTool(server, sgo);
-  registerScreenPropsTool(server, sgo, bdl);
+  registerScreenPropsTool(server, sgo, bdl, cfbd);
   registerCoverPlayerTool(server, sgo, bdl);
   registerTweetCharsTool(server);
   registerBdlStatsProbeTool(server, bdl);
@@ -88,6 +140,14 @@ function buildServer(): McpServer {
   registerStreakScanTool(server, bdl);
   registerLineMovementTool(server, sgo);
   registerLiveMonitorTool(server, sgo);
+  registerPropBoardTool(server, sgo);
+  registerGameLinesTool(server, sgo);
+  registerRankingsTool(server, bdl);
+  registerStandingsTool(server, bdl);
+  registerEventProbeTool(server, sgo);
+  if (cfbd) registerCfbdStatsProbeTool(server, cfbd);
+  registerMlbMatchupTool(server, mlbStats);
+  registerVerifyRosterTool(server, bdl);
 
   return server;
 }
@@ -97,8 +157,40 @@ function buildServer(): McpServer {
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
+/**
+ * Tool names, read off a real server instance rather than a hand-maintained list.
+ * A hardcoded array here would be one more thing to forget, which is the exact
+ * problem /health exists to catch.
+ */
+function registeredToolNames(): string[] {
+  const probe = buildServer() as unknown as {
+    _registeredTools?: Record<string, unknown>;
+  };
+  return Object.keys(probe._registeredTools ?? {}).sort();
+}
+
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", server: "tkb-picks-mcp-server", version: SERVER_VERSION });
+  let tools: string[] = [];
+  let toolError: string | null = null;
+  try {
+    tools = registeredToolNames();
+  } catch (err) {
+    // Never let health-check introspection take the endpoint down. A /health that
+    // 500s tells you nothing about whether the deploy worked.
+    toolError = err instanceof Error ? err.message : String(err);
+  }
+
+  res.json({
+    status: "ok",
+    server: "tkb-picks-mcp-server",
+    version: SERVER_VERSION,
+    // Behavioural evidence. These change when the code changes; the version
+    // string only changes when someone remembers to change it.
+    toolCount: tools.length,
+    tools,
+    sports: SUPPORTED_SPORTS,
+    ...(toolError ? { toolIntrospectionError: toolError } : {}),
+  });
 });
 
 app.post("/mcp", async (req, res) => {
