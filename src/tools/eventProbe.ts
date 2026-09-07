@@ -42,6 +42,36 @@ import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
  * COST: one event fetch, roughly 1 entity, with a trivial oddID filter so the
  * odds map is never serialised. Per SGO's docs the oddID filter shapes only
  * odds, bookmakers and players, so it cannot suppress a lineups field.
+ *
+ * ---- THE SECOND QUESTION: IS THERE A REAL CLOSING LINE? ----
+ *
+ * Pass an `oddID` and this switches into closing-line probe mode.
+ *
+ * v2.8.3 measured a grader reporting a "closing line" of 17.5 on a 16-1 final,
+ * because `closeOverUnder` and `closeSpread` are NOT top-level fields on an odd
+ * and the chain fell through to `bookOverUnder` - which on a settled event has
+ * converged onto the result. v2.8.7 re-measured it on a 62-13 CFB game: a feed
+ * total of 76.5 against 75 actual points, and a feed spread of -48.5 against a
+ * final margin of 49. Half a point off the result, from the other direction.
+ *
+ * Both releases refused rather than guessed, and both left the same item open:
+ * SGO's docs say the real open/close values live at
+ * `odds.<oddID>.byBookmaker.<bookmakerID>.closeOverUnder` and appear only when
+ * `includeOpenCloseOdds=true` is requested. v2.8.4 and v2.8.5 each carried that
+ * forward untested, because - per v2.8.1's lesson - a fix written from
+ * documentation alone is a guess wearing a citation.
+ *
+ * This mode is the call that settles it, and it settles two things at once:
+ *
+ *   1. Whether the graders can stop refusing a missing postedLine and start
+ *      grading posted-against-closed, as their descriptions have always claimed.
+ *   2. Whether `tkb_get_line_movement` can be repaired. It currently resolves
+ *      `openOdds` but not `openOverUnder`/`openSpread`, so it reports an opening
+ *      PRICE with no opening NUMBER - useless for the totals and spreads it
+ *      exists to describe.
+ *
+ * It reports the real field names rather than testing for the ones the docs
+ * predict, so an unexpected name is a finding instead of a silent absence.
  */
 
 const ProbeInputSchema = z
@@ -57,6 +87,16 @@ const ProbeInputSchema = z
       .optional()
       .describe(
         "Optional: inspect one top-level field in more detail, e.g. 'lineups'. Output stays capped regardless."
+      ),
+    oddID: z
+      .string()
+      .optional()
+      .describe(
+        "Optional, and switches this tool into CLOSING-LINE PROBE mode. Give one full oddID " +
+          "(e.g. 'points-all-game-ou-over') on a FINALIZED event and the fetch adds " +
+          "includeOpenCloseOdds=true, then reports the odd's real field names and the field names " +
+          "inside every byBookmaker entry. This is the one call that settles whether a genuine " +
+          "closing line is reachable - see the CLOSING LINE section in this file's header."
       ),
   })
   .strict();
@@ -94,6 +134,157 @@ function cappedSample(value: unknown, maxChars = 2000): string {
   }
 }
 
+/**
+ * CLOSING-LINE PROBE. Reports the odd's REAL field names, top level and inside
+ * byBookmaker, with includeOpenCloseOdds=true.
+ *
+ * Deliberately reports what is there rather than testing for what the docs
+ * predict. Checking `"closeOverUnder" in book` and reporting a boolean would turn
+ * "SGO calls it something else" into "the field is absent", which is the same
+ * class of mistake as v2.8.3's warning firing on every prop: a confident answer
+ * to a question that was never actually asked.
+ */
+async function probeClosingLine(
+  sgo: SGOClient,
+  leagueID: string,
+  eventID: string,
+  oddID: string
+) {
+  const events = await sgo.getAllEvents({
+    leagueID,
+    eventIDs: eventID,
+    oddIDs: oddID,
+    includeOpenCloseOdds: true,
+  });
+
+  if (!events.length) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `No event found for eventID "${eventID}". For this probe use a FINALIZED game - the whole question is what a settled odd carries.`,
+        },
+      ],
+    };
+  }
+
+  const event = events[0];
+  const odd = event.odds?.[oddID] as Record<string, unknown> | undefined;
+
+  if (!odd) {
+    const available = Object.keys(event.odds ?? {}).slice(0, 15);
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text:
+            `The event was found but carries no odd at "${oddID}".\n\n` +
+            `That is a request-shape answer, not a data answer - check the oddID spelling before ` +
+            `concluding anything about closing lines. Format is ` +
+            `{statID}-{statEntityID}-{periodID}-{betTypeID}-{sideID}, e.g. points-all-game-ou-over ` +
+            `for a game total or points-home-game-sp-home for the home spread.` +
+            (available.length ? `\n\nOdds present on this event: ${available.join(", ")}` : ""),
+        },
+      ],
+    };
+  }
+
+  const topLevelKeys = Object.keys(odd).sort();
+
+  const byBookmakerRaw = odd.byBookmaker;
+  const byBookmaker =
+    byBookmakerRaw && typeof byBookmakerRaw === "object"
+      ? (byBookmakerRaw as Record<string, unknown>)
+      : undefined;
+  const bookNames = byBookmaker ? Object.keys(byBookmaker) : [];
+
+  // Capped at four books. Entries are a handful of short strings each, so the
+  // values are worth returning - but this tool's standing rule is that output is
+  // bounded by construction, not by a truncation guess.
+  const sampledBooks: Record<string, unknown> = {};
+  for (const name of bookNames.slice(0, 4)) {
+    sampledBooks[name] = byBookmaker![name];
+  }
+
+  const bookKeyUnion = new Set<string>();
+  for (const name of bookNames) {
+    const entry = byBookmaker![name];
+    if (entry && typeof entry === "object") {
+      for (const k of Object.keys(entry as Record<string, unknown>)) bookKeyUnion.add(k);
+    }
+  }
+  const bookKeys = [...bookKeyUnion].sort();
+
+  // A key anywhere in the union that mentions open or close, whatever it is
+  // actually named. Substring matching is right HERE, where a miss only weakens a
+  // diagnostic - unlike tkb_verify_roster, where containment would hide a
+  // wrong-team pick.
+  const lineLike = (keys: string[]) =>
+    keys.filter((k) => /open|close/i.test(k));
+
+  const topLineLike = lineLike(topLevelKeys);
+  const bookLineLike = lineLike(bookKeys);
+
+  const carriesNumber = (keys: string[]) =>
+    keys.filter((k) => /open|close/i.test(k) && /(spread|overunder|total|line|handicap)/i.test(k));
+
+  const bookNumberFields = carriesNumber(bookKeys);
+  const topNumberFields = carriesNumber(topLevelKeys);
+
+  const verdict = bookNumberFields.length
+    ? `RESOLVED. byBookmaker entries carry open/close LINE field(s): ${bookNumberFields.join(", ")}. ` +
+      `This is the answer both v2.8.3 and v2.8.7 refused to guess at. Two fixes are now buildable: ` +
+      `the graders can compare a postedLine against a real close instead of refusing, and ` +
+      `tkb_get_line_movement can report an opening NUMBER rather than only an opening price. ` +
+      `Confirm on a second event before building - one event is an observation, two is a shape.`
+    : topNumberFields.length
+      ? `RESOLVED, BUT NOT WHERE THE DOCS SAY. The open/close LINE field(s) ${topNumberFields.join(", ")} ` +
+        `are TOP-LEVEL on the odd, not under byBookmaker. Build against these names, and note that a ` +
+        `top-level value is a consensus rather than one book's close - which matters, because this ` +
+        `account prices against a specific set of books.`
+      : bookLineLike.length || topLineLike.length
+        ? `PARTIAL. Open/close key(s) exist but none of them carry a LINE. Found top-level: ` +
+          `[${topLineLike.join(", ") || "none"}]; inside byBookmaker: [${bookLineLike.join(", ") || "none"}]. ` +
+          `That matches v2.8.3's finding that openOdds resolves while openOverUnder does not, and it means ` +
+          `the closing line is genuinely unavailable on this plan or this path. If so, BOTH the grader ` +
+          `refusal and tkb_get_line_movement's coverage note are correct as written and should be ` +
+          `documented as permanent rather than left open for a tenth release.`
+        : `NOT AVAILABLE. No key mentioning open or close appears anywhere on this odd, top level or ` +
+          `inside byBookmaker, even with includeOpenCloseOdds=true. Before concluding, re-run on an ` +
+          `event whose market a real book actually priced - an odd with an empty byBookmaker proves ` +
+          `nothing either way, which is the v2.8.5 truncation lesson in a different costume.`;
+
+  const summary =
+    `CLOSING-LINE PROBE - event ${eventID}, oddID ${oddID}, includeOpenCloseOdds=true.\n\n` +
+    `VERDICT: ${verdict}\n\n` +
+    `Bookmakers on this odd: ${bookNames.length ? bookNames.join(", ") : "NONE - byBookmaker is absent or empty"}`;
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text:
+          `${summary}\n\nODD TOP-LEVEL KEYS:\n${JSON.stringify(topLevelKeys, null, 2)}` +
+          `\n\nUNION OF byBookmaker ENTRY KEYS:\n${JSON.stringify(bookKeys, null, 2)}` +
+          `\n\nSAMPLE (up to 4 books):\n${cappedSample(sampledBooks, 2500)}`,
+      },
+    ],
+    structuredContent: {
+      eventID,
+      oddID,
+      includeOpenCloseOdds: true,
+      oddTopLevelKeys: topLevelKeys,
+      bookmakers: bookNames,
+      byBookmakerKeyUnion: bookKeys,
+      openCloseKeysTopLevel: topLineLike,
+      openCloseKeysInByBookmaker: bookLineLike,
+      lineCarryingFieldsTopLevel: topNumberFields,
+      lineCarryingFieldsInByBookmaker: bookNumberFields,
+      verdict,
+    },
+  };
+}
+
 export function registerEventProbeTool(server: McpServer, sgo: SGOClient) {
   server.registerTool(
     "tkb_probe_event_fields",
@@ -111,21 +302,34 @@ This is deliberately NOT the old tkb_debug_raw_event, which was deleted in v2.0.
 as a quota footgun for dumping everything. This returns key names and shapes, with
 capped samples, and refuses to serialise large collections.
 
+SECOND MODE - CLOSING LINE. Pass an oddID and this instead fetches that one odd with
+includeOpenCloseOdds=true and reports its REAL field names, top level and inside every
+byBookmaker entry. That single call settles a question open since v2.8.3: whether a
+genuine closing line exists anywhere, or whether the graders are right to refuse a
+missing postedLine. It also decides whether tkb_get_line_movement can be repaired - it
+currently resolves an opening PRICE but no opening NUMBER.
+
 Args:
-  - sport, eventID: use an UPCOMING game a few hours out, since that is when a
-    lineup would be posted if it is posted at all
+  - sport, eventID: for the lineups question use an UPCOMING game a few hours out,
+    since that is when a lineup would be posted if it is posted at all. For the
+    closing-line question use a FINALIZED game.
   - field (optional): inspect one top-level key more closely, e.g. 'lineups'
+  - oddID (optional): switches to closing-line mode, e.g. 'points-all-game-ou-over'
 
-Returns: every top-level key with its shape, an explicit verdict on 'lineups',
-market and roster COUNTS rather than contents, and a capped sample of the
-requested field.
+Returns: in default mode, every top-level key with its shape, an explicit verdict on
+'lineups', and market/roster COUNTS rather than contents. In closing-line mode, the
+odd's field names, the union of byBookmaker entry keys, a capped sample of up to four
+books, and a verdict that distinguishes "resolved", "resolved somewhere else",
+"partial" and "not available" rather than collapsing them.
 
-Cost: one event fetch, about 1 entity.
+Cost: one event fetch, about 1 entity, in either mode.
 
 Examples:
   - Use when: settling whether a documented field is really present
   - Use when: a field you expected is missing and you need to know if it is the
     request shape or the data
+  - Use when: deciding whether a real closing line is reachable -> pass oddID on a
+    finalized event
   - Don't use when: you want odds - use tkb_get_odds or tkb_get_prop_board
   - Don't use when: you want the roster - use tkb_get_players`,
       inputSchema: ProbeInputSchema,
@@ -139,6 +343,11 @@ Examples:
     async (input: ProbeInput) => {
       try {
         const leagueID = sgo.leagueIDFor(input.sport as SportKey);
+
+        // ---- CLOSING-LINE PROBE MODE ----
+        if (input.oddID) {
+          return await probeClosingLine(sgo, leagueID, input.eventID, input.oddID);
+        }
 
         // Trivial oddID so the odds map is not serialised into the response. Per
         // SGO's docs this shapes odds/bookmakers/players only, so it cannot hide
