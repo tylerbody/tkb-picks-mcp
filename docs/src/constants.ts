@@ -1,0 +1,256 @@
+// Response size guard - if a formatted response would exceed this, truncate with a clear message
+export const CHARACTER_LIMIT = 25000;
+
+// SportsGameOdds API
+export const SGO_BASE_URL = "https://api.sportsgameodds.com/v2";
+
+// BALLDONTLIE API - base URL differs per sport (path-based, not subdomain)
+export const BDL_BASE_URL = "https://api.balldontlie.io";
+
+/**
+ * THE BOOKS THIS ACCOUNT'S AUDIENCE CAN ACTUALLY BET.
+ *
+ * ONE DEFINITION, IMPORTED EVERYWHERE (v2.8.6). This string previously existed as
+ * THREE copies: a const in tools/screenProps.ts, an identical const in
+ * tools/propBoard.ts, and a third written inline into tools/gameLines.ts's zod
+ * .default(). Three copies of a value that must agree is the same drift that put
+ * SERVER_VERSION out of step with /health three separate times, and it is exactly
+ * why v2.5.4 collapsed STARTING_PITCHER_THRESHOLDS into one exported constant.
+ *
+ * IT ALSO WAS NOT APPLIED EVERYWHERE. v2.6.2 called this "a policy rather than a
+ * parameter" and then applied it to three call sites. Three more were missed:
+ *   - tools/odds.ts declared preferredBookmakers optional with NO default
+ *   - tools/yesNoProps.ts accepted no book parameter at all
+ *   - tools/lineMovement.ts accepted no book parameter at all
+ * v2.8.3 recorded the symptom of the last one (a test priced off BetOnline) and
+ * filed it as a missing argument rather than as the pattern it is. All six call
+ * sites now import this.
+ *
+ * ---- hardrockbet ADDED IN v2.8.6, AND IT IS A JUDGEMENT CALL ----
+ *
+ * v2.5.3 and v2.6.2 both measured Hard Rock among the venues polluting an
+ * unfiltered board and deliberately left it out. That was an AUDIENCE-REACH call,
+ * not a legitimacy one - it is a regulated US book, live in far fewer states than
+ * the other four.
+ *
+ * WHAT CHANGED IS CFB. Measured 2026-09-02 on the Week 1 Thursday slate:
+ *
+ *   UAB @ Illinois           4-book default: 18 priced rows, ZERO two-sided
+ *                            + hardrockbet:  36 priced rows, 22 two-sided
+ *   Colorado @ Georgia Tech  4-book default: 12 priced rows,  4 two-sided
+ *                            + hardrockbet:  27 priced rows, 17 two-sided
+ *
+ * Early-season CFB player markets are almost entirely Hard Rock right now; the
+ * other four post one-sided touchdown longshots. Without it a CFB player-prop
+ * thread has no publishable two-way number to build on AT ALL, which is a bigger
+ * problem than the reach caveat. Revisit once CFB boards fill out later in the
+ * season - this is one string in one file now, which is the point.
+ *
+ * NOTE ON THE ID: SGO's public bookmakers page does not list Hard Rock Bet, but
+ * live responses return the key `hardrockbet`. Live data beats the doc page, which
+ * is demonstrably incomplete (it also omits keys the API returns).
+ */
+export const DEFAULT_BOOKMAKERS =
+  "draftkings,fanduel,betmgm,caesars,hardrockbet";
+
+/**
+ * WHAT A SPORT CAN ACTUALLY DO.
+ *
+ * WHY THIS EXISTS (added v2.6.0 with the tennis build): adding ATP/WTA widened
+ * every tool's sport enum at once, because SUPPORTED_SPORTS is derived from
+ * SPORT_CONFIG. Six tools would then have accepted sport="atp" and returned
+ * something confidently useless rather than refusing:
+ *
+ *   - tkb_get_game_weather fell through to the CFB branch and searched
+ *     CFB_STADIUMS for a tennis player's name
+ *   - tkb_get_players returned "props are not posted yet, retry closer to first
+ *     pitch", which is false and invites a pointless retry - tennis participants
+ *     occupy home/away event slots and there is no roster to populate, ever
+ *   - tkb_get_player_hit_rate skipped BDL (no stat mapping) and went to the SGO
+ *     path, which needs a teamID and playerID that do not exist for tennis
+ *   - tkb_get_team_split fell through to tallying SGO events and produced a
+ *     number with no meaning
+ *
+ * Every one of those is a plausible-looking wrong answer rather than a clear
+ * refusal, which is the exact failure class this connector was built to prevent
+ * (see services/oddsPricing.ts for the original statement of the rule).
+ *
+ * DECLARED HERE RATHER THAN BRANCHED IN EACH TOOL, for the same reason
+ * standingsNormalizer resolves aliases instead of branching on sport: a per-tool
+ * `if (sport === "atp")` breaks again the moment NHL or NBA arrives with its own
+ * shape. One table, checked the same way everywhere, and adding a sport later is
+ * a row rather than an audit.
+ */
+export interface SportCapabilities {
+  /** Player-level over/under props exist and players have roster IDs. */
+  playerProps: boolean;
+  /** A per-player game-log source exists for counted hit rates. */
+  hitRates: boolean;
+  /** An injury feed exists on the current subscription. */
+  injuries: boolean;
+  /** Games are outdoors at a fixed, known venue. */
+  weather: boolean;
+  /** Home/road and head-to-head records are meaningful for this sport. */
+  teamSplits: boolean;
+}
+
+const TEAM_SPORT_CAPABILITIES: SportCapabilities = {
+  playerProps: true,
+  hitRates: true,
+  injuries: true,
+  weather: true,
+  teamSplits: true,
+};
+
+// Maps our internal sport identifiers to each provider's expected league/sport identifiers.
+// This is the single place to extend when NBA/NHL seasons start - add a row here,
+// and TypeScript will refuse to compile until every Record<SportKey, ...> table is
+// filled in (marketCatalog has three, seasonBoundary has one). That compiler error
+// is the feature: there is no way to add a sport and silently forget a table.
+export const SPORT_CONFIG = {
+  mlb: {
+    label: "MLB",
+    sgoLeagueID: "MLB",
+    bdlPath: "mlb",
+    supports: TEAM_SPORT_CAPABILITIES,
+  },
+  wnba: {
+    label: "WNBA",
+    sgoLeagueID: "WNBA",
+    bdlPath: "wnba",
+    // Indoors. The weather tool already returns "indoors, not a factor" for WNBA
+    // by name; the flag keeps that answer consistent with every other sport.
+    supports: { ...TEAM_SPORT_CAPABILITIES, weather: false },
+  },
+  nfl: {
+    label: "NFL",
+    sgoLeagueID: "NFL",
+    bdlPath: "nfl",
+    supports: TEAM_SPORT_CAPABILITIES,
+  },
+  cfb: {
+    label: "NCAAF",
+    sgoLeagueID: "NCAAF",
+    bdlPath: "ncaaf",
+    // INJURIES: BALLDONTLIE has NO NCAAF injuries endpoint. Verified live
+    // 2026-08-31: /ncaaf/v1/player_injuries and /ncaaf/v1/injuries both return 404
+    // while /mlb/v1/player_injuries returns 200 on the same key and path shape. This
+    // is a missing product, not a missing entitlement, so upgrading to GOAT would
+    // NOT provide it. The earlier wording here ("not available on the current plan")
+    // implied it was buyable, which is worse than saying nothing.
+    //
+    // HIT RATES stay true, but they are served by CollegeFootballData, NOT by an SGO
+    // fallback. v2.7.0 removed that fallback deliberately: SGO carries CFB games but
+    // not CFB player box scores outside the playoff, so falling back to it reported
+    // started games as DNPs and produced Dante Moore at a 0.2 play rate. With no
+    // CFBD_API_KEY the CFB path REFUSES rather than degrading.
+    supports: { ...TEAM_SPORT_CAPABILITIES, injuries: false },
+  },
+
+  // ---- TENNIS ----
+  //
+  // MONEYLINE ONLY, DELIBERATELY. SGO does carry tennis games totals, games
+  // handicaps, set winners and serving props, but this account posts moneyline
+  // picks for tennis and nothing else, so none of the player-prop machinery is
+  // wired up.
+  //
+  // TENNIS HAS NO PLAYERS IN SGO'S SENSE. Each competitor occupies the home or
+  // away PARTICIPANT SLOT on the event rather than a roster position, so what is
+  // a "player prop" in every other sport is addressed here through the home/away
+  // entity. event.players is therefore permanently empty, which is why
+  // playerProps and hitRates are false rather than "not yet built".
+  //
+  // A NOTE FOR WHOEVER ADDS TOTALS LATER: match winner settles on `points`,
+  // which in tennis carries the SET score. Games totals and handicaps settle on
+  // `games`, which carries the GAME count. Requesting points-all-game-ou-over
+  // when you meant a games total is, per SGO's own docs, the most common tennis
+  // integration mistake. Moneyline is unaffected - `points` is correct there,
+  // which is why buildOddID needs no tennis-specific handling today.
+  atp: {
+    label: "ATP",
+    sgoLeagueID: "ATP",
+    // Real path: BALLDONTLIE publishes /atp/v1/head_to_head and /atp/v1/match_stats,
+    // but as a SEPARATE subscription this account does not hold. Left populated
+    // deliberately - the TTL tier gate in BDLClient handles the 401 on its own and
+    // heals within 30 minutes if the subscription is ever bought, with no redeploy.
+    bdlPath: "atp",
+    supports: {
+      playerProps: false,
+      hitRates: false,
+      injuries: false,
+      weather: false,
+      teamSplits: false,
+    },
+  },
+  wta: {
+    label: "WTA",
+    sgoLeagueID: "WTA",
+    bdlPath: "wta",
+    supports: {
+      playerProps: false,
+      hitRates: false,
+      injuries: false,
+      weather: false,
+      teamSplits: false,
+    },
+  },
+
+  // Add when NBA season starts:
+  // nba: { label: "NBA", sgoLeagueID: "NBA", bdlPath: "nba", supports: TEAM_SPORT_CAPABILITIES },
+  // Add when NHL season starts:
+  // nhl: { label: "NHL", sgoLeagueID: "NHL", bdlPath: "nhl", supports: TEAM_SPORT_CAPABILITIES },
+} as const;
+
+export type SportKey = keyof typeof SPORT_CONFIG;
+
+export const SUPPORTED_SPORTS = Object.keys(SPORT_CONFIG) as SportKey[];
+
+/** Sports where competitors are individuals in the home/away slots, not rosters. */
+export const INDIVIDUAL_SPORTS: SportKey[] = ["atp", "wta"];
+
+export function isIndividualSport(sport: SportKey): boolean {
+  return INDIVIDUAL_SPORTS.includes(sport);
+}
+
+export function labelFor(sport: SportKey): string {
+  return SPORT_CONFIG[sport].label;
+}
+
+export function supportsCapability(
+  sport: SportKey,
+  capability: keyof SportCapabilities
+): boolean {
+  return SPORT_CONFIG[sport].supports[capability];
+}
+
+/**
+ * The refusal message a tool returns when a sport does not support what was asked.
+ *
+ * Centralised so every refusal explains the REASON rather than just saying no.
+ * "Not supported" invites a retry; "tennis participants occupy event slots rather
+ * than roster positions" does not.
+ */
+export function unsupportedMessage(
+  sport: SportKey,
+  capability: keyof SportCapabilities
+): string {
+  const label = SPORT_CONFIG[sport].label;
+  const reasons: Record<keyof SportCapabilities, string> = {
+    playerProps: isIndividualSport(sport)
+      ? `${label} competitors occupy the home/away participant slots on an event rather than roster positions, so SGO never populates a player list and player props cannot be addressed by playerID. This is permanent, not a "retry closer to match time" situation. ${label} picks are moneyline only - use tkb_get_odds with marketType="moneyline".`
+      : `Player props are not available for ${label}.`,
+    hitRates: isIndividualSport(sport)
+      ? `Counted hit rates are not available for ${label}. There is no per-player game-log source subscribed for this tour, and the SGO path needs a teamID/playerID that tennis events do not carry. Use researched or projection language in ${label} threads, per the style guide, rather than counted "X of his last Y" phrasing.`
+      : `Hit rates are not available for ${label}.`,
+    injuries: isIndividualSport(sport)
+      ? `No injury feed is available for ${label} on the current subscription. Tennis withdrawals and retirements are announced by the tournament, so check tour news directly before posting a ${label} pick.`
+      : `BALLDONTLIE has no ${label} injuries endpoint at all. Verified live 2026-08-31: both /ncaaf/v1/player_injuries and /ncaaf/v1/injuries return 404, while the same path returns 200 for MLB on the same key. This is a MISSING ENDPOINT, not a subscription limit, so it cannot be unlocked by upgrading. Check ${label} injury and availability news via live web search, and note that CFB availability also has to be confirmed from a depth chart because CollegeFootballData lists a player only where he recorded a stat.`,
+    weather: isIndividualSport(sport)
+      ? `Weather is not wired up for ${label}. Tour events move between venues week to week, so there is no fixed stadium table to look up, and guessing a location would be worse than returning nothing. Grand Slam roof status must be checked via live search.`
+      : `Weather is not a factor for ${label}.`,
+    teamSplits: isIndividualSport(sport)
+      ? `Team splits do not apply to ${label} - there are no teams. For head-to-head history between two players, use live search; SGO's event feed is not a reliable H2H source across seasons.`
+      : `Team splits are not available for ${label}.`,
+  };
+  return reasons[capability];
+}
