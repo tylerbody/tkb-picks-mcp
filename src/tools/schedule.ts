@@ -82,7 +82,9 @@ Args:
   - tier (CFB only): 'all' | 'fbs' | 'power4' | 'top25' | 'rivalry' | 'postable'
   - rankedTeams (CFB only): comma-separated current Top 25 names, from a live search
 
-Returns: list of games with eventID, start time, status, teams, and scores if final.
+Returns: list of games with eventID, start time, status, teams, and scores if final,
+plus a 'truncated' flag. TRUE means SGO's per-request cap was hit and games ARE missing
+from the list. Re-run in narrower time windows and combine the results when you see it.
 
 Examples:
   - Use when: "What MLB games are on today?" -> sport="mlb", date=today's date
@@ -140,12 +142,35 @@ Error Handling:
           startsBefore = bound.toISOString();
         }
 
+        // THE oddIDs FILTER IS NOT COSMETIC HERE, IT RAISES THE PAGE CAP.
+        //
+        // Per SGO's own docs: "If you're making a request to the /events endpoint,
+        // the max-limit varies from 25-100 depending on the query. Factors
+        // affecting this include: if the query filters for specific fields (ex:
+        // oddIDs)" and "the limit applied is the smaller value between the limit
+        // parameter you supplied and the max-limit for the endpoint."
+        //
+        // This call asked for 100 and passed no oddIDs, so it was getting the low
+        // end of that range. Measured 2026-09-12: a full CFB Saturday returned
+        // exactly 25 games, ordered by kickoff and stopping at the 23:00Z window,
+        // while narrowing the request to 22:30Z onward returned 15 more that the
+        // first response never mentioned. `count: 25` read like an answer.
+        //
+        // A trivial oddID also stops the entire odds map being serialised for
+        // every game, which a schedule never reads. The same trick is used by
+        // tkb_probe_event_fields for the same reason. Per SGO's docs the oddID
+        // filter shapes odds, bookmakers and players only - it does not decide
+        // WHICH EVENTS come back - so no game can be hidden by it.
         const events = await sgo.getAllEvents({
           leagueID,
           startsAfter,
           startsBefore,
           limit: 100,
+          oddIDs: "points-home-game-ml-home",
         });
+
+        // Recorded immediately: the next getAllEvents call overwrites it.
+        const fetchTruncated = sgo.lastFetchTruncated;
 
         let filtered = events;
         let filterNote = "";
@@ -262,11 +287,29 @@ Error Handling:
             content: [
               {
                 type: "text" as const,
-                text: `No ${params.sport.toUpperCase()} games found for the requested window/filters.`,
+                text:
+                  `No ${params.sport.toUpperCase()} games found for the requested window/filters.` +
+                  (sgo.lastFetchTruncated
+                    ? ` NOTE: the underlying fetch hit SGO's per-request event cap, so this window may contain games that were cut off before your filters ran. Narrow the time window and re-run before concluding there is nothing on.`
+                    : ""),
               },
             ],
           };
         }
+
+        // A SHORT SLATE AND A TRUNCATED ONE MUST NOT LOOK THE SAME.
+        //
+        // The failure being fixed was not that games were missing, it was that
+        // nothing said so. The only way to notice was to already know a game was
+        // absent, which is the same shape as the v2.8.4 player-search truncation
+        // and the v2.6.3 roster clip: a clipped result looks completely healthy.
+        const truncationNote = fetchTruncated
+          ? `\n\nTRUNCATED: this window hit SGO's per-request event cap, so there are almost ` +
+            `certainly games in it that are NOT listed above. SGO caps /events between 25 and 100 ` +
+            `results depending on the query and does not report the true total. Re-run in narrower ` +
+            `time windows and combine the results - e.g. split a Saturday at 22:00Z - before ` +
+            `treating this as the full slate.`
+          : "";
 
         const games: NormalizedGame[] = filtered.map((e) => {
           const homeName = e.teams.home.names?.long ?? e.teams.home.teamID;
@@ -301,13 +344,13 @@ Error Handling:
           return base;
         });
 
-        const output = { count: games.length, games };
+        const output = { count: games.length, truncated: fetchTruncated, games };
 
         return {
           content: [
             {
               type: "text" as const,
-              text: `Found ${games.length} ${params.sport.toUpperCase()} game(s).${filterNote}\n\n${JSON.stringify(output, null, 2)}`,
+              text: `Found ${games.length} ${params.sport.toUpperCase()} game(s).${filterNote}${truncationNote}\n\n${JSON.stringify(output, null, 2)}`,
             },
           ],
           structuredContent: output,

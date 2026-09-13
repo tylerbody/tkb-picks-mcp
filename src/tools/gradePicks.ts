@@ -13,6 +13,7 @@ import {
   SPREAD_SIGN_CONVENTION,
 } from "../services/pickGrader.js";
 import { lookupPlayerStat } from "../services/hitRateAggregator.js";
+import { assessFinality } from "../services/eventStatus.js";
 
 /**
  * PICK GRADING - resolve a posted pick to WIN / LOSS / PUSH from real settled data.
@@ -235,6 +236,30 @@ Error Handling:
         }
 
         const event = events[0];
+
+        // ---- IS IT ACTUALLY OVER? `finalized: true` is a request, not a promise ----
+        //
+        // Measured 2026-09-12: Pittsburgh @ UCF came back from this finalized-only
+        // fetch while the game was in the 4th quarter, and was graded a confident
+        // WIN off the current score. See services/eventStatus.ts for the full case.
+        const finality = assessFinality(event);
+        if (!finality.final) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `NOT GRADED - ${finality.reason}`,
+              },
+            ],
+            structuredContent: {
+              result: "NOT_FINAL",
+              eventID: event.eventID,
+              statusLabel: finality.label,
+              reason: finality.reason,
+            },
+          };
+        }
+
         const homeScore = event.teams.home.score;
         const awayScore = event.teams.away.score;
         const homeName = event.teams.home.names?.long ?? "home";

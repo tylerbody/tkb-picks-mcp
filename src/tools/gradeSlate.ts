@@ -14,6 +14,7 @@ import {
   SPREAD_SIGN_CONVENTION,
 } from "../services/pickGrader.js";
 import { lookupPlayerStat } from "../services/hitRateAggregator.js";
+import { assessFinality } from "../services/eventStatus.js";
 
 /**
  * BATCH PICK GRADER
@@ -94,6 +95,8 @@ interface GradedPick {
   margin?: number;
   finalScore?: string;
   explanation?: string;
+  /** Set when the pick was refused because the game is not over. */
+  statusLabel?: string;
   /** Player props only: false only when the game carries no box score to check against. */
   participationResolved?: boolean;
   note?: string | null;
@@ -215,6 +218,23 @@ Error Handling:
             continue;
           }
 
+          // ---- IS IT ACTUALLY OVER? ----
+          // `finalized: true` returned an in-progress CFB game on 2026-09-12 and
+          // every pick on it was graded off the live score. Checked once per event
+          // rather than once per pick, since the answer is a property of the game.
+          const finality = assessFinality(event);
+          if (!finality.final) {
+            for (const p of picks) {
+              graded.push({
+                ref: p.ref,
+                result: "NOT_FINAL",
+                detail: finality.reason,
+                statusLabel: finality.label,
+              });
+            }
+            continue;
+          }
+
           for (const p of picks) {
             graded.push(gradeOne(params.sport, event, p));
           }
@@ -232,6 +252,7 @@ Error Handling:
         ).length;
         const settled = wins + losses;
         const pct = settled > 0 ? ((wins / settled) * 100).toFixed(1) : "n/a";
+        const notFinal = graded.filter((g) => g.result === "NOT_FINAL").length;
         const voids = graded.filter((g) => g.result === "VOID").length;
         const flaggedZero = graded.filter(
           (g) => g.participationResolved === false
@@ -243,6 +264,9 @@ Error Handling:
           (ungraded ? ` | ${ungraded} not gradeable` : "") +
           (needsLine
             ? `\n\n${needsLine} pick(s) REFUSED for having no postedLine. That is a refusal, not a failure: on a finalized event the feed's line has converged onto the result, so grading against it compares the result to itself. Re-run those with the line as published.`
+            : "") +
+          (notFinal
+            ? `\n\n${notFinal} pick(s) returned NOT_FINAL because their game is not over. SGO's finalized-only filter does return in-progress games, so this tool checks the event status itself rather than trusting it. Do NOT log these; use tkb_monitor_live_picks while a game is running.`
             : "") +
           (voids
             ? `\n\n${voids} pick(s) returned VOID: the player does not appear in that game's box score while his teammates do, so the pick never had action. Log those as Void, not as a Hit or a Miss.`

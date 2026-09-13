@@ -1,6 +1,7 @@
 import axios, { type AxiosInstance, AxiosError } from "axios";
 import { SGO_BASE_URL, SPORT_CONFIG, type SportKey } from "../constants.js";
 import type { SGOEvent, SGOEventsResponse, SGOTeam, SGOPlayer } from "../types.js";
+import { isAffirmativelyLive } from "./eventStatus.js";
 
 /**
  * SportsGameOdds API client.
@@ -266,6 +267,15 @@ export class SGOClient {
     return work;
   }
 
+  /**
+   * True when the most recent getAllEvents could not prove it had everything.
+   * Read immediately after a call; the next one overwrites it.
+   */
+  public lastFetchTruncated = false;
+
+  /** Events dropped for being in progress despite a finalized-only query. */
+  public liveEventsDropped = 0;
+
   private async fetchAllPages(
     params: Parameters<SGOClient["getEvents"]>[0],
     opts: { pageSize: number; ceiling: number; maxPages: number; cacheKey: string | null }
@@ -274,6 +284,7 @@ export class SGOClient {
     let cursor: string | undefined = undefined;
     let pages = 0;
 
+    let lastPageSize = 0;
     do {
       const page: SGOEventsResponse = await this.getEvents({
         ...params,
@@ -281,11 +292,56 @@ export class SGOClient {
         limit: opts.pageSize,
       });
       allEvents.push(...page.data);
-      cursor = page.nextCursor ?? undefined;
+      lastPageSize = page.data.length;
+      cursor = nextCursorOfEvents(page);
       pages++;
       // STOP AT THE CEILING. This is the actual fix - previously only the page
       // count bounded the loop, so the total was pageSize * maxPages.
     } while (cursor && pages < opts.maxPages && allEvents.length < opts.ceiling);
+
+    // ---- DID WE STOP EARLY, AND CAN WE TELL? ----
+    //
+    // SGO's docs: "the max-limit varies from 25-100 depending on the query" and
+    // "the limit applied is the smaller value between the limit parameter you
+    // supplied and the max-limit for the endpoint." A query with no oddIDs filter
+    // gets the low end, so asking for 100 and receiving 25 is NORMAL and is not by
+    // itself evidence of anything.
+    //
+    // What matters is that `count: 25` reads like an answer when it may be a
+    // truncation. Measured 2026-09-12: tkb_get_schedule on a full CFB Saturday
+    // returned exactly 25 games ending at the 23:00Z kickoffs, and narrowing the
+    // window to 22:30Z onward returned 15 more the first call never mentioned.
+    //
+    // So the stop condition is RECORDED rather than inferred, and a caller can say
+    // "there may be more" instead of presenting a partial slate as a complete one.
+    this.lastFetchTruncated =
+      (cursor !== undefined && (pages >= opts.maxPages || allEvents.length >= opts.ceiling)) ||
+      (cursor === undefined && lastPageSize > 0 && lastPageSize === opts.pageSize);
+
+    // ---- `finalized: true` IS A REQUEST, NOT A GUARANTEE ----
+    //
+    // Measured 2026-09-12: an in-progress CFB game (Pittsburgh @ UCF, status
+    // "4th") came back from a finalized-only query and was graded as a final 12-7.
+    // SEVEN call sites pass this flag and every one treats what comes back as a
+    // completed game, so the same leak also lets a PARTIAL stat line into a hit
+    // rate as though it were a finished outing - a pitcher three innings into a
+    // start counting as a completed three-strikeout appearance.
+    //
+    // Filtered HERE rather than in each caller, for the reason v1.2.0 put the
+    // history cache in getAllEvents and v2.6.0 put coalescing there: one change
+    // every caller inherits beats six that have to be remembered.
+    //
+    // Only AFFIRMATIVELY live events are dropped. An unrecognised or absent status
+    // is KEPT, because silently shrinking a hit-rate sample on a status string this
+    // code does not recognise would be a worse failure than the one being fixed.
+    // The graders apply the stricter test separately, and deliberately.
+    if (params.finalized === true) {
+      const before = allEvents.length;
+      const finishedOnly = allEvents.filter((e) => !isAffirmativelyLive(e));
+      this.liveEventsDropped += before - finishedOnly.length;
+      allEvents.length = 0;
+      allEvents.push(...finishedOnly);
+    }
 
     if (opts.cacheKey) {
       this.historyCache.set(opts.cacheKey, {
@@ -464,4 +520,36 @@ function formatSGOError(err: unknown, context: string): Error {
     );
   }
   return new Error(`Unexpected error fetching ${context} from SportsGameOdds: ${String(err)}`);
+}
+
+/**
+ * READ THE CURSOR FROM EVERY KNOWN LOCATION, NOT ONE ASSUMED SHAPE.
+ *
+ * v2.0.3 stated the rule while fixing BDL: "pagination stopping silently after
+ * page 1 is indistinguishable from 'there was only one page'". v2.8.4 hit the
+ * identical bug again in searchPlayers, eight releases later, because the audit
+ * had been scoped to the file the symptom appeared in.
+ *
+ * The SGO client never got that treatment and read exactly `page.nextCursor`.
+ * SGO's docs name that field and it is very likely correct, but "very likely
+ * correct" is exactly what a silent stop looks like from the outside, and the cost
+ * of being wrong is a partial slate presented as a complete one.
+ */
+function nextCursorOfEvents(page: unknown): string | undefined {
+  if (!page || typeof page !== "object") return undefined;
+  const p = page as Record<string, unknown>;
+  const meta = p.meta as Record<string, unknown> | undefined;
+  const pagination = p.pagination as Record<string, unknown> | undefined;
+  const candidates: unknown[] = [
+    p.nextCursor,
+    p.next_cursor,
+    meta?.nextCursor,
+    meta?.next_cursor,
+    pagination?.nextCursor,
+    pagination?.next_cursor,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.length > 0) return c;
+  }
+  return undefined;
 }
