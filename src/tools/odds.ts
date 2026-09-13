@@ -298,13 +298,24 @@ Error Handling:
           // A playerID miss is not a dead end: event.players arrived on this same
           // fetch and can say whether the ID is wrong or the market is absent.
           // Those need different next actions. See services/playerResolution.ts.
+          // APPENDED, NOT A FALLBACK. v2.8.9 wired this as the else-branch of
+          // `unpricedReasons.length`, and that branch never runs on the case it was
+          // built for: a missing market populates one unpricedReason PER SIDE, so
+          // the list is non-empty and the diagnosis was unreachable. Shipped and
+          // verified dead against the live build on 2026-09-13, on the exact
+          // Caleb Williams lookup it exists to answer.
+          //
+          // The per-side reasons and the ID diagnosis answer different questions -
+          // "this side is unpriced" versus "this player is not on this event" - so
+          // the reader needs both, not whichever one happened to be checked first.
           const idDiagnosis =
             params.marketType === "player_prop" && params.playerID
               ? diagnosePlayerIdMiss(event, params.playerID, params.marketLabel).message
               : null;
-          const detail = unpricedReasons.length
+          const baseDetail = unpricedReasons.length
             ? unpricedReasons.join("\n\n")
-            : (idDiagnosis ?? `No market found for this selection on this event.`);
+            : `No market found for this selection on this event.`;
+          const detail = idDiagnosis ? `${idDiagnosis}\n\n---\n\n${baseDetail}` : baseDetail;
           return {
             content: [
               {
