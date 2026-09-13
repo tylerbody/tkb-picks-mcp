@@ -122,6 +122,14 @@ NOT a betting-value tool. It ranks marketability and availability only.`,
       },
     },
     async (input) => {
+      // TOP-LEVEL GUARD. Added v2.8.11 after test/toolWiring.test.ts drove every
+      // tool with a client that throws. This handler and tkb_get_cover_player were
+      // the only two of 27 without one: their first upstream call sat OUTSIDE any
+      // try, so an SGO outage escaped the handler entirely and the caller got a
+      // protocol error instead of a sentence. This repo has already recorded CFBD
+      // returning 502 on two consecutive calls and BDL rate-limiting 217 of 235
+      // requests, so this is a condition that happens, not a hypothetical.
+      try {
       // Needs a roster to rank and an injury feed to gate on. Tennis has neither,
       // and a cover graphic built from a guess publishes with the thread and
       // cannot be quietly fixed afterwards.
@@ -407,6 +415,22 @@ NOT a betting-value tool. It ranks marketability and availability only.`,
           avoid,
         },
       };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `Error selecting a cover player: ${err instanceof Error ? err.message : String(err)}\n\n` +
+                `This is an upstream failure, not a result. Nothing about this event has been ` +
+                `established, so do not treat the absence of output as an absence of markets. ` +
+                `Retry; if it persists, check tkb_get_api_usage for a quota wall and the provider ` +
+                `for an outage.`,
+            },
+          ],
+          isError: true,
+        };
+      }
     }
   );
 }

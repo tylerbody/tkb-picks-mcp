@@ -113,7 +113,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.8.10";
+const SERVER_VERSION = "2.8.11";
 
 function buildServer(): McpServer {
   const server = new McpServer({

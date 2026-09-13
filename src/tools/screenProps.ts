@@ -480,6 +480,14 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       },
     },
     async (input) => {
+      // TOP-LEVEL GUARD. Added v2.8.11 after test/toolWiring.test.ts drove every
+      // tool with a client that throws. This handler and tkb_get_cover_player were
+      // the only two of 27 without one: their first upstream call sat OUTSIDE any
+      // try, so an SGO outage escaped the handler entirely and the caller got a
+      // protocol error instead of a sentence. This repo has already recorded CFBD
+      // returning 502 on two consecutive calls and BDL rate-limiting 217 of 235
+      // requests, so this is a condition that happens, not a hypothetical.
+      try {
       // Without this, an empty tennis catalog produces "No countable markets for
       // atp. Available: " with nothing after the colon - accurate, and useless
       // about why. The capability message explains that it is structural.
@@ -1111,6 +1119,22 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           props: top,
         },
       };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `Error screening props: ${err instanceof Error ? err.message : String(err)}\n\n` +
+                `This is an upstream failure, not a result. Nothing about this event has been ` +
+                `established, so do not treat the absence of output as an absence of markets. ` +
+                `Retry; if it persists, check tkb_get_api_usage for a quota wall and the provider ` +
+                `for an outage.`,
+            },
+          ],
+          isError: true,
+        };
+      }
     }
   );
 }
