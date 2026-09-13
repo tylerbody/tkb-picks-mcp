@@ -6,6 +6,7 @@ import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { extractPricedLine } from "../services/oddsPricing.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
 import type { NormalizedOddsLine } from "../types.js";
+import { diagnosePlayerIdMiss } from "../services/playerResolution.js";
 
 const OddsInputSchema = z
   .object({
@@ -294,9 +295,16 @@ Error Handling:
         }
 
         if (!lines.length) {
+          // A playerID miss is not a dead end: event.players arrived on this same
+          // fetch and can say whether the ID is wrong or the market is absent.
+          // Those need different next actions. See services/playerResolution.ts.
+          const idDiagnosis =
+            params.marketType === "player_prop" && params.playerID
+              ? diagnosePlayerIdMiss(event, params.playerID, params.marketLabel).message
+              : null;
           const detail = unpricedReasons.length
             ? unpricedReasons.join("\n\n")
-            : `No market found for this selection on this event. For player props, confirm the playerID is correct and that the player is on this event's roster (use tkb_get_players).`;
+            : (idDiagnosis ?? `No market found for this selection on this event.`);
           return {
             content: [
               {

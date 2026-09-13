@@ -15,6 +15,7 @@ import {
 } from "../services/pickGrader.js";
 import { lookupPlayerStat } from "../services/hitRateAggregator.js";
 import { assessFinality } from "../services/eventStatus.js";
+import { diagnosePlayerIdMiss } from "../services/playerResolution.js";
 
 /**
  * BATCH PICK GRADER
@@ -419,10 +420,16 @@ function gradeOne(
 
   const odd = event.odds?.[oddID] as Record<string, unknown> | undefined;
   if (!odd) {
+    const idDiagnosis =
+      p.marketType === "player_prop" && p.playerID
+        ? diagnosePlayerIdMiss(event, p.playerID, p.marketLabel).message
+        : null;
     return {
       ref: p.ref,
       result: "NO_DATA",
-      detail: `Event is final but no settlement data returned for ${oddID}. Grade manually.`,
+      detail:
+        idDiagnosis ??
+        `Event is final but no settlement data returned for ${oddID}. Grade manually.`,
     };
   }
 

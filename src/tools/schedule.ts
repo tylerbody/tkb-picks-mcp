@@ -83,8 +83,9 @@ Args:
   - rankedTeams (CFB only): comma-separated current Top 25 names, from a live search
 
 Returns: list of games with eventID, start time, status, teams, and scores if final,
-plus a 'truncated' flag. TRUE means SGO's per-request cap was hit and games ARE missing
-from the list. Re-run in narrower time windows and combine the results when you see it.
+plus a 'truncated' flag and 'eventsFetchedBeforeFilters'. TRUE means SGO capped the
+underlying fetch, so a game later in your window may never have been seen. Re-run in
+narrower time windows and combine the results when you see it.
 
 Examples:
   - Use when: "What MLB games are on today?" -> sport="mlb", date=today's date
@@ -303,12 +304,25 @@ Error Handling:
         // nothing said so. The only way to notice was to already know a game was
         // absent, which is the same shape as the v2.8.4 player-search truncation
         // and the v2.6.3 roster clip: a clipped result looks completely healthy.
+        //
+        // WORDED CAREFULLY, because the flag describes the FETCH and the reader is
+        // looking at a FILTERED list. A 7-game team query that comes back flagged is
+        // not saying "7 is wrong"; it is saying the 100-event fetch behind it was
+        // capped before the team filter ran, so a later game in the window may never
+        // have been seen. Stating that precisely matters: an alarming note on a
+        // result that looks complete is how a real warning gets tuned out, which is
+        // the v2.5.0 argument about IRREGULAR firing on healthy starters.
+        const filtersApplied = filtered.length !== events.length;
         const truncationNote = fetchTruncated
-          ? `\n\nTRUNCATED: this window hit SGO's per-request event cap, so there are almost ` +
-            `certainly games in it that are NOT listed above. SGO caps /events between 25 and 100 ` +
-            `results depending on the query and does not report the true total. Re-run in narrower ` +
-            `time windows and combine the results - e.g. split a Saturday at 22:00Z - before ` +
-            `treating this as the full slate.`
+          ? `\n\nINCOMPLETE FETCH: SGO capped the underlying request at ${events.length} event(s) ` +
+            `before any filtering, and it does not report the true total. ` +
+            (filtersApplied
+              ? `Your filters then reduced that to what is listed. The games shown are real, but a game ` +
+                `later in this window may have been cut off before the filter ever saw it.`
+              : `So there are very likely games in this window that are NOT listed above.`) +
+            ` SGO caps /events between 25 and 100 results depending on the query. Re-run in narrower ` +
+            `time windows and combine - splitting a Saturday at 22:00Z works - before treating this ` +
+            `as a complete slate.`
           : "";
 
         const games: NormalizedGame[] = filtered.map((e) => {
@@ -344,7 +358,14 @@ Error Handling:
           return base;
         });
 
-        const output = { count: games.length, truncated: fetchTruncated, games };
+        const output = {
+          count: games.length,
+          truncated: fetchTruncated,
+          // The raw fetch size, so "the filter cut it" and "the cap cut it" are
+          // distinguishable from the response alone rather than by re-running.
+          eventsFetchedBeforeFilters: events.length,
+          games,
+        };
 
         return {
           content: [

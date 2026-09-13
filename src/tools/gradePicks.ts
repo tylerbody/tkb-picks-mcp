@@ -14,6 +14,7 @@ import {
 } from "../services/pickGrader.js";
 import { lookupPlayerStat } from "../services/hitRateAggregator.js";
 import { assessFinality } from "../services/eventStatus.js";
+import { diagnosePlayerIdMiss } from "../services/playerResolution.js";
 
 /**
  * PICK GRADING - resolve a posted pick to WIN / LOSS / PUSH from real settled data.
@@ -357,11 +358,19 @@ Error Handling:
         const odd = event.odds?.[oddID] as Record<string, unknown> | undefined;
 
         if (!odd) {
+          // Distinguish a wrong playerID from a genuinely unsettled market before
+          // telling the reader to go grade it by hand. The roster is right here.
+          const idDiagnosis =
+            params.marketType === "player_prop" && params.playerID
+              ? diagnosePlayerIdMiss(event, params.playerID, params.marketLabel).message
+              : null;
           return {
             content: [
               {
                 type: "text" as const,
-                text: `Event is final but no settlement data was returned for this market (${oddID}). Grade this one manually rather than guessing.`,
+                text:
+                  idDiagnosis ??
+                  `Event is final but no settlement data was returned for this market (${oddID}). Grade this one manually rather than guessing.`,
               },
             ],
           };

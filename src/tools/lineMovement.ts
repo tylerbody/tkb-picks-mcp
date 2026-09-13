@@ -5,6 +5,7 @@ import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
 import { SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
+import { diagnosePlayerIdMiss } from "../services/playerResolution.js";
 
 /**
  * LINE MOVEMENT
@@ -181,11 +182,15 @@ Error Handling:
         const odd = event.odds?.[oddID] as Record<string, unknown> | undefined;
 
         if (!odd) {
+          const idDiagnosis =
+            params.marketType === "player_prop" && params.playerID
+              ? diagnosePlayerIdMiss(event, params.playerID, params.marketLabel).message
+              : null;
           return {
             content: [
               {
                 type: "text" as const,
-                text: `No market found for ${oddID} on this event.`,
+                text: idDiagnosis ?? `No market found for ${oddID} on this event.`,
               },
             ],
           };
