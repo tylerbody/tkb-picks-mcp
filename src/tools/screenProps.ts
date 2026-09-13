@@ -97,14 +97,37 @@ const HIT_RATE_CONCURRENCY = 3;
  * tool ceiling via BDL's 1,100ms throttle, so roughly 2 extra requests per extra
  * player. Four more MLB players is about 9 seconds.
  *
- * CFB STAYS AT 18 DELIBERATELY. Its rosters are genuinely huge and a cap is doing
- * real work there rather than quietly losing everyday starters.
+ * CFB'S CAP IS REMOVED IN v2.8.12, AND THE OLD REASONING WAS WRONG.
+ *
+ * v2.6.3 left CFB at 18 on the grounds that "rosters are genuinely huge and a cap
+ * is doing real work." The first half is true and the second was never measured.
+ *
+ * Measured 2026-09-13 on Mississippi State / UL Monroe, an SGO entity counter read
+ * before and after each screen:
+ *
+ *   18 players screened  ->  1 SGO entity, CFBD weeks backfilled once
+ *   30 players screened  ->  1 SGO entity, 0 additional CFBD requests
+ *
+ * Identical. The cost does not scale with players in ANY of its three components:
+ * SGO bills per EVENT object and the event is fetched once; CFBD bills per WEEK
+ * and weeks are cached permanently (1,377 cache hits against 36 requests in that
+ * session); and CFB skips the SGO availability probe entirely, so it has none of
+ * the per-player probe cost MLB carries.
+ *
+ * Meanwhile the cap was discarding 31 of 49 attached players on that one game, on
+ * SGO's response order, which sorts by nothing. So it was not "doing real work" -
+ * it was throwing away two thirds of the board at random, for no saving.
+ *
+ * WHAT ACTUALLY BOUNDS CFB is the 60-second tool ceiling, and CFB is the sport
+ * least exposed to it: its rates are cache reads rather than throttled BDL
+ * requests. The screen now reports its own duration so that ceiling becomes
+ * visible before it is hit, rather than arriving as a timeout.
  */
 const DEFAULT_MAX_PLAYERS: Record<SportKey, number> = {
   mlb: 24,   // rosters observed at 20-22
   wnba: 20,  // rosters observed at 14, ample headroom
   nfl: 24,   // 22 observed on a Week 1 game
-  cfb: 18,   // large rosters, cap is intentional
+  cfb: 80,   // 49 observed; measured to cost nothing extra, so do not clip
   atp: 0,    // no roster - refused by the capability guard before reaching here
   wta: 0,
 };
@@ -311,6 +334,8 @@ interface ScreenedProp {
   availabilityFlag: string;
   availabilityNote: string | null;
   seasonWarning: string | null;
+  currentSeasonGames: number;
+  priorSeasonGames: number;
   /** True when the counted games are not recent - see services/sampleRecency.ts. */
   sampleIsStale: boolean;
   /** Prose naming which recency check fired, or null when the sample is current. */
@@ -444,10 +469,25 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
         maxPlayers: z
           .number()
           .int()
-          .max(30)
+          .max(80)
           .optional()
           .describe(
-            "Cap on players screened. Defaults BY SPORT: mlb 24, nfl 24, wnba 20, cfb 18. Raise only if a roster is unusually large - the cut is on SGO's response order, NOT on player quality, so a low cap silently removes everyday starters rather than fringe players. Costs latency, not quota."
+            "Cap on players screened. Defaults BY SPORT: mlb 24, nfl 24, wnba 20, cfb 80. The cut is on SGO's response order, NOT on player quality, so a low cap silently removes everyday starters rather than fringe players. MEASURED 2026-09-13: screening 18 vs 30 players on the same CFB event cost 1 SGO entity either way and 0 extra CollegeFootballData requests, because SGO bills per event and CFBD bills per week. It costs LATENCY, not quota - see screenDurationMs in the response."
+          ),
+        minCurrentSeasonGames: z
+          .number()
+          .int()
+          .min(0)
+          .default(0)
+          .describe(
+            "Require at least this many counted games from the CURRENT season. Default 0, which changes nothing. " +
+              "WHAT THIS IS FOR, measured 2026-09-13 on a Week 2 CFB board: Ayden Williams ranked SECOND at 11 of 13 " +
+              "with edge 0.311, on a sample where every counted game was from 2025 and his most recent appearance " +
+              "was 253 days earlier. The availability tool said separately that he had played 0 of the team's last " +
+              "2 games. The connector printed both warnings and ranked him second anyway, because edge is computed " +
+              "from the blended rate and nothing demotes a stale sample. " +
+              "Set 1 or 2 in the opening weeks of a season to require a player has actually appeared THIS year. " +
+              "Leave at 0 in Week 1, when nobody has a current-season sample and this would empty the board."
           ),
         maxPerPlayer: z
           .number()
@@ -462,7 +502,7 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           .string()
           .default(DEFAULT_BOOKMAKERS)
           .describe(
-            "Comma-separated bookmaker IDs to price against. DEFAULTS to 'draftkings,fanduel,betmgm,caesars' - the books this account's audience can actually bet. Pass a different list to override, or 'all' to disable the filter entirely (diagnostic only, not for building threads). Without a filter the screen prices each prop from whichever book appears first in SGO's response: measured across 6 MLB games on 2026-08-24, only 69% of props came from DraftKings or FanDuel, with the rest split across Hard Rock, ProphetX, ESPN Bet and Bovada. Edge is computed from that price, so an unbettable one silently corrupts the RANKING, not just the display."
+            "Comma-separated bookmaker IDs to price against. DEFAULTS to the DEFAULT_BOOKMAKERS constant in src/constants.ts, which is the single source of truth - this text used to name the list inline and DRIFTED from it when hardrockbet was added, so it now points at the constant instead. Pass a different list to override, or 'all' to disable the filter entirely (diagnostic only, not for building threads). Without a filter the screen prices each prop from whichever book appears first in SGO's response: measured across 6 MLB games on 2026-08-24, only 69% of props came from DraftKings or FanDuel, with the rest split across Hard Rock, ProphetX, ESPN Bet and Bovada. Edge is computed from that price, so an unbettable one silently corrupts the RANKING, not just the display."
           ),
         includePriorSeason: z
           .boolean()
@@ -488,6 +528,7 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       // returning 502 on two consecutive calls and BDL rate-limiting 217 of 235
       // requests, so this is a condition that happens, not a hypothetical.
       try {
+        const screenStartedAt = Date.now();
       // Without this, an empty tennis catalog produces "No countable markets for
       // atp. Available: " with nothing after the colon - accurate, and useless
       // about why. The capability message explains that it is structural.
@@ -755,7 +796,7 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
         return info;
       };
 
-      const screened = await mapWithConcurrency(
+      let screened = await mapWithConcurrency(
         candidates,
         HIT_RATE_CONCURRENCY,
         async (c): Promise<ScreenedProp | null> => {
@@ -962,6 +1003,12 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
             // safeguard that was working. Choose the SOURCE first, then its note.
             availabilityNote: avail ? avail.note : rate.recentAvailability.note,
             seasonWarning: rate.seasonWarning,
+            // SURFACED AS NUMBERS, not only as prose. seasonWarning is a sentence,
+            // and a sentence cannot be sorted, filtered or eyeballed at a glance
+            // across twelve props. These two are what make "has he played this
+            // year" answerable without reading every warning string.
+            currentSeasonGames: rate.currentSeasonGames,
+            priorSeasonGames: rate.priorSeasonGames,
             // DELIBERATELY A WARNING, NOT A FILTER. Chris Bassitt screened 8 of 10
             // on 2026-08-19 with one of those ten starts inside the last 30 days,
             // the rest from May and June, and seasonWarning was null because it
@@ -973,6 +1020,27 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           };
         }
       );
+
+      // ---- CURRENT-SEASON FLOOR, APPLIED BEFORE RANKING ----
+      //
+      // Deliberately a FILTER here rather than another warning. This connector's
+      // standing rule is warnings-not-filters, and that rule assumes the writer
+      // reads the warning. Measured 2026-09-13, that assumption broke: a prop
+      // carrying BOTH "every game in this sample is from a PRIOR season" and "most
+      // recent appearance was 253 days ago" still ranked second on the board,
+      // because those strings are annotations and the sort reads `edge`.
+      //
+      // So the writer gets a knob rather than a lecture. Default 0 keeps the old
+      // behaviour exactly; setting it makes the floor structural.
+      const staleDropped =
+        input.minCurrentSeasonGames > 0
+          ? screened.filter((p) => p.currentSeasonGames < input.minCurrentSeasonGames)
+          : [];
+      if (staleDropped.length) {
+        screened = screened.filter(
+          (p) => p.currentSeasonGames >= input.minCurrentSeasonGames
+        );
+      }
 
       screened.sort((a, b) =>
         input.rankBy === "hitRate"
@@ -1037,6 +1105,22 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       // drawn from a PRIOR season, and a board that does not announce that invites
       // last year's form being written as current. Same argument as the book filter
       // line: a behaviour you cannot observe is one you are assuming.
+      // LATENCY IS THE REAL CEILING NOW, so make it readable. Removing the CFB
+      // cap costs no quota (measured), but the 60-second tool limit is unchanged,
+      // and a timeout tells you nothing about how close you were. This does.
+      const screenDurationMs = Date.now() - screenStartedAt;
+
+      const seasonFloorLine = staleDropped.length
+        ? `\n\nCURRENT-SEASON FLOOR: ${staleDropped.length} prop(s) removed for having fewer than ` +
+          `${input.minCurrentSeasonGames} counted game(s) this season - ` +
+          staleDropped
+            .slice(0, 5)
+            .map((p) => `${p.playerName} ${p.market} (${p.currentSeasonGames} this year)`)
+            .join(", ") +
+          `${staleDropped.length > 5 ? ", ..." : ""}. These are NOT bad players; their samples are last season's. ` +
+          `Lower minCurrentSeasonGames to see them.`
+        : "";
+
       const priorSeasonLine = input.includePriorSeason
         ? ` PRIOR-SEASON WINDOW ON: the lookback is widened to 400 days, so these ` +
           `rates may be drawn wholly or partly from LAST season. Check seasonWarning ` +
@@ -1051,13 +1135,13 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
 
       const routing =
         bdlServed + sgoFallback + cfbdServed === 0
-          ? `\n\n${bookLine}${priorSeasonLine}${rosterLine}${diversityLine}` +
+          ? `\n\n${bookLine}${priorSeasonLine}${seasonFloorLine}${rosterLine}${diversityLine}` +
             (input.sport === "cfb" && !cfbd
               ? ` NO CFB RATE SOURCE: CFBD_API_KEY is not set, so no CFB prop can be ` +
                 `scored. This board is empty for that reason, NOT because the market ` +
                 `is empty - run tkb_get_prop_board to see what is actually priced.`
               : "")
-          : `\n\n${bookLine}${priorSeasonLine}${rosterLine}${diversityLine} Rate sources: ${bdlServed} from BALLDONTLIE (no SGO quota), ` +
+          : `\n\n${bookLine}${priorSeasonLine}${seasonFloorLine}${rosterLine}${diversityLine} Rate sources: ${bdlServed} from BALLDONTLIE (no SGO quota), ` +
             `${sgoFallback} from SportsGameOdds` +
             (cfbdServed ? `, ${cfbdServed} from CollegeFootballData` : "") +
             `.` +
@@ -1109,6 +1193,8 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
         structuredContent: {
           eventID: input.eventID,
           matchup: `${teamNames[awayID]} @ ${teamNames[homeID]}`,
+          screenDurationMs,
+          droppedByCurrentSeasonFloor: staleDropped.length,
           pricedMarketsScreened: candidates.length,
           qualified: screened.length,
           playersScreened: allowedPlayerIDs.size,

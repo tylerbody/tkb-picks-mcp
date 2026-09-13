@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
+import type { BDLClient } from "../services/bdlClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
@@ -14,7 +15,7 @@ import {
   SPREAD_SIGN_CONVENTION,
 } from "../services/pickGrader.js";
 import { lookupPlayerStat } from "../services/hitRateAggregator.js";
-import { assessFinality } from "../services/eventStatus.js";
+import { assessFinality, crossCheckFinality } from "../services/eventStatus.js";
 import { diagnosePlayerIdMiss } from "../services/playerResolution.js";
 
 /**
@@ -103,7 +104,7 @@ interface GradedPick {
   note?: string | null;
 }
 
-export function registerBatchGradeTool(server: McpServer, sgo: SGOClient) {
+export function registerBatchGradeTool(server: McpServer, sgo: SGOClient, bdl?: BDLClient) {
   server.registerTool(
     "tkb_grade_slate",
     {
@@ -137,7 +138,11 @@ Examples:
   - Don't use when: games are still live - unfinished events return NOT_FINAL, never a guess
 
 Error Handling:
-  - NOT_FINAL for any event SGO has not finalized
+  - NOT_FINAL for any event SGO has not finalized. If SGO merely has NO status on it
+    (an ingest lag rather than a live game), BALLDONTLIE is asked once as a second
+    source and the pick grades only if BDL calls it final AND the two scores match
+    exactly. A live or cancelled status is never overridden, and the scores graded
+    against are always SGO's.
   - NEEDS_POSTED_LINE for a line market with no postedLine - a refusal, not a failure
   - NO_DATA when the event is final but the market has no settlement value - never guesses
   - VOID when a player does not appear in the box score at all: the pick had no action.
@@ -224,12 +229,29 @@ Error Handling:
           // every pick on it was graded off the live score. Checked once per event
           // rather than once per pick, since the answer is a property of the game.
           const finality = assessFinality(event);
-          if (!finality.final) {
+
+          // ADDED v2.8.12. Unknown status is not the same as unfinished. One BDL
+          // request per STUCK event only - a slate of gradeable games costs zero
+          // extra calls, and a slate SGO has not caught up with costs one each.
+          // See services/eventStatus.ts for why it can only ever move unknown to
+          // final, and why it never supplies a score.
+          let crossCheckNote = "";
+          let finalityResolved = finality.final;
+          if (!finality.final && finality.label === "unknown") {
+            const cross = await crossCheckFinality(bdl, params.sport, event);
+            crossCheckNote = cross.note;
+            finalityResolved = cross.resolved;
+          }
+
+          if (!finalityResolved) {
+            const detail = crossCheckNote
+              ? `${finality.reason}\n\n${crossCheckNote}`
+              : finality.reason;
             for (const p of picks) {
               graded.push({
                 ref: p.ref,
                 result: "NOT_FINAL",
-                detail: finality.reason,
+                detail,
                 statusLabel: finality.label,
               });
             }
@@ -237,7 +259,13 @@ Error Handling:
           }
 
           for (const p of picks) {
-            graded.push(gradeOne(params.sport, event, p));
+            const row = gradeOne(params.sport, event, p);
+            // A grade that SGO's own status field does not support must not read
+            // like an ordinary one. Carry the provenance onto every row it covers.
+            if (!finality.final && crossCheckNote) {
+              row.detail = row.detail ? `${row.detail}\n\n${crossCheckNote}` : crossCheckNote;
+            }
+            graded.push(row);
           }
         }
 

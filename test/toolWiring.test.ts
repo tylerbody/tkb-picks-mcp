@@ -322,8 +322,8 @@ const SWEEP: [string, (s: never, c: Clients) => void, Record<string, unknown>][]
   ["tkb_debug_cfbd_stats", (s, c) => registerCfbdStatsProbeTool(s, c.cfbd), { year: 2026, week: 2 }],
   ["tkb_get_mlb_matchup", (s, c) => registerMlbMatchupTool(s, c.mlb), { date: "2026-09-13" }],
   ["tkb_verify_roster", (s, c) => registerVerifyRosterTool(s, c.bdl), { sport: "cfb", playerName: "Cobb", expectedTeam: "Auburn" }],
-  ["tkb_grade_pick", (s, c) => registerGradePicksTool(s, c.sgo), { sport: "nfl", eventID: EVENT_ID, marketType: "moneyline", side: "home" }],
-  ["tkb_grade_slate", (s, c) => registerBatchGradeTool(s, c.sgo), { sport: "nfl", picks: [{ ref: "r", eventID: EVENT_ID, marketType: "moneyline", side: "home" }] }],
+  ["tkb_grade_pick", (s, c) => registerGradePicksTool(s, c.sgo, c.bdl), { sport: "nfl", eventID: EVENT_ID, marketType: "moneyline", side: "home" }],
+  ["tkb_grade_slate", (s, c) => registerBatchGradeTool(s, c.sgo, c.bdl), { sport: "nfl", picks: [{ ref: "r", eventID: EVENT_ID, marketType: "moneyline", side: "home" }] }],
   ["tkb_get_line_movement", (s, c) => registerLineMovementTool(s, c.sgo), { sport: "nfl", eventID: EVENT_ID, marketType: "total", side: "over" }],
 ];
 
@@ -460,4 +460,183 @@ describe("SWEEP 3 - every tool survives an event with no odds and no players", (
       assert.doesNotMatch(text, CRASH, `${name} leaked an internal error on an empty event:\n${text.slice(0, 400)}`);
     });
   }
+});
+
+/**
+ * v2.8.12 - THE SECOND-SOURCE CHECK IS WIRED, AND ONLY WHERE IT SHOULD BE.
+ *
+ * The pure reconciliation is covered in eventStatus.test.ts. What that file cannot
+ * see is whether the graders CALL it, on which events, and whether the result
+ * reaches the reader. That is the exact seam v2.8.9 shipped dead, so it gets
+ * asserted here rather than assumed.
+ */
+const STUCK_EVENT = {
+  eventID: EVENT_ID,
+  // Scores present, NO readable status. The real shape of an SGO ingest lag.
+  status: { startsAt: "2026-09-13T17:00:00Z" },
+  teams: {
+    home: { teamID: "CAROLINA_PANTHERS_NFL", names: { long: "Carolina Panthers" }, score: 17 },
+    away: { teamID: "CHICAGO_BEARS_NFL", names: { long: "Chicago Bears" }, score: 24 },
+  },
+  players: {},
+  odds: {},
+};
+
+const stuckSgo = {
+  ...(SGO as object),
+  getAllEvents: async () => [STUCK_EVENT],
+  getEvents: async () => ({ data: [STUCK_EVENT] }),
+} as never;
+
+const confirmingBdl = (calls: string[][]) =>
+  ({
+    ...(BDL as object),
+    getGames: async (sport: string, params: { dates?: string[] }) => {
+      calls.push([sport, ...(params.dates ?? [])]);
+      return {
+        data: [
+          {
+            status: "Final",
+            home_team: { full_name: "Carolina Panthers" },
+            visitor_team: { full_name: "Chicago Bears" },
+            home_team_score: 17,
+            visitor_team_score: 24,
+          },
+        ],
+      };
+    },
+  }) as never;
+
+describe("v2.8.12 - BDL breaks the tie on a stuck event, and stays out of the way otherwise", () => {
+  test("tkb_grade_pick GRADES a stuck game once BDL confirms it, and says where that came from", async () => {
+    const calls: string[][] = [];
+    const { server, handlers } = captureServer();
+    registerGradePicksTool(server as never, stuckSgo, confirmingBdl(calls));
+    const r = await handlers["tkb_grade_pick"]({
+      sport: "nfl",
+      eventID: EVENT_ID,
+      marketType: "moneyline",
+      side: "away",
+    } as never);
+    const text = r.content[0].text;
+    assert.match(text, /^WIN/, "Bears 24 Panthers 17 - away moneyline wins");
+    assert.match(text, /SECOND SOURCE/, "must disclose that SGO did not supply the finality");
+    assert.equal(calls.length, 1, "exactly one BDL request for one stuck event");
+  });
+
+  test("tkb_grade_slate does the same, and asks BDL ONCE for a whole event", async () => {
+    const calls: string[][] = [];
+    const { server, handlers } = captureServer();
+    registerBatchGradeTool(server as never, stuckSgo, confirmingBdl(calls));
+    const r = await handlers["tkb_grade_slate"]({
+      sport: "nfl",
+      picks: [
+        { ref: "a", eventID: EVENT_ID, marketType: "moneyline", side: "away" },
+        { ref: "b", eventID: EVENT_ID, marketType: "moneyline", side: "home" },
+      ],
+    } as never);
+    const text = r.content[0].text;
+    assert.doesNotMatch(text, /NOT_FINAL/, "BDL confirmed it, so nothing should be refused");
+    assert.equal(calls.length, 1, "one request per EVENT, not per pick");
+  });
+
+  test("A LIVE GAME IS NEVER CROSS-CHECKED. Affirmative information is not overturned.", async () => {
+    const calls: string[][] = [];
+    const liveEvent = { ...STUCK_EVENT, status: { displayShort: "4th", live: true, startsAt: "2026-09-13T17:00:00Z" } };
+    const liveSgo = { ...(SGO as object), getAllEvents: async () => [liveEvent] } as never;
+    const { server, handlers } = captureServer();
+    registerGradePicksTool(server as never, liveSgo, confirmingBdl(calls));
+    const r = await handlers["tkb_grade_pick"]({
+      sport: "nfl",
+      eventID: EVENT_ID,
+      marketType: "moneyline",
+      side: "away",
+    } as never);
+    assert.match(r.content[0].text, /STILL IN PROGRESS/);
+    assert.equal(calls.length, 0, "must not spend a request, and must not be able to override a live status");
+  });
+
+  test("BDL disagreeing leaves the refusal standing, with BOTH feeds quoted", async () => {
+    const disagreeing = {
+      ...(BDL as object),
+      getGames: async () => ({
+        data: [
+          {
+            status: "Final",
+            home_team: { full_name: "Carolina Panthers" },
+            visitor_team: { full_name: "Chicago Bears" },
+            home_team_score: 20,
+            visitor_team_score: 24,
+          },
+        ],
+      }),
+    } as never;
+    const { server, handlers } = captureServer();
+    registerGradePicksTool(server as never, stuckSgo, disagreeing);
+    const r = await handlers["tkb_grade_pick"]({
+      sport: "nfl",
+      eventID: EVENT_ID,
+      marketType: "moneyline",
+      side: "away",
+    } as never);
+    const text = r.content[0].text;
+    assert.match(text, /NOT GRADED/);
+    assert.match(text, /DISAGREE ON THE SCORE/);
+  });
+
+  test("a BDL outage cannot fail a grade - it degrades to the original refusal", async () => {
+    const brokenBdl = {
+      ...(BDL as object),
+      getGames: async () => {
+        throw new Error("BALLDONTLIE has no nfl games endpoint (404)");
+      },
+    } as never;
+    const { server, handlers } = captureServer();
+    registerGradePicksTool(server as never, stuckSgo, brokenBdl);
+    const r = await handlers["tkb_grade_pick"]({
+      sport: "nfl",
+      eventID: EVENT_ID,
+      marketType: "moneyline",
+      side: "away",
+    } as never);
+    const text = r.content[0].text;
+    assert.match(text, /NOT GRADED/);
+    assert.doesNotMatch(text, CRASH);
+  });
+});
+
+/**
+ * v2.8.12 - THE CFB ROSTER CAP IS GONE, AND THE SCHEMA HAS TO AGREE.
+ *
+ * The cap lived in two places that could disagree: a per-sport default and a Zod
+ * `.max()`. Raising one and not the other would have left the default unreachable
+ * for any caller who passed the value explicitly, which is the quietest possible
+ * version of this bug.
+ */
+describe("v2.8.12 - maxPlayers bounds", () => {
+  const schemaFor = (register: (s: never) => void) => {
+    let schema: { parse: (v: unknown) => unknown } | undefined;
+    const server = {
+      registerTool: (_n: string, def: { inputSchema: Record<string, { parse: (v: unknown) => unknown }> }) => {
+        schema = def.inputSchema.maxPlayers;
+      },
+    };
+    register(server as never);
+    return schema!;
+  };
+
+  test("80 is accepted - a full CFB two-deep is not an unreasonable ask", () => {
+    const s = schemaFor((srv) => registerScreenPropsTool(srv, SGO, BDL, CFBD));
+    assert.equal(s.parse(80), 80);
+  });
+
+  test("the old ceiling of 30 no longer rejects the new default", () => {
+    const s = schemaFor((srv) => registerScreenPropsTool(srv, SGO, BDL, CFBD));
+    assert.doesNotThrow(() => s.parse(49)); // 49 = the roster size actually observed
+  });
+
+  test("there is still a ceiling", () => {
+    const s = schemaFor((srv) => registerScreenPropsTool(srv, SGO, BDL, CFBD));
+    assert.throws(() => s.parse(81));
+  });
 });

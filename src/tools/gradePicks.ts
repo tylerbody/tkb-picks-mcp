@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
+import type { BDLClient } from "../services/bdlClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
@@ -13,7 +14,7 @@ import {
   SPREAD_SIGN_CONVENTION,
 } from "../services/pickGrader.js";
 import { lookupPlayerStat } from "../services/hitRateAggregator.js";
-import { assessFinality } from "../services/eventStatus.js";
+import { assessFinality, crossCheckFinality } from "../services/eventStatus.js";
 import { diagnosePlayerIdMiss } from "../services/playerResolution.js";
 
 /**
@@ -84,7 +85,7 @@ const MARKET_TYPE_CODE: Record<string, "ml" | "sp" | "ou"> = {
   player_prop: "ou",
 };
 
-export function registerGradePicksTool(server: McpServer, sgo: SGOClient) {
+export function registerGradePicksTool(server: McpServer, sgo: SGOClient, bdl?: BDLClient) {
   server.registerTool(
     "tkb_grade_pick",
     {
@@ -104,6 +105,11 @@ grading against it compares the result to itself.
 SPREAD SIGN: ${SPREAD_SIGN_CONVENTION} A dropped minus sign cannot be detected, so
 every spread grade returns the final score, the margin, what the pick needed and the
 arithmetic. Read that line before logging the result.
+
+FINALITY: an unfinished game returns NOT_FINAL rather than a guess. When SGO has no
+readable status at all - its ingest lagging the final whistle, not a game in progress -
+BALLDONTLIE is checked once, and the pick grades only if BDL calls it final AND both
+feeds report the same score. A live or cancelled status is never overridden.
 
 Returns: result (win/loss/push), the value compared against the line - for a spread
 that is the MARGIN, not a team's score - the line graded against, and for spreads a
@@ -244,22 +250,51 @@ Error Handling:
         // fetch while the game was in the 4th quarter, and was graded a confident
         // WIN off the current score. See services/eventStatus.ts for the full case.
         const finality = assessFinality(event);
-        if (!finality.final) {
+
+        // ---- ADDED v2.8.12: ASK A SECOND FEED BEFORE REFUSING ON "UNKNOWN" ----
+        //
+        // The refusal above is correct and stays correct. What it was not is
+        // FINISHED: SGO's status ingest lags the final whistle, so a game that
+        // plainly ended sits in an unknown status for minutes while the grader
+        // tells the user to come back later, over and over.
+        //
+        // BALLDONTLIE has the same game on a key with no monthly object cap. One
+        // request per stuck event. It can only ever move unknown -> final, never
+        // overturn CANCELLED or a live status, and it never supplies a score.
+        // See services/eventStatus.ts for the three conditions it enforces.
+        let crossCheckNote = "";
+        let finalityResolved = finality.final;
+        if (!finality.final && finality.label === "unknown") {
+          const cross = await crossCheckFinality(bdl, params.sport, event);
+          crossCheckNote = cross.note;
+          finalityResolved = cross.resolved;
+        }
+
+        if (!finalityResolved) {
+          const reason = crossCheckNote
+            ? `${finality.reason}\n\n${crossCheckNote}`
+            : finality.reason;
           return {
             content: [
               {
                 type: "text" as const,
-                text: `NOT GRADED - ${finality.reason}`,
+                text: `NOT GRADED - ${reason}`,
               },
             ],
             structuredContent: {
               result: "NOT_FINAL",
               eventID: event.eventID,
               statusLabel: finality.label,
-              reason: finality.reason,
+              reason,
+              secondSourceChecked: crossCheckNote.length > 0,
             },
           };
         }
+
+        // When the second source is what made this gradeable, SAY SO on the result.
+        // A grade that contradicts SGO's own status field must never look like an
+        // ordinary one; the reader has to be able to see where the finality came from.
+        const finalitySource = !finality.final && crossCheckNote ? `\n\n${crossCheckNote}` : "";
 
         const homeScore = event.teams.home.score;
         const awayScore = event.teams.away.score;
@@ -291,7 +326,7 @@ Error Handling:
             content: [
               {
                 type: "text" as const,
-                text: `${result}: ${params.side} moneyline, final ${awayName} ${awayScore} - ${homeName} ${homeScore}.\n\n${JSON.stringify(output, null, 2)}`,
+                text: `${result}: ${params.side} moneyline, final ${awayName} ${awayScore} - ${homeName} ${homeScore}.${finalitySource}\n\n${JSON.stringify(output, null, 2)}`,
               },
             ],
             structuredContent: output,
@@ -347,7 +382,7 @@ Error Handling:
             content: [
               {
                 type: "text" as const,
-                text: `${graded.result}: ${graded.explanation}\n\n${JSON.stringify(output, null, 2)}`,
+                text: `${graded.result}: ${graded.explanation}${finalitySource}\n\n${JSON.stringify(output, null, 2)}`,
               },
             ],
             structuredContent: output,
@@ -439,6 +474,7 @@ Error Handling:
                 text:
                   `${headline}` +
                   (outcome.note ? `\n\n${outcome.note}` : "") +
+                  finalitySource +
                   `\n\n${JSON.stringify(propOutput, null, 2)}`,
               },
             ],
@@ -463,7 +499,7 @@ Error Handling:
           content: [
             {
               type: "text" as const,
-              text: `${result}: ${label} - actual result ${actual}.\n\n${JSON.stringify(output, null, 2)}`,
+              text: `${result}: ${label} - actual result ${actual}.${finalitySource}\n\n${JSON.stringify(output, null, 2)}`,
             },
           ],
           structuredContent: output,

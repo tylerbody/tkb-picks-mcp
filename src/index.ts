@@ -113,7 +113,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.8.11";
+const SERVER_VERSION = "2.8.12";
 
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -131,12 +131,12 @@ function buildServer(): McpServer {
   registerWeatherTool(server, weather);
   registerPlayersTool(server, sgo);
   registerUsageTool(server, sgo, cfbd);
-  registerGradePicksTool(server, sgo);
+  registerGradePicksTool(server, sgo, bdl);
   registerScreenPropsTool(server, sgo, bdl, cfbd);
   registerCoverPlayerTool(server, sgo, bdl);
   registerTweetCharsTool(server);
   registerBdlStatsProbeTool(server, bdl);
-  registerBatchGradeTool(server, sgo);
+  registerBatchGradeTool(server, sgo, bdl);
   registerStreakScanTool(server, bdl);
   registerLineMovementTool(server, sgo);
   registerLiveMonitorTool(server, sgo);
