@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { narrowingOddID } from "../services/oddIdBuilder.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
@@ -355,7 +356,7 @@ Examples:
         const events = await sgo.getAllEvents({
           leagueID,
           eventIDs: input.eventID,
-          oddIDs: "points-home-game-ml-home",
+          oddIDs: narrowingOddID(input.sport as SportKey),
         });
 
         if (!events.length) {

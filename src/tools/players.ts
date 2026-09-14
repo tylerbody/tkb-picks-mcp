@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { narrowingOddID } from "../services/oddIdBuilder.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, participantModel, type SportKey } from "../constants.js";
@@ -88,7 +89,7 @@ Error Handling:
         const events = await sgo.getAllEvents({
           leagueID,
           eventIDs: params.eventID,
-          oddIDs: "points-home-game-ml-home",
+          oddIDs: narrowingOddID(params.sport),
         });
 
         if (!events.length) {

@@ -1,4 +1,5 @@
 import type { SGOClient } from "./sgoClient.js";
+import { narrowingOddID } from "./oddIdBuilder.js";
 import type { SportKey } from "../constants.js";
 import type { GameLogEntry, HitRateResult, SGOEvent } from "../types.js";
 import { seasonForDate, summarizeSeasons } from "./seasonBoundary.js";
@@ -232,7 +233,7 @@ export async function getPlayerHitRate(
     // some odds data unless oddIDs is passed. Requesting a single near-universal
     // moneyline oddID shrinks the odds payload to at most one market instead of
     // 1000+. This is the real fix for the OOM risk on this path.
-    oddIDs: "points-home-game-ml-home",
+    oddIDs: narrowingOddID(params.sport),
     limit: 100,
     // A SAFETY VALVE, NOT THE COST CONTROL. Set deliberately ABOVE what the sized
     // window can hold, so it never truncates a window and never silently drops

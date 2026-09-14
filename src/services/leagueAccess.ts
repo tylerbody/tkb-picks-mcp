@@ -1,4 +1,5 @@
 import { SPORT_CONFIG, SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { narrowingOddID } from "./oddIdBuilder.js";
 
 /**
  * WHICH LEAGUES CAN THIS KEY ACTUALLY SEE?
@@ -218,14 +219,14 @@ export async function probeLeagueReach(
         startsAfter: iso(now.getTime() - 45 * day),
         startsBefore: iso(now.getTime()),
         limit: 25,
-        oddIDs: "points-home-game-ml-home",
+        oddIDs: narrowingOddID(sport),
       }),
       client.getAllEvents({
         leagueID,
         startsAfter: iso(now.getTime()),
         startsBefore: iso(now.getTime() + 21 * day),
         limit: 25,
-        oddIDs: "points-home-game-ml-home",
+        oddIDs: narrowingOddID(sport),
       }),
     ]);
 

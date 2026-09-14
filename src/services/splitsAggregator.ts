@@ -1,4 +1,5 @@
 import type { SGOClient } from "./sgoClient.js";
+import { narrowingOddID } from "./oddIdBuilder.js";
 import type { SportKey } from "../constants.js";
 import type { TeamSplitRecord, SGOEvent } from "../types.js";
 
@@ -35,7 +36,7 @@ export async function getHomeRoadSplit(
     // Only win/loss (from scores) is needed here, never odds - narrow the odds
     // payload to a single market to keep response size minimal. Same fix as
     // hitRateAggregator.ts.
-    oddIDs: "points-home-game-ml-home",
+    oddIDs: narrowingOddID(params.sport),
     limit: 100,
     // A CEILING OF 100 WOULD HAVE BEEN WRONG HERE. A full MLB season is 162
     // games, and SGO does not return them newest-first, so capping at 100 would
@@ -96,7 +97,7 @@ export async function getOpponentSplit(
     finalized: true,
     startsAfter,
     startsBefore: new Date().toISOString(),
-    oddIDs: "points-home-game-ml-home",
+    oddIDs: narrowingOddID(params.sport),
     limit: 100,
     // A CEILING OF 100 WOULD HAVE BEEN WRONG HERE. A full MLB season is 162
     // games, and SGO does not return them newest-first, so capping at 100 would

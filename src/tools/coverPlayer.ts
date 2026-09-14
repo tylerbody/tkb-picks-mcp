@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { narrowingOddID } from "../services/oddIdBuilder.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import type { BDLClient } from "../services/bdlClient.js";
@@ -226,7 +227,7 @@ NOT a betting-value tool. It ranks marketability and availability only.`,
           finalized: true,
           startsAfter: windowStart.toISOString(),
           startsBefore: now.toISOString(),
-          oddIDs: "points-home-game-ml-home",
+          oddIDs: narrowingOddID(input.sport as SportKey),
           limit: RECENT_GAMES_WINDOW,
         });
         return teamEvents.slice(0, RECENT_GAMES_WINDOW);

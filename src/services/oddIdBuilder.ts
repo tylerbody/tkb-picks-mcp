@@ -1,3 +1,5 @@
+import { matchLinePeriodFor, type SportKey } from "../constants.js";
+
 /**
  * SGO oddID format is systematic: {statID}-{entity}-{periodID}-{betType}-{side}
  *
@@ -98,6 +100,58 @@ export const PERIOD_CODES: Record<string, string> = {
  * favor of 1h (1st Half) for Baseball". 1ix5 still resolves today and is left in
  * place, but MLB first-half markets should be built on 1h going forward.
  */
+
+/**
+ * THE "JUST SHRINK THE RESPONSE" ODDID, PER SPORT.
+ *
+ * ============================================================================
+ * WHY THIS IS A FUNCTION AND NOT A CONSTANT, AND WHAT IT COST TO FIND OUT
+ * ============================================================================
+ *
+ * Ten call sites in this repo pass a single throwaway oddID to SGO for one reason:
+ * without it, SGO attaches every market on the event and a response that should be
+ * a few kilobytes becomes megabytes. v1.2.0 added it as the fix for a real
+ * out-of-memory crash. The string used everywhere was the literal
+ * `points-home-game-ml-home`.
+ *
+ * THAT STRING IS ALSO A FILTER. SGO returns only events that HAVE the requested
+ * market, so an oddID no event carries returns NO EVENTS AT ALL.
+ *
+ * Soccer match lines live on the `reg` period, not `game`. So every one of those
+ * ten call sites silently excluded EPL and UCL entirely - the schedule tool
+ * returned an empty slate for a league playing that week, and v2.9.0's own
+ * league-access probe reported those leagues as possibly unentitled.
+ *
+ * MEASURED LIVE 2026-09-14, on the deployed v2.9.0 build:
+ *
+ *   tkb_get_schedule sport="epl"                     -> no events
+ *   tkb_check_league_access                          -> EPL "nothing either direction"
+ *   tkb_get_odds sport="epl" teamName="Arsenal"      -> Brighton vs Arsenal,
+ *                                                       points-home-reg-ml-home,
+ *                                                       +270 / -340, FanDuel
+ *
+ * The league was entitled and playing the whole time. The one tool that built its
+ * oddID through matchLinePeriodFor found it instantly; the ten that hard-coded
+ * `game` could not see it.
+ *
+ * This is the repo's own recurring lesson in a new costume, recorded in v2.6.0 as
+ * "the fixes were correct, the audits were scoped to the file the symptom appeared
+ * in". v2.9.0 fixed the period for match lines, in the files where match lines are
+ * READ, and did not audit the files where an oddID is used merely to make a
+ * response smaller. A narrowing parameter did not look like a market lookup.
+ *
+ * So it is one exported function now. The next sport whose full-event period is not
+ * `game` is a row in matchLinePeriodFor, not another ten-site audit.
+ */
+export function narrowingOddID(sport: SportKey): string {
+  return buildOddID({
+    statID: "points",
+    entity: "home",
+    period: matchLinePeriodFor(sport),
+    betType: "ml",
+    side: "home",
+  });
+}
 
 export function buildOddID(params: {
   statID: string;

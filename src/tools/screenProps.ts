@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { narrowingOddID } from "../services/oddIdBuilder.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
@@ -235,7 +236,7 @@ async function probeTeamAvailability(
         startsAfter: windowStart.toISOString(),
         startsBefore: now.toISOString(),
         // Narrow the odds payload to a single market - only results are read here.
-        oddIDs: "points-home-game-ml-home",
+        oddIDs: narrowingOddID(sport),
         limit: 30,
         // Belt and braces with the maxPages: 1 below. maxEvents states the
         // intent ("thirty games") in the same terms every other call site now

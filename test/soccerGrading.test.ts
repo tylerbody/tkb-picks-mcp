@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 
 import { gradeSoccerMoneyline, gradeMoneyline, DRAW_CONVENTION } from "../src/services/pickGrader.js";
 import { matchLinePeriodFor, hasDrawOutcome, REGULATION_MATCH_LINE_SPORTS } from "../src/constants.js";
-import { buildOddID, PERIOD_CODES } from "../src/services/oddIdBuilder.js";
+import { buildOddID, PERIOD_CODES, narrowingOddID } from "../src/services/oddIdBuilder.js";
+import { SUPPORTED_SPORTS } from "../src/constants.js";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * SOCCER BREAKS TWO ASSUMPTIONS THIS CONNECTOR HELD EVERYWHERE ELSE:
@@ -167,5 +171,65 @@ describe("period codes added in v2.9.0 match SGO's published table", () => {
     // and this is the side the table is on.
     assert.equal(PERIOD_CODES["1st_half"], "1h");
     assert.equal(PERIOD_CODES["2nd_half"], "2h");
+  });
+});
+
+/**
+ * v2.9.1 REGRESSION - THE NARROWING ODDID IS ALSO A FILTER.
+ *
+ * Ten call sites passed the literal `points-home-game-ml-home` to SGO purely to stop
+ * it serialising every market into a response. That string is ALSO a filter: SGO
+ * returns only events that carry the requested market, so on soccer - whose match
+ * lines live on `reg` - every one of those calls returned NOTHING.
+ *
+ * Measured live on the deployed v2.9.0 build, 2026-09-14:
+ *
+ *   tkb_get_schedule sport="epl"                 -> no events
+ *   tkb_check_league_access                      -> EPL "nothing either direction"
+ *   tkb_get_odds  sport="epl" teamName="Arsenal" -> Brighton vs Arsenal, +270/-340
+ *
+ * The league was entitled and playing all along. The one tool that built its oddID
+ * through matchLinePeriodFor found it; the ten that hard-coded `game` could not.
+ */
+describe("narrowingOddID - v2.9.1", () => {
+  test("SOCCER GETS reg, which is the whole bug", () => {
+    assert.equal(narrowingOddID("epl"), "points-home-reg-ml-home");
+    assert.equal(narrowingOddID("ucl"), "points-home-reg-ml-home");
+  });
+
+  test("every other sport is unchanged from the literal it replaced", () => {
+    for (const s of ["mlb", "wnba", "nfl", "cfb", "cbb", "ufc", "atp", "wta"] as const) {
+      assert.equal(narrowingOddID(s), "points-home-game-ml-home", `${s} must not change`);
+    }
+  });
+
+  test("it agrees with matchLinePeriodFor for every sport, by construction", () => {
+    for (const s of SUPPORTED_SPORTS) {
+      const expected = matchLinePeriodFor(s) === "regulation" ? "reg" : "game";
+      assert.equal(narrowingOddID(s).split("-")[2], expected, `${s} period segment`);
+    }
+  });
+
+  test("NO CALL SITE HARD-CODES THE OLD LITERAL ANY MORE", () => {
+    // The point of the fix is that there is ONE definition. A new hard-coded copy
+    // would reintroduce the bug in a file nobody thinks of as a market lookup,
+    // which is exactly how it survived v2.9.0.
+    const root = dirname(fileURLToPath(import.meta.url));
+    const srcDir = join(root, "..", "src");
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith(".ts")) {
+          const text = readFileSync(full, "utf8");
+          // oddIdBuilder.ts documents the string in its own header, which is fine.
+          if (entry.name === "oddIdBuilder.ts") continue;
+          if (text.includes('oddIDs: "points-home-game-ml-home"')) offenders.push(full);
+        }
+      }
+    };
+    walk(srcDir);
+    assert.deepEqual(offenders, [], `these files bypass narrowingOddID: ${offenders.join(", ")}`);
   });
 });

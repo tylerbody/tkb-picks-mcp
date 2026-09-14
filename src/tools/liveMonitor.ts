@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
-import { buildOddID } from "../services/oddIdBuilder.js";
+import { narrowingOddID, buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { SUPPORTED_SPORTS, matchLinePeriodFor, type SportKey } from "../constants.js";
 
@@ -119,7 +119,7 @@ Error Handling:
             const events = await sgo.getAllEvents({
               leagueID,
               eventIDs: eventID,
-              oddIDs: "points-home-game-ml-home",
+              oddIDs: narrowingOddID(params.sport),
             });
             event = events[0];
           } catch (err) {

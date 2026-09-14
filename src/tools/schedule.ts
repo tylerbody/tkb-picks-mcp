@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { narrowingOddID } from "../services/oddIdBuilder.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
@@ -168,7 +169,7 @@ Error Handling:
           startsAfter,
           startsBefore,
           limit: 100,
-          oddIDs: "points-home-game-ml-home",
+          oddIDs: narrowingOddID(params.sport),
         });
 
         // Recorded immediately: the next getAllEvents call overwrites it.
