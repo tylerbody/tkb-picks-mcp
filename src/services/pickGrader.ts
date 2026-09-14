@@ -188,6 +188,121 @@ export function gradeMoneyline(params: {
   return picked > other ? "WIN" : picked < other ? "LOSS" : "PUSH";
 }
 
+/* ===========================================================================
+ * SOCCER HAS A THIRD OUTCOME, AND EVERY GRADER ABOVE ASSUMES TWO
+ * ===========================================================================
+ *
+ * ADDED v2.9.0 with EPL and UCL.
+ *
+ * `gradeMoneyline` above returns PUSH when the scores are level, which is right
+ * for every sport this connector graded before soccer: in MLB, NFL, CFB, WNBA and
+ * tennis a level final score either cannot happen or means the bet had no action.
+ * In soccer a level score is a RESULT. It is the most common single scoreline in
+ * the sport, and it settles three different markets three different ways.
+ *
+ * Feeding a 1-1 draw into gradeMoneyline would have returned PUSH and logged the
+ * pick as no action, on a market where real money was lost. That is the same class
+ * of error as the spread sign bug in v2.8.7: correct arithmetic, wrong question.
+ *
+ * THREE-WAY (`ml3way`) IS UNAMBIGUOUS AND IS GRADED HERE:
+ *   picked home, home won            -> WIN
+ *   picked home, drew or lost        -> LOSS       (a draw is a LOSS, never a push)
+ *   picked draw, level               -> WIN
+ *   picked draw, either side won     -> LOSS
+ *
+ * TWO-WAY (`ml`) ON A DRAWN MATCH IS REFUSED, DELIBERATELY. Books sell two
+ * different products under a two-way soccer price: Draw No Bet, where a draw is a
+ * PUSH and the stake comes back, and moneyline-excluding-draw markets where a draw
+ * is a LOSS. SGO's documentation does not say which one its `ml` betTypeID carries
+ * for soccer, and the difference is the entire stake. This connector's standing
+ * rule is that a plausible-looking wrong answer is worse than no answer, so the
+ * draw case returns a refusal that names both possibilities and asks the human to
+ * read the posted market. A decided match on a two-way price needs no such help and
+ * grades normally.
+ */
+
+export const DRAW_CONVENTION =
+  "SOCCER DRAW RULE: on a three-way (1X2) price a draw is a LOSS for a team pick and " +
+  "a WIN for the draw itself. On a two-way price a draw is NOT graded automatically, " +
+  "because Draw No Bet (push) and draw-excluded (loss) are both sold as two-way " +
+  "soccer moneylines and SGO does not label which it is.";
+
+export type SoccerMoneylineGrade =
+  | { kind: "graded"; result: Verdict; explanation: string }
+  | { kind: "refused"; reason: string };
+
+export function gradeSoccerMoneyline(params: {
+  /** The side as posted. "draw" is only valid on a three-way price. */
+  side: "home" | "away" | "draw";
+  homeScore: number;
+  awayScore: number;
+  /** True when the pick was taken on a three-way (1X2) market. */
+  threeWay: boolean;
+  pickedName?: string;
+  opponentName?: string;
+}): SoccerMoneylineGrade {
+  const { homeScore, awayScore } = params;
+  const level = homeScore === awayScore;
+  const score = `${awayScore}-${homeScore} (away-home)`;
+
+  if (params.side === "draw") {
+    if (!params.threeWay) {
+      return {
+        kind: "refused",
+        reason:
+          `A "draw" selection was graded against a TWO-WAY market. The draw is only ` +
+          `a selectable outcome on a three-way (1X2) price, so either the pick was ` +
+          `logged with the wrong market type or the side is wrong. Re-run with ` +
+          `marketType="moneyline_3way" if that is what was posted.`,
+      };
+    }
+    return {
+      kind: "graded",
+      result: level ? "WIN" : "LOSS",
+      explanation: level
+        ? `The draw landed: the match finished level at ${score}.`
+        : `The draw lost: the match finished ${score}, so it was decided.`,
+    };
+  }
+
+  const picked = params.side === "home" ? homeScore : awayScore;
+  const other = params.side === "home" ? awayScore : homeScore;
+  const pickedLabel = params.pickedName ?? params.side;
+  const otherLabel = params.opponentName ?? (params.side === "home" ? "away" : "home");
+
+  if (level) {
+    if (params.threeWay) {
+      return {
+        kind: "graded",
+        result: "LOSS",
+        explanation:
+          `${pickedLabel} drew ${otherLabel} ${score}. On a THREE-WAY price a draw is ` +
+          `a LOSS for a team selection, not a push - the draw was its own selectable ` +
+          `outcome and it was not the one taken.`,
+      };
+    }
+    return {
+      kind: "refused",
+      reason:
+        `THE MATCH WAS DRAWN (${score}) and this pick was logged on a TWO-WAY ` +
+        `moneyline, which this connector will not settle on its own. Two different ` +
+        `products are sold at that price: DRAW NO BET returns the stake, making this a ` +
+        `PUSH, while a draw-excluded moneyline makes it a LOSS. SGO does not label ` +
+        `which one its two-way soccer price is, and the difference is the whole stake. ` +
+        `Read the market as it was posted and log it by hand. If it was actually a ` +
+        `three-way (1X2) price, re-run with marketType="moneyline_3way" and it will ` +
+        `grade as a LOSS automatically.`,
+    };
+  }
+
+  const won = picked > other;
+  return {
+    kind: "graded",
+    result: won ? "WIN" : "LOSS",
+    explanation: `${pickedLabel} ${won ? "beat" : "lost to"} ${otherLabel}, final ${score}.`,
+  };
+}
+
 /**
  * The refusal text for a line-based market with no postedLine. Written once so
  * both graders say the same thing, and written to name the fix rather than just

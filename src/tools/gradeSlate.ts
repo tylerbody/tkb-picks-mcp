@@ -4,12 +4,14 @@ import type { SGOClient } from "../services/sgoClient.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, hasDrawOutcome, matchLinePeriodFor, type SportKey } from "../constants.js";
 import type { SGOEvent } from "../types.js";
 import {
   gradeSpread,
   gradeOverUnder,
   gradeMoneyline,
+  gradeSoccerMoneyline,
+  DRAW_CONVENTION,
   gradePlayerProp,
   missingPostedLineRefusal,
   SPREAD_SIGN_CONVENTION,
@@ -49,10 +51,18 @@ const PickSchema = z.object({
     .string()
     .describe("Your own label for this pick, echoed back so results can be matched up."),
   eventID: z.string().describe("SGO eventID for the game this pick belongs to."),
-  marketType: z.enum(["moneyline", "spread", "total", "player_prop"]),
+  marketType: z
+    .enum(["moneyline", "moneyline_3way", "spread", "total", "player_prop"])
+    .describe(
+      "moneyline_3way is the SOCCER 1X2 price, where the draw is its own outcome and a " +
+        "draw is a LOSS for a team pick. Use plain moneyline for a two-way price."
+    ),
   side: z
-    .enum(["over", "under", "home", "away"])
-    .describe("home/away for moneyline and spread, over/under for total and player_prop."),
+    .enum(["over", "under", "home", "away", "draw"])
+    .describe(
+      "home/away for moneyline, moneyline_3way and spread; over/under for total and " +
+        "player_prop; draw ONLY on moneyline_3way."
+    ),
   marketLabel: z.string().optional().describe("Required for player_prop, e.g. 'Hits'."),
   playerID: z.string().optional().describe("Required for player_prop."),
   playerName: z.string().optional(),
@@ -80,8 +90,9 @@ const BatchGradeInputSchema = z
 
 type BatchGradeInput = z.infer<typeof BatchGradeInputSchema>;
 
-const MARKET_TYPE_CODE: Record<string, "ml" | "sp" | "ou"> = {
+const MARKET_TYPE_CODE: Record<string, "ml" | "sp" | "ou" | "ml3way"> = {
   moneyline: "ml",
+  moneyline_3way: "ml3way",
   spread: "sp",
   total: "ou",
   player_prop: "ou",
@@ -89,7 +100,18 @@ const MARKET_TYPE_CODE: Record<string, "ml" | "sp" | "ou"> = {
 
 interface GradedPick {
   ref: string;
-  result: "WIN" | "LOSS" | "PUSH" | "VOID" | "NOT_FINAL" | "NO_DATA" | "NEEDS_POSTED_LINE";
+  result:
+    | "WIN"
+    | "LOSS"
+    | "PUSH"
+    | "VOID"
+    | "NOT_FINAL"
+    | "NO_DATA"
+    | "NEEDS_POSTED_LINE"
+    // SOCCER ONLY. A drawn match on a two-way price: Draw No Bet pushes and a
+    // draw-excluded moneyline loses, SGO does not say which it sold, and the
+    // difference is the whole stake. See services/pickGrader.ts.
+    | "NEEDS_MANUAL_REVIEW";
   detail: string;
   actualValue?: number | null;
   lineGradedAgainst?: number | null;
@@ -176,17 +198,22 @@ Error Handling:
           for (const p of picks) {
             const statID = resolveStatID(params.sport, p);
             if (statID === null) continue;
+            // The three-way DRAW side is priced on the game-wide `all` entity, not on
+            // a team, per SGO's own rows: points-all-<period>-ml3way-draw.
             const entity =
               p.marketType === "player_prop"
                 ? p.playerID!
-                : p.marketType === "total"
+                : p.marketType === "total" || p.side === "draw"
                   ? "all"
                   : p.side;
             oddIDs.push(
               buildOddID({
                 statID,
                 entity,
-                period: "full_game",
+                period:
+                  p.marketType === "player_prop"
+                    ? "full_game"
+                    : matchLinePeriodFor(params.sport),
                 betType: MARKET_TYPE_CODE[p.marketType]!,
                 side: p.side,
               })
@@ -348,6 +375,42 @@ function gradeOne(
   const homeName = event.teams.home.names?.long ?? "home";
   const awayName = event.teams.away.names?.long ?? "away";
 
+  // ---- SOCCER: a level score is a RESULT, not a push ----
+  if ((p.marketType === "moneyline" || p.marketType === "moneyline_3way") && hasDrawOutcome(sport)) {
+    if (homeScore === undefined || awayScore === undefined) {
+      return { ref: p.ref, result: "NO_DATA", detail: "Final scores unavailable." };
+    }
+    const graded = gradeSoccerMoneyline({
+      side: p.side as "home" | "away" | "draw",
+      homeScore,
+      awayScore,
+      threeWay: p.marketType === "moneyline_3way",
+      pickedName: p.side === "home" ? homeName : awayName,
+      opponentName: p.side === "home" ? awayName : homeName,
+    });
+    if (graded.kind === "refused") {
+      return { ref: p.ref, result: "NEEDS_MANUAL_REVIEW", detail: graded.reason };
+    }
+    return {
+      ref: p.ref,
+      result: graded.result,
+      detail: graded.explanation,
+      explanation: graded.explanation,
+      finalScore: `${awayName} ${awayScore} - ${homeName} ${homeScore}`,
+    };
+  }
+
+  // A draw on any other market type is a mis-logged pick, not a gradeable one.
+  if (p.side === "draw") {
+    return {
+      ref: p.ref,
+      result: "NO_DATA",
+      detail:
+        `side='draw' is only valid with marketType='moneyline_3way' on a soccer event. ` +
+        `${DRAW_CONVENTION}`,
+    };
+  }
+
   // ---- Moneyline: compare final scores, no line involved ----
   if (p.marketType === "moneyline") {
     if (homeScore === undefined || awayScore === undefined) {
@@ -441,7 +504,7 @@ function gradeOne(
   const oddID = buildOddID({
     statID,
     entity,
-    period: "full_game",
+    period: p.marketType === "player_prop" ? "full_game" : matchLinePeriodFor(sport),
     betType: MARKET_TYPE_CODE[p.marketType]!,
     side: p.side,
   });

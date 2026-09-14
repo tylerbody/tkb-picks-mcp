@@ -118,6 +118,128 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
   // count and is what totals and handicaps are priced on.
   atp: [],
   wta: [],
+
+  // ---- MEN'S COLLEGE BASKETBALL ----
+  //
+  // SGO HAS ONE BASKETBALL STAT NAMESPACE. Its stats page lists basketball statIDs
+  // once, not per league, so NBA, WNBA and NCAAB share identical spellings. These
+  // are therefore the WNBA entries verbatim, minus nothing and plus the two-pointer
+  // splits, rather than a parallel guess at college-specific names.
+  //
+  // WHICH of these actually carry posted odds on a given college board is a separate
+  // COVERAGE question, and an early-season mid-major game will post far fewer than a
+  // ranked matchup. SGO's own NCAAB page names only points, rebounds, assists and
+  // threes explicitly. The rest are listed here because the statID is documented; a
+  // market that is not posted returns no odds and says so, which is the correct
+  // outcome and not a catalog error.
+  cbb: [
+    { statID: "assists", label: "Assists" },
+    { statID: "blocks", label: "Blocks" },
+    { statID: "blocks+steals", label: "Blocks + Steals" },
+    { statID: "fantasyScore", label: "Fantasy Score" },
+    { statID: "fieldGoalsAttempted", label: "Field Goals Attempted" },
+    { statID: "fieldGoalsMade", label: "Field Goals Made" },
+    { statID: "freeThrowsAttempted", label: "Free Throws Attempted" },
+    { statID: "freeThrowsMade", label: "Free Throws Made" },
+    { statID: "minutesPlayed", label: "Minutes Played" },
+    { statID: "offensiveRebounds", label: "Offensive Rebounds" },
+    { statID: "points+assists", label: "Points + Assists" },
+    { statID: "points+rebounds", label: "Points + Rebounds" },
+    { statID: "points+rebounds+assists", label: "Points + Rebounds + Assists" },
+    { statID: "rebounds", label: "Rebounds" },
+    { statID: "rebounds+assists", label: "Rebounds + Assists" },
+    { statID: "points", label: "Score" },
+    { statID: "steals", label: "Steals" },
+    { statID: "threePointersAttempted", label: "Three Pointers Attempted" },
+    { statID: "threePointersMade", label: "Three Pointers Made" },
+    { statID: "turnovers", label: "Turnovers" },
+  ],
+
+  // ---- SOCCER (EPL and UCL share one catalog) ----
+  //
+  // `points` IS GOALS. SGO's soccer stat list contains no `goals` statID at all - it
+  // has `goals+assists` but no bare `goals` - and the EPL page gives the mapping as
+  // "points (goals)". Anything built against a `goals` string would silently match
+  // nothing.
+  //
+  // PLAYER PROPS USE THE `game` PERIOD even though MATCH LINES use `reg`. That split
+  // is enforced in constants.ts (matchLinePeriodFor), not here, because it is a
+  // property of the market kind rather than of the stat.
+  //
+  // Note two spellings that look like typos and are not: SGO writes `disposessed`
+  // with a single middle "s", and the goalkeeper stats are prefixed `goalie_`, not
+  // `keeper_` or `gk_`. Both are quoted from their stats page.
+  epl: [
+    { statID: "assists", label: "Assists" },
+    { statID: "clearances", label: "Clearances" },
+    { statID: "duels_won", label: "Duels Won" },
+    { statID: "fantasyScore", label: "Fantasy Score" },
+    { statID: "fouls", label: "Fouls Committed" },
+    { statID: "foulsDrawn", label: "Fouls Drawn" },
+    { statID: "goals+assists", label: "Goals + Assists" },
+    { statID: "points", label: "Goals" },
+    { statID: "interceptions", label: "Interceptions" },
+    { statID: "minutesPlayed", label: "Minutes Played" },
+    { statID: "offsides", label: "Offsides" },
+    { statID: "passes_accurate", label: "Passes Completed" },
+    { statID: "goalie_saves", label: "Saves" },
+    { statID: "shots", label: "Shots" },
+    { statID: "shots_blocked", label: "Shots Blocked" },
+    { statID: "shots_onGoal", label: "Shots On Target" },
+    { statID: "tackles", label: "Tackles" },
+    { statID: "touches", label: "Touches" },
+  ],
+  ucl: [
+    { statID: "assists", label: "Assists" },
+    { statID: "clearances", label: "Clearances" },
+    { statID: "duels_won", label: "Duels Won" },
+    { statID: "fantasyScore", label: "Fantasy Score" },
+    { statID: "fouls", label: "Fouls Committed" },
+    { statID: "foulsDrawn", label: "Fouls Drawn" },
+    { statID: "goals+assists", label: "Goals + Assists" },
+    { statID: "points", label: "Goals" },
+    { statID: "interceptions", label: "Interceptions" },
+    { statID: "minutesPlayed", label: "Minutes Played" },
+    { statID: "offsides", label: "Offsides" },
+    { statID: "passes_accurate", label: "Passes Completed" },
+    { statID: "goalie_saves", label: "Saves" },
+    { statID: "shots", label: "Shots" },
+    { statID: "shots_blocked", label: "Shots Blocked" },
+    { statID: "shots_onGoal", label: "Shots On Target" },
+    { statID: "tackles", label: "Tackles" },
+    { statID: "touches", label: "Touches" },
+  ],
+
+  // ---- UFC ----
+  //
+  // SINGULAR/PLURAL IS LOAD-BEARING HERE AND IS THE EASIEST PLACE TO SHIP A BUG.
+  // SGO's MMA stat list pairs a PLURAL landed stat with a SINGULAR attempts stat:
+  //
+  //   landed                      attempted
+  //   significant_strikes         significant_strike_attempts
+  //   strikes                     strike_attempts
+  //   takedowns_landed            takedown_attempts
+  //
+  // So it is `significant_strikes`, NOT `significant_strikes_landed`, and
+  // `takedown_attempts`, NOT `takedowns_attempted`. Every string below is quoted
+  // from that list rather than derived from its neighbour.
+  //
+  // `roundsCompleted` is a FIGHT-level stat and uses the `all` entity, not a
+  // fighter. It is in this catalog because tkb_get_odds addresses game totals the
+  // same way it addresses player totals; the entity is chosen by the caller.
+  ufc: [
+    { statID: "controlTime_minutes", label: "Control Time (minutes)" },
+    { statID: "fantasyScore", label: "Fantasy Score" },
+    { statID: "knockdowns", label: "Knockdowns" },
+    { statID: "roundsCompleted", label: "Rounds Completed" },
+    { statID: "significant_strike_attempts", label: "Significant Strikes Attempted" },
+    { statID: "significant_strikes", label: "Significant Strikes Landed" },
+    { statID: "strike_attempts", label: "Strikes Attempted" },
+    { statID: "strikes", label: "Strikes Landed" },
+    { statID: "submissions_attempted", label: "Submission Attempts" },
+    { statID: "takedown_attempts", label: "Takedowns Attempted" },
+    { statID: "takedowns_landed", label: "Takedowns Landed" },
+  ],
 };
 
 /**
@@ -188,6 +310,62 @@ export const YES_NO_MARKETS: Record<SportKey, { statID: string; label: string }[
   // participant-slot addressed, not playerID addressed. Moneyline only.
   atp: [],
   wta: [],
+
+  cbb: [
+    { statID: "assists", label: "Any Assists" },
+    { statID: "blocks", label: "Any Blocks" },
+    { statID: "blocks+steals", label: "Any Blocks + Steals" },
+    { statID: "doubleDouble", label: "Double-Double" },
+    { statID: "firstBasket", label: "First Basket" },
+    { statID: "freeThrowsMade", label: "Any Free Throws Made" },
+    { statID: "rebounds", label: "Any Rebounds" },
+    { statID: "points", label: "Any Score" },
+    { statID: "steals", label: "Any Steals" },
+    { statID: "threePointersMade", label: "Any Threes Made" },
+    { statID: "tripleDouble", label: "Triple-Double" },
+  ],
+
+  // SOCCER. Anytime goalscorer is the one milestone market that matters for this
+  // account, and SGO writes it as `points` + `yn` - confirmed by their own verbatim
+  // example, `points-MOHAMED_SALAH_1_EPL-game-yn-yes`. Note the `game` period on a
+  // player market, sitting alongside `reg` match lines on the same event.
+  //
+  // `bothTeamsScored` is a TEAM/GAME-level yes-no, not a player one. It is listed
+  // because tkb_get_yes_no_prop can address the `all` entity, but it must never be
+  // paired with a playerID.
+  epl: [
+    { statID: "points", label: "Anytime Goalscorer" },
+    { statID: "assists", label: "Any Assist" },
+    { statID: "bothTeamsScored", label: "Both Teams To Score" },
+    { statID: "firstToScore", label: "First To Score" },
+    { statID: "lastToScore", label: "Last To Score" },
+    { statID: "shots_onGoal", label: "Any Shot On Target" },
+    { statID: "yellowCards", label: "Any Yellow Card" },
+  ],
+  ucl: [
+    { statID: "points", label: "Anytime Goalscorer" },
+    { statID: "assists", label: "Any Assist" },
+    { statID: "bothTeamsScored", label: "Both Teams To Score" },
+    { statID: "firstToScore", label: "First To Score" },
+    { statID: "lastToScore", label: "Last To Score" },
+    { statID: "shots_onGoal", label: "Any Shot On Target" },
+    { statID: "yellowCards", label: "Any Yellow Card" },
+  ],
+
+  // UFC METHOD OF VICTORY. These three are the fight-outcome markets and they are
+  // FIGHTER-entity yes/no questions: "does this fighter win by knockout".
+  //
+  // GRADING THEM NEEDS A METHOD, WHICH THIS CONNECTOR CANNOT SETTLE FROM AN EVENT
+  // SCORE. A UFC event carries a winner, not a method, in the fields this repo
+  // reads. tkb_grade_pick therefore refuses a wonBy_* market by name rather than
+  // inferring "the favourite won inside the distance" from a rounds figure. They are
+  // catalogued so the odds can be PULLED and posted; settling them is a manual read
+  // of the result.
+  ufc: [
+    { statID: "wonBy_decision", label: "Win By Decision" },
+    { statID: "wonBy_knockout", label: "Win By Knockout / TKO" },
+    { statID: "wonBy_submission", label: "Win By Submission" },
+  ],
 };
 
 /**
@@ -222,4 +400,30 @@ export const SUPPORTED_PERIODS: Record<SportKey, string[]> = {
   // market rather than an error, which is the correct behaviour.
   atp: ["1st_set", "2nd_set", "3rd_set", "4th_set", "5th_set"],
   wta: ["1st_set", "2nd_set", "3rd_set"],
+
+  // COLLEGE BASKETBALL PLAYS HALVES, NOT QUARTERS. SGO's NCAAB page mentions only
+  // halves ("Swap game for 1h in the oddID to get the first-half version") and lists
+  // no quarter market anywhere. Quarters are omitted deliberately: offering them
+  // would produce an empty result that reads like a missing line rather than like a
+  // period this sport does not play.
+  cbb: ["1st_half", "2nd_half"],
+
+  // SOCCER. Halves only. `et` (extra time) and `ps` (penalty shootout) are real
+  // documented periodIDs and are obviously soccer-shaped, but nothing in the docs
+  // binds them to specific markets and league play never reaches them, so they are
+  // left out rather than guessed at. They matter for knockout-round UCL ties and are
+  // worth confirming against GET /markets before a knockout stage is covered.
+  epl: ["1st_half", "2nd_half"],
+  ucl: ["1st_half", "2nd_half"],
+
+  // UFC ROUNDS. 1r through 5r are documented periodIDs ("1st Round" ... "5th Round")
+  // and five is the ceiling: championship and main-event fights are five rounds,
+  // everything else is three, and requesting 4r on a three-round fight returns no
+  // market rather than an error, which is correct.
+  //
+  // THE "OPENING ROUNDS" GROUP MARKET IS DELIBERATELY ABSENT. SGO's UFC page refers
+  // to it in prose but never prints its periodID, and no documented code matches its
+  // shape. Guessing one would produce silent empties. Confirm it against
+  // GET /markets before adding.
+  ufc: ["1st_round", "2nd_round", "3rd_round", "4th_round", "5th_round"],
 };

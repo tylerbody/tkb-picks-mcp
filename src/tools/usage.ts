@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import type { CFBDClient } from "../services/cfbdClient.js";
+import type { CBBDClient } from "../services/cbbdClient.js";
 
 /**
  * API QUOTA MONITOR.
@@ -29,7 +30,8 @@ type UsageInput = z.infer<typeof UsageInputSchema>;
 export function registerUsageTool(
   server: McpServer,
   sgo: SGOClient,
-  cfbd: CFBDClient | null
+  cfbd: CFBDClient | null,
+  cbbd: CBBDClient | null = null
 ) {
   server.registerTool(
     "tkb_get_api_usage",
@@ -110,12 +112,45 @@ Error Handling:
           );
         })();
 
+        // CBBD SHARES CFBD'S MONTHLY QUOTA, which is the single most important thing
+        // to know about it and is not visible from either counter alone. November and
+        // early December are the overlap: CFB is still running when CBB tips off, and
+        // football usage can exhaust basketball.
+        //
+        // X-CallLimit-Remaining IS THE ONE TRUSTWORTHY NUMBER HERE. Every counter in
+        // this tool is in-process and resets on a Render cold start, so they
+        // understate real usage by an unknown amount. That header comes from the
+        // provider and does not, which is why it is reported first.
+        const cbbdLine = (() => {
+          if (!cbbd) return `CollegeBasketballData: not configured (CBBD_API_KEY unset).`;
+          const c = cbbd.getStats();
+          return (
+            `CollegeBasketballData: ` +
+            (c.callLimitRemaining !== null
+              ? `X-CallLimit-Remaining ${c.callLimitRemaining} AS REPORTED BY THE PROVIDER - ` +
+                `trust this over the in-process counters below. `
+              : `no X-CallLimit-Remaining seen yet (no request made this process). `) +
+            `${c.requests} request(s) this process, ${c.hits} cache hit(s), ${c.misses} ` +
+            `miss(es), ${c.coalesced} coalesced, ${c.errors} error(s). ${c.cachedWindows} ` +
+            `date window(s) cached, ${c.permanentWindows} of them permanent.\n\n` +
+            `THE QUOTA IS SHARED WITH CollegeFootballData. It is tied to the account, not ` +
+            `to the sport, so the two counters above are drawing on ONE allowance. In ` +
+            `November and early December both seasons are live at once and CFB can ` +
+            `exhaust CBB. The free tier is commonly cited at 1,000 calls a month; treat ` +
+            `that as a planning assumption rather than a documented fact.\n\n` +
+            `The design absorbs being wrong about the number: one request returns every ` +
+            `box score in a whole date window, so an in-season refresh is about one call ` +
+            `a week per sport. If this climbs faster than that, something is fetching per ` +
+            `game instead of per window.`
+          );
+        })();
+
         return {
           content: [
             {
               type: "text" as const,
               text:
-                `SportsGameOdds account usage:\n\n${truncated}\n\n${cacheLine}\n\n${cfbdLine}\n\n` +
+                `SportsGameOdds account usage:\n\n${truncated}\n\n${cacheLine}\n\n${cfbdLine}\n\n${cbbdLine}\n\n` +
                 `Reminder: billing is per EVENT OBJECT returned, not per market. Hit-rate ` +
                 `checks are the heaviest consumer in this connector, which is why identical ` +
                 `team-history fetches are cached.`,

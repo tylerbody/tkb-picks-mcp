@@ -195,6 +195,134 @@ export const SPORT_CONFIG = {
     },
   },
 
+  // ---- MEN'S COLLEGE BASKETBALL (v2.9.0) ----
+  //
+  // WHY THIS ONE FIRST. The season opens in early November, which is exactly when
+  // the CFB board - currently the account's biggest driver - runs out. It is a
+  // nightly slate of 350+ D1 teams, and the props it posts (points, rebounds,
+  // assists, threes) are the ones the WNBA path already handles.
+  //
+  // FREE TIER ON SGO. Measured from SGO's own pricing page 2026-09-14: NCAAB is one
+  // of the eight leagues on the Amateur plan. That matters operationally rather than
+  // financially, because this account SWAPS between a rookie key and a pro key. A
+  // league that is free-tier keeps working on every key that will ever be installed.
+  // EPL (rookie or above) and UFC (unlisted, presumed pro) do not have that property.
+  //
+  // HIT RATES COME FROM CollegeBasketballData, NOT BALLDONTLIE. Same relationship
+  // CFB has with CollegeFootballData, and for the same reason: BDL gates NCAAB
+  // /player_stats behind GOAT, while CBBD is free, uses the identical Bearer auth,
+  // and returns a whole DATE RANGE of player box scores in one request. Without a
+  // CBBD_API_KEY the CBB hit-rate path REFUSES rather than falling back to SGO -
+  // exactly the rule v2.7.0 established for CFB after an SGO fallback reported
+  // started games as DNPs.
+  //
+  // INJURIES: BALLDONTLIE lists no NCAAB injuries endpoint at all, so false.
+  // WEATHER: indoors, so false, same as WNBA.
+  // TEAM SPLITS: false. splitsAggregator leans on BDL standings, and BDL's paid
+  // tiers are PER SPORT - this account's BDL subscription does not cover NCAAB, so
+  // the call would 401. Saying so is better than tallying SGO events into a number
+  // with no meaning.
+  cbb: {
+    label: "NCAAB",
+    sgoLeagueID: "NCAAB",
+    bdlPath: "ncaab",
+    supports: {
+      playerProps: true,
+      hitRates: true,
+      injuries: false,
+      weather: false,
+      teamSplits: false,
+    },
+  },
+
+  // ---- SOCCER ----
+  //
+  // TWO LEAGUES, ONE SHAPE. EPL and the Champions League share every market
+  // convention, so they are two rows rather than two builds. What they do NOT share
+  // is IDs: SGO defines teams and players per league, so Mohamed Salah is
+  // MOHAMED_SALAH_1_EPL in the Premier League and a DIFFERENT id in UCL. Never cache
+  // a soccer player id across leagues.
+  //
+  // THE TRAP THAT MAKES SOCCER DIFFERENT FROM EVERY OTHER SPORT HERE: match lines
+  // settle on the `reg` period, player props on `game`. SGO's EPL page states it
+  // outright - "the full-match moneyline is points-home-reg-ml-home, while player
+  // props stay on game". Query a match line with `game` and SGO returns nothing,
+  // which reads downstream as "no odds posted" rather than as a malformed request.
+  // See matchLinePeriodFor() below; no tool builds a soccer match line by hand.
+  //
+  // THE SECOND TRAP: draws. Soccer has a third outcome, so grading a two-way
+  // moneyline the way every other sport is graded would score a draw as a loss for
+  // whichever side was picked. services/pickGrader.ts refuses that case by name.
+  //
+  // GOALS ARE `points`. There is no `goals` statID in SGO's soccer stat list.
+  //
+  // HIT RATES FALSE, and this is a subscription fact rather than a missing product:
+  // BALLDONTLIE publishes /epl/v2/player_match_stats and /ucl/v1/player_match_stats,
+  // both gated behind GOAT for that specific sport, which this account does not hold.
+  // The free Fantasy Premier League API would serve EPL (not UCL) per-gameweek player
+  // stats, and is the obvious next step, but it is a new client rather than a config
+  // row and is deliberately NOT half-built here.
+  epl: {
+    label: "EPL",
+    sgoLeagueID: "EPL",
+    bdlPath: "epl",
+    supports: {
+      playerProps: true,
+      hitRates: false,
+      injuries: false,
+      weather: false,
+      teamSplits: false,
+    },
+  },
+  ucl: {
+    label: "UCL",
+    sgoLeagueID: "UEFA_CHAMPIONS_LEAGUE",
+    bdlPath: "ucl",
+    supports: {
+      playerProps: true,
+      hitRates: false,
+      injuries: false,
+      weather: false,
+      teamSplits: false,
+    },
+  },
+
+  // ---- UFC ----
+  //
+  // A THIRD PARTICIPANT MODEL, which is the whole reason this row needed thought.
+  // Tennis competitors occupy the home/away slots and have NO props. Team athletes
+  // have rosters AND props. A fighter occupies a home/away slot AND is a prop
+  // entity: SGO's UFC page says both "UFC is configured as a single-participant
+  // league, so the home and away slots on an event hold the two fighters rather than
+  // teams" and "Fighter-level props carry the fighter's ID in that slot instead of
+  // all". So `isIndividualSport` could no longer be a boolean - see PARTICIPANT_MODEL.
+  //
+  // WHETHER event.players IS POPULATED ON A UFC EVENT IS UNVERIFIED. The docs are in
+  // tension on it and this connector does not guess at provider shapes. Everything
+  // here is written so that an empty players object produces an explanation rather
+  // than a wrong answer: tkb_get_players reports it, and the prop path refuses.
+  //
+  // HIT RATES FALSE. There is no cheap fighter game-log source. BDL's
+  // /mma/v1/fight_stats is GOAT-only for MMA, and the free alternative is scraping
+  // ufcstats.com, which is infrastructure this repo does not have. Refusing is the
+  // honest answer; a "0 of his last 5" built from nothing is not.
+  ufc: {
+    label: "UFC",
+    sgoLeagueID: "UFC",
+    // BDL publishes /mma/v1/. Populated deliberately even though MMA stats are not
+    // subscribed: BDLClient's TTL tier gate handles the 401 and heals within 30
+    // minutes if the subscription is ever bought, with no redeploy. Same reasoning
+    // as the atp row above.
+    bdlPath: "mma",
+    supports: {
+      playerProps: true,
+      hitRates: false,
+      injuries: false,
+      weather: false,
+      teamSplits: false,
+    },
+  },
+
   // Add when NBA season starts:
   // nba: { label: "NBA", sgoLeagueID: "NBA", bdlPath: "nba", supports: TEAM_SPORT_CAPABILITIES },
   // Add when NHL season starts:
@@ -205,11 +333,84 @@ export type SportKey = keyof typeof SPORT_CONFIG;
 
 export const SUPPORTED_SPORTS = Object.keys(SPORT_CONFIG) as SportKey[];
 
-/** Sports where competitors are individuals in the home/away slots, not rosters. */
-export const INDIVIDUAL_SPORTS: SportKey[] = ["atp", "wta"];
+/**
+ * HOW COMPETITORS ARE ADDRESSED ON AN EVENT. Three cases, not two.
+ *
+ * This was a boolean (`isIndividualSport`) until v2.9.0, when UFC broke it. The
+ * boolean conflated two independent questions that tennis happened to answer the
+ * same way:
+ *
+ *   1. Do competitors occupy the home/away slots, or a roster?
+ *   2. Do player-level props exist?
+ *
+ * Tennis answers "slots" and "no props", team sports answer "roster" and "props",
+ * and a UFC fighter answers "slots" AND "props" - SGO's own UFC page says the home
+ * and away slots hold the two fighters, and that fighter props carry the fighter's
+ * ID in the entity slot. One boolean cannot express that, and forcing it would have
+ * meant either losing fighter props or telling the caller UFC has rosters.
+ *
+ * Declared as its own exhaustive table for the same reason SPORT_CONFIG is: adding
+ * a sport should be a row plus a compiler error, never an audit of scattered
+ * `if (sport === ...)` branches.
+ */
+export type ParticipantModel = "roster" | "participant_slots" | "fighters";
+
+export const PARTICIPANT_MODEL: Record<SportKey, ParticipantModel> = {
+  mlb: "roster",
+  wnba: "roster",
+  nfl: "roster",
+  cfb: "roster",
+  cbb: "roster",
+  epl: "roster",
+  ucl: "roster",
+  atp: "participant_slots",
+  wta: "participant_slots",
+  ufc: "fighters",
+};
+
+/**
+ * Sports where competitors are individuals in the home/away slots, not rosters.
+ *
+ * KEPT, and still true of UFC: a fighter does occupy a participant slot. What
+ * changed is that this no longer implies "no player props", so every caller that
+ * used it to answer THAT question now asks `supportsCapability(sport, "playerProps")`
+ * instead.
+ */
+export const INDIVIDUAL_SPORTS: SportKey[] = (Object.keys(PARTICIPANT_MODEL) as SportKey[]).filter(
+  (s) => PARTICIPANT_MODEL[s] !== "roster"
+);
 
 export function isIndividualSport(sport: SportKey): boolean {
-  return INDIVIDUAL_SPORTS.includes(sport);
+  return PARTICIPANT_MODEL[sport] !== "roster";
+}
+
+export function participantModel(sport: SportKey): ParticipantModel {
+  return PARTICIPANT_MODEL[sport];
+}
+
+/**
+ * Leagues whose match lines settle on REGULATION rather than the full event.
+ *
+ * SOCCER ONLY, and it is the single most expensive thing to get wrong in this
+ * release. SGO's EPL documentation states it plainly: "the full-match moneyline is
+ * `points-home-reg-ml-home`, while player props stay on `game`." Two periods, one
+ * event, split by market kind.
+ *
+ * The failure mode is quiet rather than loud. A soccer moneyline requested with
+ * `game` does not error - it returns no market, which every tool downstream reports
+ * as "no odds posted for this game yet", inviting a retry that can never succeed.
+ * Every caller therefore asks this function rather than assuming "game".
+ */
+export const REGULATION_MATCH_LINE_SPORTS: SportKey[] = ["epl", "ucl"];
+
+/** The periodID a MATCH LINE (moneyline, spread, total) settles on for this sport. */
+export function matchLinePeriodFor(sport: SportKey): "full_game" | "regulation" {
+  return REGULATION_MATCH_LINE_SPORTS.includes(sport) ? "regulation" : "full_game";
+}
+
+/** True where a match can end level and the book prices a third outcome. */
+export function hasDrawOutcome(sport: SportKey): boolean {
+  return REGULATION_MATCH_LINE_SPORTS.includes(sport);
 }
 
 export function labelFor(sport: SportKey): string {
@@ -235,22 +436,52 @@ export function unsupportedMessage(
   capability: keyof SportCapabilities
 ): string {
   const label = SPORT_CONFIG[sport].label;
+  const model = PARTICIPANT_MODEL[sport];
+  const slots = model === "participant_slots";
+  const soccer = REGULATION_MATCH_LINE_SPORTS.includes(sport);
+
   const reasons: Record<keyof SportCapabilities, string> = {
-    playerProps: isIndividualSport(sport)
+    playerProps: slots
       ? `${label} competitors occupy the home/away participant slots on an event rather than roster positions, so SGO never populates a player list and player props cannot be addressed by playerID. This is permanent, not a "retry closer to match time" situation. ${label} picks are moneyline only - use tkb_get_odds with marketType="moneyline".`
       : `Player props are not available for ${label}.`,
-    hitRates: isIndividualSport(sport)
-      ? `Counted hit rates are not available for ${label}. There is no per-player game-log source subscribed for this tour, and the SGO path needs a teamID/playerID that tennis events do not carry. Use researched or projection language in ${label} threads, per the style guide, rather than counted "X of his last Y" phrasing.`
-      : `Hit rates are not available for ${label}.`,
-    injuries: isIndividualSport(sport)
-      ? `No injury feed is available for ${label} on the current subscription. Tennis withdrawals and retirements are announced by the tournament, so check tour news directly before posting a ${label} pick.`
-      : `BALLDONTLIE has no ${label} injuries endpoint at all. Verified live 2026-08-31: both /ncaaf/v1/player_injuries and /ncaaf/v1/injuries return 404, while the same path returns 200 for MLB on the same key. This is a MISSING ENDPOINT, not a subscription limit, so it cannot be unlocked by upgrading. Check ${label} injury and availability news via live web search, and note that CFB availability also has to be confirmed from a depth chart because CollegeFootballData lists a player only where he recorded a stat.`,
-    weather: isIndividualSport(sport)
-      ? `Weather is not wired up for ${label}. Tour events move between venues week to week, so there is no fixed stadium table to look up, and guessing a location would be worse than returning nothing. Grand Slam roof status must be checked via live search.`
-      : `Weather is not a factor for ${label}.`,
-    teamSplits: isIndividualSport(sport)
-      ? `Team splits do not apply to ${label} - there are no teams. For head-to-head history between two players, use live search; SGO's event feed is not a reliable H2H source across seasons.`
-      : `Team splits are not available for ${label}.`,
+
+    hitRates:
+      sport === "ufc"
+        ? `Counted hit rates are NOT available for ${label}, and this is a missing SOURCE rather than a missing feature. BALLDONTLIE publishes /mma/v1/fight_stats with significant strikes, takedowns, control time and knockdowns, but gates it behind GOAT for MMA specifically, which this account does not hold. The only free alternative is scraping ufcstats.com, which this connector does not do. Write ${label} reasoning from researched fight history and say so, rather than any counted "X of his last Y" phrasing - a hit rate assembled from nothing is worse than no hit rate.`
+        : soccer
+          ? `Counted hit rates are NOT available for ${label}. BALLDONTLIE does publish per-match player stats for this competition, but gates them behind GOAT for that sport, which this account does not hold. NOTE FOR WHOEVER PICKS THIS UP: the free Fantasy Premier League API (fantasy.premierleague.com/api, no key) carries per-gameweek goals, assists, shots, key passes and minutes and would serve EPL, though NOT UCL. It is a new client rather than a config change and was deliberately not half-built. Until then, use researched or projection language in ${label} threads.`
+          : slots
+            ? `Counted hit rates are not available for ${label}. There is no per-player game-log source subscribed for this tour, and the SGO path needs a teamID/playerID that tennis events do not carry. Use researched or projection language in ${label} threads, per the style guide, rather than counted "X of his last Y" phrasing.`
+            : `Hit rates are not available for ${label}.`,
+
+    injuries:
+      sport === "cbb"
+        ? `BALLDONTLIE publishes no NCAAB injuries endpoint. College basketball availability also moves late and is reported by the school rather than a league office, so confirm it by live search against the team's own release before posting a ${label} player prop.`
+        : sport === "ufc"
+          ? `There is no injury feed for ${label}. A fight is either on the card or off it, and withdrawals are announced by the promotion, often inside the final week. Check the current card by live search before posting - a fighter replacement changes the entire matchup, not just one line.`
+          : soccer
+            ? `No injury feed is available for ${label} on the current subscription. BALLDONTLIE gates /player_injuries behind GOAT for this sport. Rotation matters more here than injury in a midweek-plus-weekend competition, so confirm the expected XI from team news before posting a ${label} player prop.`
+            : slots
+              ? `No injury feed is available for ${label} on the current subscription. Tennis withdrawals and retirements are announced by the tournament, so check tour news directly before posting a ${label} pick.`
+              : `BALLDONTLIE has no ${label} injuries endpoint at all. Verified live 2026-08-31: both /ncaaf/v1/player_injuries and /ncaaf/v1/injuries return 404, while the same path returns 200 for MLB on the same key. This is a MISSING ENDPOINT, not a subscription limit, so it cannot be unlocked by upgrading. Check ${label} injury and availability news via live web search, and note that CFB availability also has to be confirmed from a depth chart because CollegeFootballData lists a player only where he recorded a stat.`,
+
+    weather:
+      sport === "ufc"
+        ? `Weather is not a factor for ${label} - fights are indoors.`
+        : soccer
+          ? `Weather is not wired up for ${label}. Matches are outdoors and conditions do matter, but this connector has no stadium coordinate table for European grounds, and inventing one would be worse than returning nothing. Check conditions by live search if a total depends on it.`
+          : slots
+            ? `Weather is not wired up for ${label}. Tour events move between venues week to week, so there is no fixed stadium table to look up, and guessing a location would be worse than returning nothing. Grand Slam roof status must be checked via live search.`
+            : `Weather is not a factor for ${label}.`,
+
+    teamSplits:
+      sport === "ufc" || slots
+        ? `Team splits do not apply to ${label} - there are no teams. For head-to-head history between two competitors, use live search; SGO's event feed is not a reliable H2H source across seasons.`
+        : soccer
+          ? `Team splits are not wired up for ${label}. Home and away form is genuinely meaningful in soccer, but this tool computes it from BALLDONTLIE standings, and BDL's paid tiers are PER SPORT - this account's subscription does not cover it, so the call would 401. A DRAW also breaks the win/loss tally this aggregator assumes, so a number produced here would be wrong in a way that looks right.`
+          : sport === "cbb"
+            ? `Team splits are not wired up for ${label}. BALLDONTLIE's tiers are per sport and this account's subscription does not cover NCAAB, so the standings call would 401 rather than return a home/road record.`
+            : `Team splits are not available for ${label}.`,
   };
   return reasons[capability];
 }

@@ -14,6 +14,9 @@ import {
   priorSeasonBdlLookback,
 } from "../services/bdlHitRateAggregator.js";
 import { getCfbdPlayerHitRate } from "../services/cfbdHitRateAggregator.js";
+import { CBBDClient } from "../services/cbbdClient.js";
+import { getCbbdPlayerHitRate, deriveCbbdTeamName } from "../services/cbbdHitRateAggregator.js";
+import { isCbbdStatSupported } from "../services/cbbdStatMap.js";
 import { isCfbdStatSupported } from "../services/cfbdStatMap.js";
 import type { CFBDClient } from "../services/cfbdClient.js";
 import { currentSeason } from "../services/seasonBoundary.js";
@@ -130,6 +133,21 @@ const DEFAULT_MAX_PLAYERS: Record<SportKey, number> = {
   cfb: 80,   // 49 observed; measured to cost nothing extra, so do not clip
   atp: 0,    // no roster - refused by the capability guard before reaching here
   wta: 0,
+
+  // College basketball dresses far fewer players than football, and only eight or
+  // nine take meaningful minutes, so a priced board rarely passes ~20 players. 24
+  // covers both benches with headroom. The v2.8.12 measurement applies here for the
+  // same reason it applied to CFB: the event is fetched once regardless of how many
+  // players are read out of it, so a larger cap costs latency, not quota.
+  cbb: 24,
+
+  // Eleven a side plus substitutes. 30 covers both full matchday squads; real boards
+  // are far thinner than that.
+  epl: 30,
+  ucl: 30,
+
+  // TWO FIGHTERS. Not a cap in any meaningful sense, it is the size of the sport.
+  ufc: 2,
 };
 
 /**
@@ -402,7 +420,8 @@ export function registerScreenPropsTool(
   server: McpServer,
   sgo: SGOClient,
   bdl: BDLClient,
-  cfbd: CFBDClient | null
+  cfbd: CFBDClient | null,
+  cbbd: CBBDClient | null = null
 ) {
   server.registerTool(
     "tkb_screen_props",
@@ -532,6 +551,31 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       // Without this, an empty tennis catalog produces "No countable markets for
       // atp. Available: " with nothing after the colon - accurate, and useless
       // about why. The capability message explains that it is structural.
+      // A SCREEN IS A RATE OPERATION. Every threshold this tool applies - hit rate,
+      // sample size, the current-season floor added in v2.8.12 - is computed from a
+      // counted game log. On a sport with no game-log source there is nothing to
+      // threshold, and running anyway would return a board of props with every rate
+      // missing, which reads like a quiet night rather than like a missing source.
+      //
+      // Refused here rather than per-prop so the reason is stated ONCE, with the
+      // alternative named. tkb_get_prop_board pulls the same markets with real prices
+      // and no rates, which is the correct tool for these sports today.
+      if (!supportsCapability(input.sport as SportKey, "hitRates")) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `${unsupportedMessage(input.sport as SportKey, "hitRates")}\n\n` +
+                `tkb_screen_props SCREENS ON COUNTED RATES, so with no game-log source ` +
+                `there is nothing for it to rank and it would return a board with every ` +
+                `rate blank. Use tkb_get_prop_board instead - same markets, real prices, ` +
+                `no rate claims - and write the reasoning from research.`,
+            },
+          ],
+        };
+      }
+
       if (!supportsCapability(input.sport as SportKey, "playerProps")) {
         return {
           content: [
@@ -731,6 +775,7 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       let bdlServed = 0;
       let sgoFallback = 0;
       let cfbdServed = 0;
+      let cbbdServed = 0;
       const bdlFailures = new Map<string, number>();
 
       const availabilityFor = async (
@@ -759,6 +804,13 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
         // is genuinely unknown from any wired source, and the routing line below
         // says so instead of implying a clean bill of health.
         if (input.sport === "cfb") return null;
+
+        // CBB does NOT need this probe, and must not be given the CFB treatment
+        // either. CollegeBasketballData omits a player who logged no minutes, so the
+        // hit-rate path already distinguishes a DNP from a quiet game and reports a
+        // real play rate. Probing SGO would spend requests to re-derive something
+        // already known, and derive it less reliably.
+        if (input.sport === "cbb") return null;
 
         let team = availabilityByTeam.get(teamID);
         if (!team) {
@@ -818,6 +870,43 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
             // projected 100, and the output gave no indication why. A fallback
             // that hides its own cause is indistinguishable from a fallback that
             // never fires.
+            // ---- CBB GOES TO CollegeBasketballData BEFORE ANYTHING ELSE ----
+            //
+            // Same rule as CFB below, same reason. BDL gates NCAAB player stats
+            // behind GOAT for that sport and SGO carries college games rather than
+            // college box scores, so an SGO fallback here would not cost more, it
+            // would manufacture DNPs. Routed away entirely.
+            if (input.sport === "cbb" && cbbd && isCbbdStatSupported(c.statID)) {
+              try {
+                const cbbdRate = await getCbbdPlayerHitRate(cbbd, {
+                  // The DISPLAY NAME, never the SGO teamID. CBBD keys box scores by
+                  // team name, and the v2.8.6 CFB outage was exactly this line
+                  // handing over COLORADO_NCAAF instead of "Colorado".
+                  teamName: teamNames[player.teamID] ?? deriveCbbdTeamName(player.teamID),
+                  playerName: player.name,
+                  statID: c.statID,
+                  line: c.line,
+                  direction: c.side,
+                });
+                cbbdServed++;
+                return cbbdRate as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                const bucket = msg.includes("AMBIGUOUS PLAYER")
+                  ? "cbbd ambiguous name"
+                  : msg.includes("no CollegeBasketballData mapping")
+                    ? "cbbd stat not mapped"
+                    : msg.includes("401")
+                      ? "cbbd auth"
+                      : msg.includes("429")
+                        ? "cbbd quota"
+                        : "cbbd other";
+                bdlFailures.set(bucket, (bdlFailures.get(bucket) ?? 0) + 1);
+                // DO NOT FALL THROUGH TO SGO ON CBB, for the same reason as CFB.
+                return undefined as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
+              }
+            }
+
             // ---- CFB GOES TO CollegeFootballData BEFORE ANYTHING ELSE ----
             //
             // SGO carries CFB games but not CFB player box scores outside the
@@ -903,6 +992,15 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
               );
             }
             if (!rate) {
+              if (input.sport === "cbb") {
+                // Reached only when CBBD is unavailable or the stat is unmapped.
+                // Refusing keeps a fabricated DNP pattern off the board.
+                bdlFailures.set(
+                  "cbb has no rate source",
+                  (bdlFailures.get("cbb has no rate source") ?? 0) + 1
+                );
+                return undefined as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
+              }
               if (input.sport === "cfb") {
                 // Reached only when CFBD is unavailable or the stat is unmapped.
                 // Refusing keeps a fabricated DNP pattern out of the board.
@@ -1134,7 +1232,7 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           `do NOT publish prices from this board without re-pulling at your books.`;
 
       const routing =
-        bdlServed + sgoFallback + cfbdServed === 0
+        bdlServed + sgoFallback + cfbdServed + cbbdServed === 0
           ? `\n\n${bookLine}${priorSeasonLine}${seasonFloorLine}${rosterLine}${diversityLine}` +
             (input.sport === "cfb" && !cfbd
               ? ` NO CFB RATE SOURCE: CFBD_API_KEY is not set, so no CFB prop can be ` +
@@ -1144,6 +1242,7 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           : `\n\n${bookLine}${priorSeasonLine}${seasonFloorLine}${rosterLine}${diversityLine} Rate sources: ${bdlServed} from BALLDONTLIE (no SGO quota), ` +
             `${sgoFallback} from SportsGameOdds` +
             (cfbdServed ? `, ${cfbdServed} from CollegeFootballData` : "") +
+            (cbbdServed ? `, ${cbbdServed} from CollegeBasketballData` : "") +
             `.` +
             (bdlFailures.size
               ? ` BDL fallback reasons: ` +
@@ -1169,6 +1268,12 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
               // CFB IS NOT A FAILED PROBE, IT IS A SKIPPED ONE, and the two must not
               // read the same. "Unavailable" invites a retry; "structurally
               // impossible, here is what to do instead" does not.
+              if (input.sport === "cbb") {
+                return ` Availability: NOT PROBED for CBB, and it does not need to be. ` +
+                  `CollegeBasketballData lists a player only when he logged minutes, so ` +
+                  `the hit-rate path already separates a DNP from a quiet game and reports ` +
+                  `a real play rate per player. Read that rather than this line.`;
+              }
               if (input.sport === "cfb") {
                 return ` Availability: NOT PROBED for CFB, deliberately. SportsGameOdds ` +
                   `carries no CFB player box scores outside the playoff, so the probe can ` +

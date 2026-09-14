@@ -6,6 +6,7 @@ import { SUPPORTED_SPORTS } from "./constants.js";
 import { SGOClient } from "./services/sgoClient.js";
 import { BDLClient } from "./services/bdlClient.js";
 import { CFBDClient } from "./services/cfbdClient.js";
+import { CBBDClient } from "./services/cbbdClient.js";
 import { MLBStatsClient } from "./services/mlbStatsClient.js";
 import { WeatherClient } from "./services/weatherClient.js";
 import { registerScheduleTool } from "./tools/schedule.js";
@@ -18,6 +19,7 @@ import { registerPeriodOddsTool } from "./tools/periodOdds.js";
 import { registerWeatherTool } from "./tools/weather.js";
 import { registerPlayersTool } from "./tools/players.js";
 import { registerUsageTool } from "./tools/usage.js";
+import { registerLeagueAccessTool } from "./tools/leagueAccess.js";
 import { registerGradePicksTool } from "./tools/gradePicks.js";
 import { registerScreenPropsTool } from "./tools/screenProps.js";
 import { registerCoverPlayerTool } from "./tools/coverPlayer.js";
@@ -71,6 +73,21 @@ const CFBD_API_KEY = process.env.CFBD_API_KEY;
 const cfbd = CFBD_API_KEY ? new CFBDClient(CFBD_API_KEY) : null;
 
 /**
+ * CBBD IS OPTIONAL FOR THE SAME REASON CFBD IS, and is a SEPARATE KEY.
+ *
+ * It is not the CFBD key under another name: CollegeBasketballData issues its own,
+ * free at collegebasketballdata.com/key. What the two DO share is the monthly call
+ * quota, which is tied to the account rather than to the sport - so November and
+ * early December, when both seasons overlap, is the one stretch where CFB usage can
+ * exhaust CBB.
+ *
+ * Without it, CBB hit rates refuse rather than falling back to a source that cannot
+ * answer. Every other CBB tool works normally.
+ */
+const CBBD_API_KEY = process.env.CBBD_API_KEY;
+const cbbd = CBBD_API_KEY ? new CBBDClient(CBBD_API_KEY) : null;
+
+/**
  * NO KEY, SO NO CONDITIONAL. statsapi.mlb.com is unauthenticated and unmetered, so
  * unlike SGO, BDL and CFBD there is nothing to configure and nothing to gate on.
  * The tool fails soft at call time if the feed is unreachable.
@@ -81,6 +98,15 @@ if (!cfbd) {
     "WARN: CFBD_API_KEY is not set. CFB hit rates will refuse rather than fall back " +
       "to SportsGameOdds, which carries no CFB player box scores outside the playoff. " +
       "Every other tool is unaffected."
+  );
+}
+if (!cbbd) {
+  console.warn(
+    "WARN: CBBD_API_KEY is not set. College basketball hit rates will refuse rather " +
+      "than fall back to SportsGameOdds or BALLDONTLIE, neither of which can serve " +
+      "NCAAB player box scores on this account. It is a SEPARATE key from CFBD_API_KEY " +
+      "(free at collegebasketballdata.com/key) on a SHARED monthly quota. Every other " +
+      "tool is unaffected."
   );
 }
 const weather = new WeatherClient(); // no API key needed - free public NWS API
@@ -113,7 +139,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.8.12";
+const SERVER_VERSION = "2.9.0";
 
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -123,16 +149,17 @@ function buildServer(): McpServer {
 
   registerScheduleTool(server, sgo);
   registerOddsTool(server, sgo);
-  registerHitRateTool(server, sgo, bdl, cfbd);
+  registerHitRateTool(server, sgo, bdl, cfbd, cbbd);
   registerInjuriesTool(server, bdl);
   registerSplitsTool(server, sgo, bdl);
   registerYesNoPropsTool(server, sgo);
   registerPeriodOddsTool(server, sgo);
   registerWeatherTool(server, weather);
   registerPlayersTool(server, sgo);
-  registerUsageTool(server, sgo, cfbd);
+  registerUsageTool(server, sgo, cfbd, cbbd);
+  registerLeagueAccessTool(server, sgo);
   registerGradePicksTool(server, sgo, bdl);
-  registerScreenPropsTool(server, sgo, bdl, cfbd);
+  registerScreenPropsTool(server, sgo, bdl, cfbd, cbbd);
   registerCoverPlayerTool(server, sgo, bdl);
   registerTweetCharsTool(server);
   registerBdlStatsProbeTool(server, bdl);

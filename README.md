@@ -10,7 +10,7 @@ Render Web Service, Node environment:
 
 - Build: `npm install && npm run build`
 - Start: `npm start`
-- Env vars: `SGO_API_KEY`, `BDL_API_KEY`, `CFBD_API_KEY` (CFBD optional: without it every other tool works and CFB hit rates refuse rather than fall back)
+- Env vars: `SGO_API_KEY`, `BDL_API_KEY`, `CFBD_API_KEY`, `CBBD_API_KEY` (the two college keys are optional and SEPARATE from each other, though they share one monthly quota: without either, every other tool works and that sport's hit rates refuse rather than fall back)
 - MCP endpoint: `https://<your-app>.onrender.com/mcp`
 - Health check: `/health`
 

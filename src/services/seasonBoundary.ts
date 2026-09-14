@@ -45,6 +45,30 @@ const SEASON_START_MONTH: Record<SportKey, number> = {
   // That is correct, not an oversight.
   atp: 0, // January
   wta: 0, // January
+
+  // COLLEGE BASKETBALL SPANS THE YEAR BOUNDARY, and gets this wrong more expensively
+  // than football does. The season tips in early November and ends with the NCAA
+  // tournament in April, so a game in February belongs to the season that STARTED the
+  // previous November. Read it as the calendar year and every January-through-April
+  // game - which is most of the season, including the entire tournament - would be
+  // filed under a season that has not begun, and the prior-season warning would fire
+  // on current-season form.
+  cbb: 10, // November
+
+  // SOCCER RUNS AUGUST TO MAY. Same boundary problem as CFB and CBB: a February
+  // fixture belongs to the season that began the previous August. The UCL group phase
+  // opens in September and the final is in late May or early June, inside the same
+  // season year.
+  epl: 7, // August
+  ucl: 7, // August
+
+  // UFC HAS NO SEASON AT ALL. Cards run year round with no offseason and no
+  // championship calendar, so "which season is this" has no meaning for a fight.
+  // January is the least wrong answer: it makes the season the calendar year, which
+  // is how fight records are conventionally reported anyway. Nothing in this
+  // connector reaches this row today, because UFC hit rates are refused upstream on
+  // the capability flag, but the table stays exhaustive over SportKey by design.
+  ufc: 0, // January, i.e. the calendar year
 };
 
 export function seasonForDate(sport: SportKey, dateISO: string): SeasonInfo | null {

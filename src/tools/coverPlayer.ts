@@ -133,6 +133,23 @@ NOT a betting-value tool. It ranks marketability and availability only.`,
       // Needs a roster to rank and an injury feed to gate on. Tennis has neither,
       // and a cover graphic built from a guess publishes with the thread and
       // cannot be quietly fixed afterwards.
+      // Same reasoning as tkb_screen_props: this tool exists to find a player whose
+      // COUNTED rate covers a line, so a sport with no game-log source has nothing
+      // for it to work with.
+      if (!supportsCapability(input.sport as SportKey, "hitRates")) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `${unsupportedMessage(input.sport as SportKey, "hitRates")}\n\n` +
+                `This tool selects on a counted hit rate, so it cannot run without one. ` +
+                `Use tkb_get_prop_board for the priced markets on this event.`,
+            },
+          ],
+        };
+      }
+
       if (!supportsCapability(input.sport as SportKey, "playerProps")) {
         return {
           content: [

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
-import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, participantModel, type SportKey } from "../constants.js";
 
 const PlayersInputSchema = z
   .object({
@@ -110,6 +110,38 @@ Error Handling:
         const raw = Object.values(event.players ?? {});
 
         if (!raw.length) {
+          // UFC IS A DIFFERENT ANSWER, NOT THE SAME ANSWER IN A DIFFERENT SPORT.
+          //
+          // "Retry closer to kickoff" is the right advice for a team sport whose
+          // props have not opened. For a fight it may be permanently wrong: SGO
+          // documents UFC as a single-participant league where the home and away
+          // slots hold the two fighters, AND separately says fighter props carry the
+          // fighter's ID in the entity slot. Those two statements are in tension and
+          // this connector has not measured which wins, so the honest answer names
+          // both possibilities and points at the one place the truth is visible.
+          if (participantModel(params.sport) === "fighters") {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `No fighters are attached to this event as PLAYERS (${teamNames[awayID]} vs ${teamNames[homeID]}).\n\n` +
+                    `THIS MAY BE PERMANENT RATHER THAN EARLY, and the difference matters. SGO ` +
+                    `documents UFC as a single-participant league in which the two fighters ` +
+                    `occupy the home and away slots - which is where they are right now, and ` +
+                    `they are named above. It separately documents fighter props as carrying ` +
+                    `the fighter's ID in the entity slot. Whether that id is ever surfaced in ` +
+                    `this players object is UNVERIFIED on this account.\n\n` +
+                    `WHAT TO DO: pull the board with tkb_get_prop_board for this event and ` +
+                    `read the oddID keys directly. If fighter props are posted, the entity ` +
+                    `segment of those keys IS the fighter id, and that is the authoritative ` +
+                    `answer. Fight-level markets - moneyline, rounds totals - address the ` +
+                    `home/away and all entities and need no player id at all.`,
+                },
+              ],
+            };
+          }
+
           return {
             content: [
               {

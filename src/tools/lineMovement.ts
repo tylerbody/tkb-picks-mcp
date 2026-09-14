@@ -4,7 +4,7 @@ import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
-import { SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, matchLinePeriodFor, type SportKey } from "../constants.js";
 import { diagnosePlayerIdMiss } from "../services/playerResolution.js";
 
 /**
@@ -148,7 +148,12 @@ Error Handling:
         const oddID = buildOddID({
           statID,
           entity,
-          period: "full_game",
+          // Match lines use `reg` for soccer; player props stay on `game`. See
+          // constants.ts matchLinePeriodFor.
+          period:
+            params.marketType === "player_prop"
+              ? "full_game"
+              : matchLinePeriodFor(params.sport),
           betType: MARKET_TYPE_CODE[params.marketType]!,
           side: params.side,
         });

@@ -224,6 +224,7 @@ import { registerPeriodOddsTool } from "../src/tools/periodOdds.js";
 import { registerWeatherTool } from "../src/tools/weather.js";
 import { registerPlayersTool } from "../src/tools/players.js";
 import { registerUsageTool } from "../src/tools/usage.js";
+import { registerLeagueAccessTool } from "../src/tools/leagueAccess.js";
 import { registerScreenPropsTool } from "../src/tools/screenProps.js";
 import { registerCoverPlayerTool } from "../src/tools/coverPlayer.js";
 import { registerTweetCharsTool } from "../src/tools/tweetChars.js";
@@ -294,21 +295,46 @@ const MLB = {
  * plausibly send; Zod fills the rest.
  */
 const EVENT_ID = "Nw0i5lD1IafZ0HlX842y";
-interface Clients { sgo: never; bdl: never; cfbd: never; weather: never; mlb: never }
-const LIVE: Clients = { sgo: SGO, bdl: BDL, cfbd: CFBD, weather: WEATHER, mlb: MLB };
+const CBBD = {
+  // Real shape: one row PER TEAM per game, with players[] nested inside. A fake
+  // that flattened it would pass while the real client failed.
+  getPlayerBoxScores: async () => [],
+  getStats: () => ({
+    requests: 0,
+    hits: 0,
+    misses: 0,
+    coalesced: 0,
+    errors: 0,
+    cachedWindows: 0,
+    permanentWindows: 0,
+    callLimitRemaining: null,
+  }),
+  seedWindow: () => undefined,
+} as never;
+
+interface Clients {
+  sgo: never;
+  bdl: never;
+  cfbd: never;
+  cbbd: never;
+  weather: never;
+  mlb: never;
+}
+const LIVE: Clients = { sgo: SGO, bdl: BDL, cfbd: CFBD, cbbd: CBBD, weather: WEATHER, mlb: MLB };
 
 const SWEEP: [string, (s: never, c: Clients) => void, Record<string, unknown>][] = [
   ["tkb_get_schedule", (s, c) => registerScheduleTool(s, c.sgo), { sport: "nfl" }],
   ["tkb_get_odds", (s, c) => registerOddsTool(s, c.sgo), { sport: "nfl", eventID: EVENT_ID, marketType: "moneyline" }],
-  ["tkb_get_player_hit_rate", (s, c) => registerHitRateTool(s, c.sgo, c.bdl, c.cfbd), { sport: "mlb", playerID: "X_1_MLB", playerName: "Test Player", teamID: "T_MLB", statID: "batting_hits", line: 0.5, direction: "over" }],
+  ["tkb_get_player_hit_rate", (s, c) => registerHitRateTool(s, c.sgo, c.bdl, c.cfbd, c.cbbd), { sport: "mlb", playerID: "X_1_MLB", playerName: "Test Player", teamID: "T_MLB", statID: "batting_hits", line: 0.5, direction: "over" }],
   ["tkb_get_injuries", (s, c) => registerInjuriesTool(s, c.bdl), { sport: "mlb" }],
   ["tkb_get_team_split", (s, c) => registerSplitsTool(s, c.sgo, c.bdl), { sport: "mlb", teamID: "T_MLB", teamName: "Baltimore Orioles", splitType: "home" }],
   ["tkb_get_yes_no_prop", (s, c) => registerYesNoPropsTool(s, c.sgo), { sport: "mlb", eventID: EVENT_ID, marketLabel: "Any Home Runs", playerID: "X_1_MLB" }],
   ["tkb_get_period_odds", (s, c) => registerPeriodOddsTool(s, c.sgo), { sport: "nfl", eventID: EVENT_ID, period: "1st_half", betType: "moneyline", side: "home" }],
   ["tkb_get_game_weather", (s, c) => registerWeatherTool(s, c.weather), { sport: "nfl", teamID: "CHICAGO_BEARS_NFL" }],
   ["tkb_get_players", (s, c) => registerPlayersTool(s, c.sgo), { sport: "nfl", eventID: EVENT_ID }],
-  ["tkb_get_api_usage", (s, c) => registerUsageTool(s, c.sgo, c.cfbd), {}],
-  ["tkb_screen_props", (s, c) => registerScreenPropsTool(s, c.sgo, c.bdl, c.cfbd), { sport: "nfl", eventID: EVENT_ID }],
+  ["tkb_get_api_usage", (s, c) => registerUsageTool(s, c.sgo, c.cfbd, c.cbbd), {}],
+  ["tkb_check_league_access", (s, c) => registerLeagueAccessTool(s, c.sgo), {}],
+  ["tkb_screen_props", (s, c) => registerScreenPropsTool(s, c.sgo, c.bdl, c.cfbd, c.cbbd), { sport: "nfl", eventID: EVENT_ID }],
   ["tkb_get_cover_player", (s, c) => registerCoverPlayerTool(s, c.sgo, c.bdl), { sport: "nfl", eventID: EVENT_ID }],
   ["tkb_count_tweet_chars", (s, _c) => registerTweetCharsTool(s), { posts: ["hello world"] }],
   ["tkb_debug_bdl_stats", (s, c) => registerBdlStatsProbeTool(s, c.bdl), { sport: "mlb", playerName: "Marte" }],
@@ -401,7 +427,18 @@ const THROWING = new Proxy(
       if (prop === "leagueIDFor") return (x: string) => String(x).toUpperCase();
       if (prop === "statsTierGated") return () => false;
       if (prop === "getCacheStats") return () => ({ hits: 0, misses: 0, coalesced: 0, upgrades: 0, entries: 0 });
-      if (prop === "getStats") return () => ({ requests: 0, cachedWeeks: 0, cachedDates: 0 });
+      if (prop === "getStats")
+        return () => ({
+          requests: 0,
+          cachedWeeks: 0,
+          cachedDates: 0,
+          // CBBD reports windows rather than weeks, and a provider-supplied
+          // remaining-call count. A proxy that answered only CFBD's shape would let
+          // a usage-tool crash through as undefined.
+          cachedWindows: 0,
+          permanentWindows: 0,
+          callLimitRemaining: null,
+        });
       if (prop === "lastFetchTruncated" || prop === "liveEventsDropped") return 0;
       if (prop === "seedWeek") return () => undefined;
       return async () => {
@@ -411,7 +448,14 @@ const THROWING = new Proxy(
   }
 ) as never;
 
-const ALL_THROWING: Clients = { sgo: THROWING, bdl: THROWING, cfbd: THROWING, weather: THROWING, mlb: THROWING };
+const ALL_THROWING: Clients = {
+  sgo: THROWING,
+  bdl: THROWING,
+  cfbd: THROWING,
+  cbbd: THROWING,
+  weather: THROWING,
+  mlb: THROWING,
+};
 
 describe("SWEEP 2 - every tool survives a provider outage", () => {
   for (const [name, reg, input] of SWEEP) {
@@ -449,6 +493,7 @@ const EMPTY: Clients = {
   } as never,
   bdl: BDL,
   cfbd: CFBD,
+  cbbd: CBBD,
   weather: WEATHER,
   mlb: MLB,
 };

@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
-import { SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, matchLinePeriodFor, type SportKey } from "../constants.js";
 import type { SGOEvent } from "../types.js";
 
 /**
@@ -99,24 +99,24 @@ interface GameLineRow {
 }
 
 /** The six oddIDs a full team-level pull needs. */
-function oddIDsFor(kinds: MarketKind[]): string[] {
+function oddIDsFor(sport: SportKey, kinds: MarketKind[]): string[] {
   const ids: string[] = [];
   if (kinds.includes("moneyline")) {
     ids.push(
-      buildOddID({ statID: "points", entity: "home", period: "full_game", betType: "ml", side: "home" }),
-      buildOddID({ statID: "points", entity: "away", period: "full_game", betType: "ml", side: "away" })
+      buildOddID({ statID: "points", entity: "home", period: matchLinePeriodFor(sport), betType: "ml", side: "home" }),
+      buildOddID({ statID: "points", entity: "away", period: matchLinePeriodFor(sport), betType: "ml", side: "away" })
     );
   }
   if (kinds.includes("spread")) {
     ids.push(
-      buildOddID({ statID: "points", entity: "home", period: "full_game", betType: "sp", side: "home" }),
-      buildOddID({ statID: "points", entity: "away", period: "full_game", betType: "sp", side: "away" })
+      buildOddID({ statID: "points", entity: "home", period: matchLinePeriodFor(sport), betType: "sp", side: "home" }),
+      buildOddID({ statID: "points", entity: "away", period: matchLinePeriodFor(sport), betType: "sp", side: "away" })
     );
   }
   if (kinds.includes("total")) {
     ids.push(
-      buildOddID({ statID: "points", entity: "all", period: "full_game", betType: "ou", side: "over" }),
-      buildOddID({ statID: "points", entity: "all", period: "full_game", betType: "ou", side: "under" })
+      buildOddID({ statID: "points", entity: "all", period: matchLinePeriodFor(sport), betType: "ou", side: "over" }),
+      buildOddID({ statID: "points", entity: "all", period: matchLinePeriodFor(sport), betType: "ou", side: "under" })
     );
   }
   return ids;
@@ -146,6 +146,7 @@ function favoriteFrom(
 }
 
 function readGame(
+  sport: SportKey,
   event: SGOEvent,
   kinds: MarketKind[]
 ): GameLineRow {
@@ -184,12 +185,12 @@ function readGame(
 
   if (kinds.includes("moneyline")) {
     const home = read(
-      buildOddID({ statID: "points", entity: "home", period: "full_game", betType: "ml", side: "home" }),
+      buildOddID({ statID: "points", entity: "home", period: matchLinePeriodFor(sport), betType: "ml", side: "home" }),
       false,
       `${homeName} moneyline`
     );
     const away = read(
-      buildOddID({ statID: "points", entity: "away", period: "full_game", betType: "ml", side: "away" }),
+      buildOddID({ statID: "points", entity: "away", period: matchLinePeriodFor(sport), betType: "ml", side: "away" }),
       false,
       `${awayName} moneyline`
     );
@@ -200,12 +201,12 @@ function readGame(
 
   if (kinds.includes("spread")) {
     const home = read(
-      buildOddID({ statID: "points", entity: "home", period: "full_game", betType: "sp", side: "home" }),
+      buildOddID({ statID: "points", entity: "home", period: matchLinePeriodFor(sport), betType: "sp", side: "home" }),
       true,
       `${homeName} spread`
     );
     const away = read(
-      buildOddID({ statID: "points", entity: "away", period: "full_game", betType: "sp", side: "away" }),
+      buildOddID({ statID: "points", entity: "away", period: matchLinePeriodFor(sport), betType: "sp", side: "away" }),
       true,
       `${awayName} spread`
     );
@@ -214,12 +215,12 @@ function readGame(
 
   if (kinds.includes("total")) {
     const over = read(
-      buildOddID({ statID: "points", entity: "all", period: "full_game", betType: "ou", side: "over" }),
+      buildOddID({ statID: "points", entity: "all", period: matchLinePeriodFor(sport), betType: "ou", side: "over" }),
       true,
       `game total over`
     );
     const under = read(
-      buildOddID({ statID: "points", entity: "all", period: "full_game", betType: "ou", side: "under" }),
+      buildOddID({ statID: "points", entity: "all", period: matchLinePeriodFor(sport), betType: "ou", side: "under" }),
       true,
       `game total under`
     );
@@ -304,7 +305,11 @@ Error Handling:
         }
 
         const leagueID = sgo.leagueIDFor(input.sport as SportKey);
-        const oddIDs = oddIDsFor(kinds).join(",");
+        // SOCCER MATCH LINES LIVE ON THE `reg` PERIOD, so the sport now decides the
+        // oddIDs rather than the market kind alone. Getting this wrong does not throw:
+        // it returns an event with no odds attached, which reads exactly like a game
+        // whose lines have not opened.
+        const oddIDs = oddIDsFor(input.sport as SportKey, kinds).join(",");
         const bookFilter =
           input.preferredBookmakers.trim().toLowerCase() === "all"
             ? undefined
@@ -369,7 +374,7 @@ Error Handling:
         }
 
         const rows = events
-          .map((e) => readGame(e, kinds))
+          .map((e) => readGame(input.sport as SportKey, e, kinds))
           .sort((a, b) => a.startTimeISO.localeCompare(b.startTimeISO));
 
         const withSomething = rows.filter(

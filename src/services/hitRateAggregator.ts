@@ -56,6 +56,27 @@ const DAYS_PER_TEAM_GAME: Record<SportKey, number> = {
   // refuses first. Present so the table stays exhaustive over SportKey.
   atp: 1,
   wta: 1,
+
+  // College basketball teams play roughly twice a week, a little denser in
+  // conference play and in tournament weeks. 3.2 is deliberately generous: the
+  // failure mode of a window that is too SMALL is losing recent games silently,
+  // while too large costs a few extra event objects.
+  cbb: 3.2,
+
+  // Soccer: one league match a week, plus midweek cup and European fixtures for the
+  // clubs this account would ever post. 5 rather than 7 accounts for that congestion.
+  // Neither of these two sports reaches this aggregator today - both refuse on the
+  // hitRates capability flag first - but an approximation that is silently wrong is
+  // worse than one that is considered, and the flag could change.
+  epl: 5,
+  ucl: 5,
+
+  // A fighter competes perhaps three times a YEAR. 120 days is the honest figure and
+  // it is deliberately absurd in this table, because it makes plain why UFC hit rates
+  // are refused rather than computed: a "last 10" window reaches back three years,
+  // across weight classes, camps and layoffs. Even with a stat source, a counted UFC
+  // hit rate would need a different design than a rolling date window.
+  ufc: 120,
 };
 
 /**

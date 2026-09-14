@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, matchLinePeriodFor, type SportKey } from "../constants.js";
 
 /**
  * LIVE PICK MONITOR / EARLY CASHOUT DETECTOR
@@ -319,7 +319,8 @@ export function livePickOddID(sport: SportKey, pick: LiveMonitorInput["picks"][n
     return buildOddID({
       statID: "points",
       entity: "all",
-      period: "full_game",
+      // A game total is a MATCH LINE, so soccer settles it on regulation.
+      period: matchLinePeriodFor(sport),
       betType: "ou",
       side: pick.side,
     });

@@ -4,7 +4,7 @@ import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { extractPricedLine } from "../services/oddsPricing.js";
-import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, matchLinePeriodFor, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
 import type { NormalizedOddsLine } from "../types.js";
 import { diagnosePlayerIdMiss } from "../services/playerResolution.js";
 
@@ -192,7 +192,20 @@ Error Handling:
               : params.marketType === "moneyline" || params.marketType === "spread"
                 ? side
                 : "all";
-          return buildOddID({ statID, entity, period: "full_game", betType: betTypeCode, side });
+          // SOCCER MATCH LINES SETTLE ON `reg`, NOT `game`. Player props stay on
+          // `game` even for soccer, so the period depends on the market kind and not
+          // only on the sport. Asking for the wrong one returns NO MARKET rather than
+          // an error, which downstream reads as "odds are not posted yet".
+          return buildOddID({
+            statID,
+            entity,
+            period:
+              params.marketType === "player_prop"
+                ? "full_game"
+                : matchLinePeriodFor(params.sport),
+            betType: betTypeCode,
+            side,
+          });
         });
 
         const leagueID = sgo.leagueIDFor(params.sport);
@@ -262,7 +275,10 @@ Error Handling:
           const oddID = buildOddID({
             statID,
             entity,
-            period: "full_game",
+            period:
+              params.marketType === "player_prop"
+                ? "full_game"
+                : matchLinePeriodFor(params.sport),
             betType: betTypeCode,
             side,
           });

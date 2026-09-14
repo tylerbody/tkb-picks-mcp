@@ -10,6 +10,9 @@ import {
   getCfbdPlayerHitRate,
   deriveCfbdTeamName,
 } from "../services/cfbdHitRateAggregator.js";
+import { CBBDClient } from "../services/cbbdClient.js";
+import { getCbbdPlayerHitRate, deriveCbbdTeamName } from "../services/cbbdHitRateAggregator.js";
+import { isCbbdStatSupported } from "../services/cbbdStatMap.js";
 import { isCfbdStatSupported } from "../services/cfbdStatMap.js";
 import type { CFBDClient } from "../services/cfbdClient.js";
 import { currentSeason } from "../services/seasonBoundary.js";
@@ -82,7 +85,8 @@ export function registerHitRateTool(
   server: McpServer,
   sgo: SGOClient,
   bdl: BDLClient,
-  cfbd: CFBDClient | null
+  cfbd: CFBDClient | null,
+  cbbd: CBBDClient | null = null
 ) {
   server.registerTool(
     "tkb_get_player_hit_rate",
@@ -160,6 +164,110 @@ Error Handling:
         // for a returning starter. So a missing CFBD key REFUSES rather than falls
         // back, per the rule this connector is built on - an unanswerable question
         // gets a refusal, not a plausible answer.
+        // ---- COLLEGE BASKETBALL GOES TO CollegeBasketballData, AND ONLY THERE ----
+        //
+        // Same rule as CFB, same reason, decided in advance rather than after an
+        // outage. BALLDONTLIE gates NCAAB /player_stats behind GOAT for that sport,
+        // and SGO carries college GAMES rather than college player box scores. A
+        // fallback to SGO would not degrade the answer, it would manufacture one:
+        // empty games read as DNPs, which is exactly what produced a returning
+        // starter at a 0.2 play rate on the football side in v2.7.0.
+        //
+        // So a missing CBBD key REFUSES.
+        const wantsCbbd =
+          params.sport === "cbb" && params.dataSource !== "sgo" && params.dataSource !== "bdl";
+
+        if (wantsCbbd) {
+          if (!cbbd) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `COLLEGE BASKETBALL HIT RATES ARE UNAVAILABLE: CBBD_API_KEY is not set ` +
+                    `on this server, so CollegeBasketballData cannot be reached.\n\n` +
+                    `This does NOT fall back to SportsGameOdds or BALLDONTLIE, ` +
+                    `deliberately. SGO carries college games but not college player box ` +
+                    `scores, and BDL gates NCAAB player stats behind GOAT for that sport. ` +
+                    `Either fallback would report played games as DNPs and return a ` +
+                    `confident wrong number rather than no number.\n\n` +
+                    `Set CBBD_API_KEY in the environment - a free key is issued at ` +
+                    `collegebasketballdata.com/key, and note it is a SEPARATE key from ` +
+                    `CFBD_API_KEY sharing the same monthly quota. Until then build CBB ` +
+                    `threads from tkb_get_prop_board and tkb_get_game_lines, which need no ` +
+                    `rate source.`,
+                },
+              ],
+            };
+          }
+          if (!isCbbdStatSupported(params.statID)) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `"${params.statID}" has no CollegeBasketballData mapping, so no CBB hit ` +
+                    `rate can be counted for it. Do NOT substitute a value or fall back to ` +
+                    `another source.`,
+                },
+              ],
+            };
+          }
+
+          // CBBD KEYS BOX SCORES BY TEAM NAME, NOT BY SGO teamID. SGO writes
+          // PURDUE_NCAAB; CBBD writes "Purdue". This is the v2.8.6 CFB bug waiting to
+          // happen again, so the derivation and the report-what-was-searched behaviour
+          // both ship from day one.
+          const explicitCbbTeam = params.teamName?.trim();
+          const cbbdTeamName = explicitCbbTeam || deriveCbbdTeamName(params.teamID);
+          const cbbTeamWasDerived = !explicitCbbTeam;
+
+          const cbbdResult = await getCbbdPlayerHitRate(cbbd, {
+            teamName: cbbdTeamName,
+            playerName: params.playerName,
+            statID: params.statID,
+            line: params.line,
+            direction: params.direction,
+            targetAppearances: params.lookbackGames,
+          });
+
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  (cbbdResult.sampleWarning ? `${cbbdResult.sampleWarning}\n\n` : "") +
+                  `${cbbdResult.playerName}: ${cbbdResult.gamesHit} of ` +
+                  `${cbbdResult.gamesConsidered} ${params.direction} ${params.line} ` +
+                  `${params.statID}\n\n` +
+                  `Source: CollegeBasketballData` +
+                  (cbbdResult.matchedFields.length
+                    ? ` (read from ${cbbdResult.matchedFields.join(", ")})`
+                    : "") +
+                  `.\n\nNOTE: ${cbbdResult.recentAvailability.note}` +
+                  (cbbdResult.cbbdAthleteID === null
+                    ? `\n\nTEAM SEARCHED: "${cbbdTeamName}"` +
+                      (cbbTeamWasDerived
+                        ? ` - DERIVED from teamID "${params.teamID}" because no teamName was ` +
+                          `passed. CollegeBasketballData keys box scores by team NAME, and a ` +
+                          `name mismatch looks exactly like an absent player. If that derived ` +
+                          `name is wrong for this program, pass teamName explicitly and retry ` +
+                          `BEFORE concluding this player has no history.`
+                        : ` - passed explicitly, so the name is not the problem. This player ` +
+                          `logged no minutes in any scanned window.`)
+                    : "") +
+                  `\n\n` +
+                  JSON.stringify(cbbdResult, null, 2),
+              },
+            ],
+            structuredContent: {
+              ...cbbdResult,
+              cbbdTeamNameSearched: cbbdTeamName,
+              cbbdTeamNameWasDerived: cbbTeamWasDerived,
+            },
+          };
+        }
+
         const wantsCfbd =
           params.sport === "cfb" && params.dataSource !== "sgo" && params.dataSource !== "bdl";
 

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { emptyResultExplanation } from "../services/leagueAccess.js";
 import type { NormalizedGame } from "../types.js";
 import {
   normalizeTeamKey,
@@ -288,10 +289,24 @@ Error Handling:
             content: [
               {
                 type: "text" as const,
+                // AN EMPTY SLATE HAS THREE CAUSES AND USED TO HAVE ONE MESSAGE.
+                //
+                // "No games found" reads as "nothing is on tonight" whether the
+                // calendar is empty, the filters ate everything, or the installed key
+                // cannot see the league at all. On an account that swaps between a
+                // rookie key (17 leagues) and a pro key (53), that third case is real
+                // and it fails silently on a night with a full board.
+                //
+                // `events.length` settles the filter question for certain, so that
+                // branch is stated as fact rather than offered as a possibility.
                 text:
-                  `No ${params.sport.toUpperCase()} games found for the requested window/filters.` +
+                  emptyResultExplanation({
+                    sport: params.sport,
+                    windowDescription: "the requested window",
+                    fetchedBeforeFilters: events.length,
+                  }) +
                   (sgo.lastFetchTruncated
-                    ? ` NOTE: the underlying fetch hit SGO's per-request event cap, so this window may contain games that were cut off before your filters ran. Narrow the time window and re-run before concluding there is nothing on.`
+                    ? `\n\nNOTE: the underlying fetch hit SGO's per-request event cap, so this window may contain games that were cut off before your filters ran. Narrow the time window and re-run before concluding there is nothing on.`
                     : ""),
               },
             ],

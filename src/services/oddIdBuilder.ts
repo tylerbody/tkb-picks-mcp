@@ -39,15 +39,64 @@ export const PERIOD_CODES: Record<string, string> = {
   "3rd_set": "3s",
   "4th_set": "4s",
   "5th_set": "5s",
+
+  // ---- REGULATION (v2.9.0, SOCCER) ----
+  //
+  // NOT a synonym for full_game, and treating it as one is the single most
+  // expensive mistake available in this release. SGO's EPL documentation:
+  // "match lines (moneyline, spread, totals) use the `reg` period rather than
+  // `game`, because a Premier League result is settled over regulation: the
+  // full-match moneyline is points-home-reg-ml-home, while player props stay on
+  // game."
+  //
+  // So one soccer event carries markets on BOTH periods, split by market kind, and
+  // asking for the wrong one returns no market rather than an error. Callers do not
+  // choose this by hand: constants.ts exports matchLinePeriodFor(sport), and every
+  // match-line path routes through it.
+  regulation: "reg",
+
+  // ---- UFC ROUNDS ----
+  //
+  // Documented periodIDs, quoted from SGO's periodID table: "1r | 1st Round"
+  // through "5r | 5th Round". Five is the real ceiling - championship and
+  // main-event fights go five rounds, everything else goes three - and asking for
+  // 4r on a three-round fight correctly returns no market rather than an error.
+  //
+  // THE "OPENING ROUNDS" GROUPED MARKET IS DELIBERATELY ABSENT. SGO's UFC page
+  // refers to it in prose and never prints its code, and no documented periodID has
+  // that shape. Inventing one (1rx2? 1rx3?) would produce silent empty results,
+  // which is precisely the failure this file's own warning block is about.
+  "1st_round": "1r",
+  "2nd_round": "2r",
+  "3rd_round": "3r",
+  "4th_round": "4r",
+  "5th_round": "5r",
+
+  // ---- SOCCER OVERTIME PERIODS ----
+  //
+  // Documented ("et | Extra Time", "ps | Penalty Shootout") and only reachable in a
+  // knockout tie, never in league play. Present so a UCL knockout round can address
+  // them; no tool offers them in its period list yet, because nothing in the docs
+  // binds specific markets to them and this connector does not guess coverage.
+  extra_time: "et",
+  penalty_shootout: "ps",
 };
 
 /**
- * UNVERIFIED: period codes above (1h, 2h, 1q, etc.) are inferred from the single
- * confirmed example we have ("1ix5" for 1st 5 Innings, seen directly in the CSV).
- * The others follow the same apparent abbreviation logic but have not been
- * individually confirmed against a live oddID. Verify a handful of these
- * (e.g. build an oddID for "1st Half Moneyline" and check it resolves) on first
- * live test, and correct any that don't match.
+ * RESOLVED IN v2.9.0. The codes above are no longer inferred: SGO publishes a
+ * periodID table on its markets page, and every code in this map now matches it
+ * exactly - game, reg, 1h, 2h, 1q-4q, 1i-9i, 1s-5s, 1r-5r, et, ps, 1ix3/1ix5/1ix7.
+ *
+ * ONE CONTRADICTION IN THEIR OWN DOCS, WORTH RECORDING. SGO's glossary page writes
+ * the half and quarter codes REVERSED, as "h1" and "q1", in prose. The data-types
+ * markets table, the odds page, the cheat sheet and both the EPL and NCAAB league
+ * pages all write "1h" and "1q". Four sources against one, and the four include the
+ * machine-readable table, so 1h/1q is what this map uses. If a half market ever
+ * comes back empty across several sports at once, that is the first thing to retest.
+ *
+ * ALSO NOTED: SGO says "the 1ix5 periodID (1st 5 Innings) is being deprecated in
+ * favor of 1h (1st Half) for Baseball". 1ix5 still resolves today and is left in
+ * place, but MLB first-half markets should be built on 1h going forward.
  */
 
 export function buildOddID(params: {

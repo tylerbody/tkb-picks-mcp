@@ -4,11 +4,13 @@ import type { SGOClient } from "../services/sgoClient.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { SUPPORTED_SPORTS, hasDrawOutcome, matchLinePeriodFor, type SportKey } from "../constants.js";
 import {
   gradeSpread,
   gradeOverUnder,
   gradeMoneyline,
+  gradeSoccerMoneyline,
+  DRAW_CONVENTION,
   gradePlayerProp,
   missingPostedLineRefusal,
   SPREAD_SIGN_CONVENTION,
@@ -48,11 +50,18 @@ const GradeInputSchema = z
     sport: z.enum(SUPPORTED_SPORTS as [SportKey, ...SportKey[]]).describe("Which sport"),
     eventID: z.string().describe("SGO eventID for the finished game."),
     marketType: z
-      .enum(["moneyline", "spread", "total", "player_prop"])
-      .describe("Which kind of pick is being graded."),
+      .enum(["moneyline", "moneyline_3way", "spread", "total", "player_prop"])
+      .describe(
+        "Which kind of pick is being graded. moneyline_3way is the SOCCER 1X2 price, " +
+          "where the draw is its own selectable outcome and a draw is a LOSS for a team " +
+          "pick. Use plain moneyline for a two-way price."
+      ),
     side: z
-      .enum(["over", "under", "home", "away"])
-      .describe("The side that was picked. home/away for moneyline and spread, over/under for total and player_prop."),
+      .enum(["over", "under", "home", "away", "draw"])
+      .describe(
+        "The side that was picked. home/away for moneyline, moneyline_3way and spread; " +
+          "over/under for total and player_prop; draw ONLY on moneyline_3way."
+      ),
     marketLabel: z
       .string()
       .optional()
@@ -78,8 +87,9 @@ const GradeInputSchema = z
 
 type GradeInput = z.infer<typeof GradeInputSchema>;
 
-const MARKET_TYPE_CODE: Record<string, "ml" | "sp" | "ou"> = {
+const MARKET_TYPE_CODE: Record<string, "ml" | "sp" | "ou" | "ml3way"> = {
   moneyline: "ml",
+  moneyline_3way: "ml3way",
   spread: "sp",
   total: "ou",
   player_prop: "ou",
@@ -156,10 +166,31 @@ Error Handling:
           };
         }
 
+        // A draw is only selectable on a three-way price. Checked before anything is
+        // fetched, because "draw" on a two-way market means the pick was logged wrong
+        // and no amount of event data settles it.
+        if (params.side === "draw" && params.marketType !== "moneyline_3way") {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `Error: side='draw' is only valid with marketType='moneyline_3way'. ` +
+                  `The draw is a selectable outcome only on a three-way (1X2) price. ` +
+                  `${DRAW_CONVENTION}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
         if (
-          (params.marketType === "moneyline" || params.marketType === "spread") &&
+          (params.marketType === "moneyline" ||
+            params.marketType === "moneyline_3way" ||
+            params.marketType === "spread") &&
           params.side !== "home" &&
-          params.side !== "away"
+          params.side !== "away" &&
+          params.side !== "draw"
         ) {
           return {
             content: [
@@ -208,17 +239,27 @@ Error Handling:
           statID = market.statID;
         }
 
+        // ENTITY FOR A THREE-WAY DRAW IS `all`, NOT A TEAM. SGO's own market rows
+        // read points-away-1ix5-ml3way-away / points-all-1ix5-ml3way-draw /
+        // points-home-1ix5-ml3way-home: the two team sides carry their own slot and
+        // the draw carries the game-wide slot, because a draw belongs to neither team.
         const entity =
           params.marketType === "player_prop"
             ? params.playerID!
             : params.marketType === "total"
               ? "all"
-              : params.side;
+              : params.side === "draw"
+                ? "all"
+                : params.side;
 
         const oddID = buildOddID({
           statID,
           entity,
-          period: "full_game",
+          // Soccer match lines settle on `reg`; player props stay on `game`.
+          period:
+            params.marketType === "player_prop"
+              ? "full_game"
+              : matchLinePeriodFor(params.sport),
           betType: MARKET_TYPE_CODE[params.marketType],
           side: params.side,
         });
@@ -300,6 +341,66 @@ Error Handling:
         const awayScore = event.teams.away.score;
         const homeName = event.teams.home.names?.long ?? "home";
         const awayName = event.teams.away.names?.long ?? "away";
+
+        // ---- SOCCER MONEYLINE: a level score is a RESULT, not a push ----
+        //
+        // Routed before the generic moneyline branch on purpose. gradeMoneyline
+        // returns PUSH on equal scores, which is right everywhere else in this
+        // connector and wrong in the sport where a draw is the most common single
+        // scoreline. See services/pickGrader.ts for the two-way refusal.
+        if (
+          (params.marketType === "moneyline" || params.marketType === "moneyline_3way") &&
+          hasDrawOutcome(params.sport)
+        ) {
+          if (homeScore === undefined || awayScore === undefined) {
+            return {
+              content: [
+                { type: "text" as const, text: "Final scores unavailable - grade manually." },
+              ],
+            };
+          }
+          const graded = gradeSoccerMoneyline({
+            side: params.side as "home" | "away" | "draw",
+            homeScore,
+            awayScore,
+            threeWay: params.marketType === "moneyline_3way",
+            pickedName: params.side === "home" ? homeName : awayName,
+            opponentName: params.side === "home" ? awayName : homeName,
+          });
+
+          if (graded.kind === "refused") {
+            return {
+              content: [{ type: "text" as const, text: `NOT GRADED - ${graded.reason}` }],
+              structuredContent: {
+                result: "NEEDS_MANUAL_REVIEW",
+                marketType: params.marketType,
+                side: params.side,
+                finalScore: `${awayScore} - ${homeScore} (away - home)`,
+                reason: graded.reason,
+                eventID: event.eventID,
+              },
+            };
+          }
+
+          const soccerOutput = {
+            result: graded.result,
+            marketType: params.marketType,
+            side: params.side,
+            finalScore: `${awayScore} - ${homeScore} (away - home)`,
+            explanation: graded.explanation,
+            drawConvention: DRAW_CONVENTION,
+            eventID: event.eventID,
+          };
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `${graded.result}: ${graded.explanation}${finalitySource}\n\n${JSON.stringify(soccerOutput, null, 2)}`,
+              },
+            ],
+            structuredContent: soccerOutput,
+          };
+        }
 
         // ---- Moneyline: compare final scores directly, no line involved ----
         if (params.marketType === "moneyline") {
