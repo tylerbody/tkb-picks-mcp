@@ -177,6 +177,39 @@ export interface FinalityVerdict {
    * is a different verdict and now carries its own flag.
    */
   cancelled?: boolean;
+  /**
+   * IS A SECOND SOURCE WORTH ASKING? Decided here, not by the callers.
+   *
+   * ============================================================================
+   * THE GATE WAS KEYED ON A STRING THAT NEVER APPEARS
+   * ============================================================================
+   *
+   * Both graders gated the BALLDONTLIE cross-check on `finality.label === "unknown"`.
+   * That label is only produced when `displayShort` is ABSENT. Measured 2026-09-15
+   * on an upcoming UFC bout and an upcoming EPL fixture, SGO sends `displayShort: ""`
+   * - an EMPTY STRING, not a missing field - so the label was `""` and the gate never
+   * opened.
+   *
+   * The cross-check added in v2.8.12 was therefore unreachable on the exact shape it
+   * was built for: an event SGO has ingested but not yet labelled. Same empty-string
+   * blindness as the cancelled label fixed minutes earlier in v2.9.5, in a second
+   * place nobody looked.
+   *
+   * ============================================================================
+   * AND IT SHOULD NEVER FIRE ON A GAME THAT HAS NOT STARTED
+   * ============================================================================
+   *
+   * Fixing the gate alone would have spent a BDL request on every UPCOMING event
+   * anyone graded - and an upcoming game is the single most common thing to have an
+   * unlabelled status, because nothing has happened yet. Asking a second feed
+   * whether a game that starts on Saturday is final is not a lag, it is a category
+   * error, and on a slate it is dozens of pointless requests.
+   *
+   * So this is true only when the refusal is genuinely "we cannot tell":
+   *   not final, not cancelled, not affirmatively live, and the start time is in the
+   *   PAST (or unknown, where refusing to guess is the house rule).
+   */
+  crossCheckable?: boolean;
 }
 
 /**
@@ -259,11 +292,20 @@ export function assessFinality(event: SGOEvent): FinalityVerdict {
     return { final: true, label, reason: "" };
   }
 
+  // Has this event actually happened yet? An unlabelled status on a game that
+  // starts tomorrow is not an ingest lag, and a second source cannot help.
+  const startsAt = s.startsAt ? Date.parse(s.startsAt) : NaN;
+  const hasStarted = Number.isNaN(startsAt) ? true : startsAt <= Date.now();
+
   return {
     final: false,
+    crossCheckable: hasStarted,
     label,
     reason:
-      `SGO has not marked this event finished (status "${label}"). It was returned by a finalized-only query, but that flag is a ` +
+      (hasStarted
+        ? ""
+        : `This event has NOT STARTED YET (scheduled ${s.startsAt}). There is nothing to grade and no second source can help. `) +
+      `SGO has not marked this event finished (status "${label || "none"}"). It was returned by a finalized-only query, but that flag is a ` +
       `REQUEST rather than a guarantee - measured 2026-09-12, an in-progress game came back from one. ` +
       `Unknown is treated as not final here deliberately: grading a live game publishes a wrong result, while waiting costs a retry. ` +
       `Note SGO's own ingest can lag the final whistle by several minutes, so a game that plainly ended will settle shortly.`,

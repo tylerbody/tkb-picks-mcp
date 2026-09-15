@@ -264,7 +264,7 @@ Error Handling:
           // final, and why it never supplies a score.
           let crossCheckNote = "";
           let finalityResolved = finality.final;
-          if (!finality.final && finality.label === "unknown") {
+          if (finality.crossCheckable) {
             const cross = await crossCheckFinality(bdl, params.sport, event);
             crossCheckNote = cross.note;
             finalityResolved = cross.resolved;

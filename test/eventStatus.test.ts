@@ -517,3 +517,57 @@ describe("cancelled carries its own verdict", () => {
     assert.equal(v.cancelled, true);
   });
 });
+
+/**
+ * v2.9.6 - THE CROSS-CHECK GATE WAS KEYED ON A STRING THAT NEVER APPEARS.
+ *
+ * Both graders asked BALLDONTLIE only when `finality.label === "unknown"`. That
+ * label is produced only when displayShort is ABSENT. Measured 2026-09-15 on an
+ * upcoming UFC bout and an upcoming EPL fixture, SGO sends `displayShort: ""` - an
+ * empty string, not a missing field - so the gate never opened and the whole
+ * second-source feature was unreachable on the shape it was built for.
+ *
+ * The same empty-string blindness as the cancelled label, in a second place.
+ */
+describe("crossCheckable - who actually gets a second opinion", () => {
+  const past = "2020-01-01T00:00:00.000Z";
+  const future = new Date(Date.now() + 3 * 86_400_000).toISOString();
+
+  test("AN EMPTY displayShort on a started game IS cross-checkable", () => {
+    // The measured shape. Previously the gate saw "" !== "unknown" and did nothing.
+    assert.equal(assessFinality(ev({ displayShort: "", startsAt: past })).crossCheckable, true);
+  });
+
+  test("a MISSING displayShort is too, which is all the old gate ever caught", () => {
+    assert.equal(assessFinality(ev({ startsAt: past })).crossCheckable, true);
+  });
+
+  test("AN UPCOMING GAME IS NOT, however unlabelled it is", () => {
+    // Fixing the gate alone would have spent a BDL request on every future event
+    // anyone graded, which on a slate is dozens of pointless calls.
+    const v = assessFinality(ev({ displayShort: "", startsAt: future }));
+    assert.equal(v.crossCheckable, false);
+    assert.match(v.reason, /NOT STARTED YET/);
+  });
+
+  test("a LIVE game is not cross-checkable - that status is affirmative", () => {
+    assert.notEqual(assessFinality(ev({ displayShort: "4th", live: true })).crossCheckable, true);
+  });
+
+  test("a CANCELLED event is not cross-checkable", () => {
+    assert.notEqual(assessFinality(ev({ cancelled: true })).crossCheckable, true);
+  });
+
+  test("a FINAL event is not cross-checkable - nothing left to ask", () => {
+    assert.notEqual(assessFinality(ev({ finalized: true })).crossCheckable, true);
+    assert.notEqual(assessFinality(ev({ displayShort: "F", completed: true })).crossCheckable, true);
+  });
+
+  test("no startsAt at all still cross-checks, per the house rule on unknowns", () => {
+    assert.equal(assessFinality(ev({ displayShort: "" })).crossCheckable, true);
+  });
+
+  test("the refusal no longer prints an empty status as a quoted blank", () => {
+    assert.match(assessFinality(ev({ displayShort: "", startsAt: past })).reason, /status "none"/);
+  });
+});
