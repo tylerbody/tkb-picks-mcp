@@ -158,7 +158,36 @@ Error Handling:
           };
         }
 
-        if (params.marketType !== "moneyline" && params.postedLine === undefined) {
+        // A THREE-WAY MONEYLINE HAS NO LINE, which this check did not know in
+        // v2.9.0 and v2.9.1. Measured live 2026-09-14 on Leeds 4-1 Newcastle: a
+        // moneyline_3way pick was refused for "no postedLine", which is not a thing
+        // a 1X2 price has. The refusal was correct machinery pointed at the wrong
+        // market type, and it made the whole soccer grading path unusable through
+        // this tool.
+        //
+        // Listed explicitly rather than as "not a moneyline variant" so that adding
+        // a market type later cannot silently inherit the wrong side of it.
+        const marketHasNoLine =
+          params.marketType === "moneyline" || params.marketType === "moneyline_3way";
+
+        // A three-way price on a sport that cannot draw is a mis-logged pick, and
+        // saying so beats grading it as though the market existed.
+        if (params.marketType === "moneyline_3way" && !hasDrawOutcome(params.sport)) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `Error: marketType='moneyline_3way' on ${params.sport.toUpperCase()}, which has ` +
+                  `no draw outcome. A 1X2 price only exists where a match can end level. Use ` +
+                  `marketType='moneyline'.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        if (!marketHasNoLine && params.postedLine === undefined) {
           return {
             content: [
               { type: "text" as const, text: missingPostedLineRefusal(params.marketType) },

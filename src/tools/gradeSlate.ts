@@ -400,6 +400,19 @@ function gradeOne(
     };
   }
 
+  // A three-way price on a sport that cannot draw is a mis-logged pick. Without
+  // this it would fall through to the postedLine check and be refused for the wrong
+  // reason, which sends the reader looking for a line that does not exist.
+  if (p.marketType === "moneyline_3way") {
+    return {
+      ref: p.ref,
+      result: "NO_DATA",
+      detail:
+        `marketType='moneyline_3way' on ${sport.toUpperCase()}, which has no draw outcome. ` +
+        `A 1X2 price only exists where a match can end level. Use marketType='moneyline'.`,
+    };
+  }
+
   // A draw on any other market type is a mis-logged pick, not a gradeable one.
   if (p.side === "draw") {
     return {

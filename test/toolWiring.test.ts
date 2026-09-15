@@ -685,3 +685,99 @@ describe("v2.8.12 - maxPlayers bounds", () => {
     assert.throws(() => s.parse(81));
   });
 });
+
+/**
+ * v2.9.2 - A THREE-WAY MONEYLINE HAS NO LINE.
+ *
+ * Found by grading a real EPL result on the deployed v2.9.1 build: Leeds 4-1
+ * Newcastle, marketType="moneyline_3way", side="home". It came back
+ *
+ *   "NOT GRADED - no postedLine was supplied for this moneyline_3way"
+ *
+ * which is not a thing a 1X2 price has. The postedLine guard exempted "moneyline"
+ * by exact string and the new market type fell on the wrong side of it, making the
+ * entire soccer grading path unusable through this tool while every unit test on
+ * the grading maths passed.
+ *
+ * The same shape as the v2.8.9 regression this file was created for: correct logic,
+ * unreachable, because of the branch it sat behind.
+ */
+const SOCCER_EVENT = {
+  eventID: "4E4oYmO5rI4ywR4DEIiC",
+  status: { displayShort: "FT", completed: true, ended: true, live: false },
+  teams: {
+    home: { teamID: "LEEDS_EPL", names: { long: "Leeds United" }, score: 4 },
+    away: { teamID: "NEWCASTLE_EPL", names: { long: "Newcastle United" }, score: 1 },
+  },
+  players: {},
+  odds: {},
+};
+
+const soccerSgo = {
+  ...(SGO as object),
+  getAllEvents: async () => [SOCCER_EVENT],
+} as never;
+
+describe("v2.9.2 - moneyline_3way needs no postedLine", () => {
+  test("THE REGRESSION: a 1X2 pick grades without a line", async () => {
+    const { server, handlers } = captureServer();
+    registerGradePicksTool(server as never, soccerSgo, BDL);
+    const r = await handlers["tkb_grade_pick"]({
+      sport: "epl",
+      eventID: "4E4oYmO5rI4ywR4DEIiC",
+      marketType: "moneyline_3way",
+      side: "home",
+    } as never);
+    const text = r.content[0].text;
+    assert.doesNotMatch(text, /postedLine/, "a three-way price has no line to post");
+    assert.match(text, /^WIN/, "Leeds won 4-1, so the home side of the 1X2 wins");
+  });
+
+  test("a plain moneyline still needs no line either", async () => {
+    const { server, handlers } = captureServer();
+    registerGradePicksTool(server as never, soccerSgo, BDL);
+    const r = await handlers["tkb_grade_pick"]({
+      sport: "epl",
+      eventID: "E",
+      marketType: "moneyline",
+      side: "home",
+    } as never);
+    assert.doesNotMatch(r.content[0].text, /postedLine/);
+  });
+
+  test("a TOTAL still demands one, which is the behaviour being protected", async () => {
+    const { server, handlers } = captureServer();
+    registerGradePicksTool(server as never, soccerSgo, BDL);
+    const r = await handlers["tkb_grade_pick"]({
+      sport: "epl",
+      eventID: "E",
+      marketType: "total",
+      side: "over",
+    } as never);
+    assert.match(r.content[0].text, /postedLine/);
+  });
+
+  test("a three-way on a sport that cannot draw is refused BY NAME", async () => {
+    const { server, handlers } = captureServer();
+    registerGradePicksTool(server as never, fakeSgo, BDL);
+    const r = await handlers["tkb_grade_pick"]({
+      sport: "nfl",
+      eventID: "E",
+      marketType: "moneyline_3way",
+      side: "home",
+    } as never);
+    const text = r.content[0].text;
+    assert.match(text, /no draw outcome/);
+    assert.doesNotMatch(text, /postedLine/, "the wrong refusal sends the reader hunting for a line");
+  });
+
+  test("tkb_grade_slate refuses the same case rather than demanding a line", async () => {
+    const { server, handlers } = captureServer();
+    registerBatchGradeTool(server as never, fakeSgo, BDL);
+    const r = await handlers["tkb_grade_slate"]({
+      sport: "nfl",
+      picks: [{ ref: "a", eventID: EVENT_ID, marketType: "moneyline_3way", side: "home" }],
+    } as never);
+    assert.match(r.content[0].text, /no draw outcome/);
+  });
+});

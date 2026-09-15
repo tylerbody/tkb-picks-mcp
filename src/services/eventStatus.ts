@@ -90,7 +90,28 @@ function statusOf(event: SGOEvent): EventStatusish {
 function displaySaysFinal(display: string | undefined): boolean {
   if (!display) return false;
   const d = display.trim().toLowerCase();
-  return d === "f" || d.startsWith("f ") || d.startsWith("f/") || d.startsWith("final");
+  return (
+    d === "f" ||
+    d.startsWith("f ") ||
+    d.startsWith("f/") ||
+    d.startsWith("final") ||
+    // SOCCER WRITES "FT", NOT "F". Measured live 2026-09-14 across EPL and UCL:
+    // finished matches read "FT" and matches decided in extra time read "F (ET)".
+    // The second already matched on the "f " prefix; the first did not match at
+    // all, and only graded because SGO also set completed: true on those events.
+    //
+    // That is a latent trap rather than a live bug, and it is the same trap this
+    // file was built around: `completed` is exactly the field SGO was measured
+    // LAGGING on 2026-09-12, when an in-progress CFB game came back from a
+    // finalized-only query. On a soccer match whose completed flag lags, the status
+    // string would be the only remaining evidence the match had ended, and it would
+    // have been unreadable. Anchored like every other pattern here, so "FT" matches
+    // and a hypothetical "FT Pending" or "First Half" does not.
+    d === "ft" ||
+    d.startsWith("ft ") ||
+    d.startsWith("ft/") ||
+    d.startsWith("aet")
+  );
 }
 
 function displaySaysInProgress(display: string | undefined): boolean {

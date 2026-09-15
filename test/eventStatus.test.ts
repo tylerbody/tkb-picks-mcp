@@ -287,3 +287,48 @@ describe("crossCheckFinality - the fetch wrapper never throws and never fails a 
     assert.equal(r.resolved, true);
   });
 });
+
+/**
+ * v2.9.2 - SOCCER WRITES "FT", AND THIS FILE COULD NOT READ IT.
+ *
+ * Measured live 2026-09-14 across EPL and UCL, every status string on a finished
+ * match: "FT" for a normal result, "F (ET)" for one decided in extra time. The
+ * second already matched on the "f " prefix. The first matched nothing.
+ *
+ * It did not break grading on the day, because SGO also set completed: true on
+ * those events. That is exactly why it is worth a test: `completed` is the field
+ * this whole file exists because SGO was measured LAGGING, on 2026-09-12. On a
+ * soccer match where it lagged, the status string would have been the only evidence
+ * the match had ended, and it was unreadable.
+ */
+describe("soccer status strings - measured live on EPL and UCL", () => {
+  test('"FT" IS FINAL, on the status string alone with no completed flag', () => {
+    const v = assessFinality(ev({ displayShort: "FT" }));
+    assert.equal(v.final, true, "FT is how soccer says the match is over");
+  });
+
+  test('"F (ET)" is final too', () => {
+    assert.equal(assessFinality(ev({ displayShort: "F (ET)" })).final, true);
+  });
+
+  test("AET is final", () => {
+    assert.equal(assessFinality(ev({ displayShort: "AET" })).final, true);
+  });
+
+  test("the match is ALSO final when SGO sets completed, as it did on the day", () => {
+    assert.equal(assessFinality(ev({ displayShort: "FT", completed: true })).final, true);
+  });
+
+  test("a soccer match in progress is still refused", () => {
+    // Half-time on a soccer feed reads "HT", which the in-progress matcher already
+    // catches. The FT addition must not widen into it.
+    assert.equal(assessFinality(ev({ displayShort: "HT" })).final, false);
+    assert.equal(assessFinality(ev({ displayShort: "1st" })).final, false);
+  });
+
+  test("ANCHORED, not containment: a status merely CONTAINING ft is not final", () => {
+    // The v2.8.5 lesson applied to a two-letter token, where it bites hardest.
+    assert.equal(assessFinality(ev({ displayShort: "Draft" })).final, false);
+    assert.equal(assessFinality(ev({ displayShort: "Forfeit pending" })).final, false);
+  });
+});
