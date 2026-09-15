@@ -70,6 +70,16 @@ interface EventStatusish {
   displayShort?: string;
   displayLong?: string;
   startsAt?: string;
+  /**
+   * ADDED v2.9.4. Documented by SGO and never read here until a docs audit found
+   * it. `finalized` is the flag their FAQ says to grade on; `reGrade` is their
+   * signal that a settled result was revised. `displayShort` has NO documented
+   * enumeration at all - every value this file matches on was measured live, not
+   * read from a spec - which is the strongest possible argument for preferring
+   * these booleans over string matching.
+   */
+  finalized?: boolean;
+  reGrade?: boolean;
 }
 
 function statusOf(event: SGOEvent): EventStatusish {
@@ -166,6 +176,33 @@ export function assessFinality(event: SGOEvent): FinalityVerdict {
     };
   }
 
+  /* ------------------------------------------------------------------------
+   * `status.finalized` IS THE FIELD SGO TELLS YOU TO GRADE ON, and this file was
+   * built without reading it. Added v2.9.4 after a documentation audit.
+   *
+   * From SGO's FAQ, verbatim: "We recommend waiting until status.finalized is true
+   * before you finalise a grade. You can start as soon as status.ended is true."
+   *
+   * THAT IS THE ANSWER TO THE BUG THIS ENTIRE FILE EXISTS FOR. v2.8.8 was written
+   * because a `finalized: true` QUERY returned an in-progress CFB game, and the
+   * conclusion drawn was that the request flag is "a request, not a guarantee".
+   * That conclusion was right, and incomplete: the query parameter is not a
+   * guarantee, but the EVENT carries its own `status.finalized` boolean, and
+   * nothing here ever looked at it. The connector inferred finality from a display
+   * string while the feed was stating it outright in a documented field.
+   *
+   * Checked BEFORE the live-status branch on purpose. A feed that affirmatively
+   * says finalized has settled the question, and no display string should override
+   * it.
+   *
+   * ONE CAVEAT WORTH CARRYING: SGO's event schema also has `status.reGrade`, which
+   * implies a settled result can be revised after the fact. A grade is therefore
+   * not permanently immutable, and a cached one can go stale.
+   * --------------------------------------------------------------------------*/
+  if (s.finalized === true) {
+    return { final: true, label: label === "unknown" ? "Final" : label, reason: "" };
+  }
+
   if (isAffirmativelyLive(event)) {
     return {
       final: false,
@@ -174,6 +211,24 @@ export function assessFinality(event: SGOEvent): FinalityVerdict {
         `This game is STILL IN PROGRESS (status "${label}"). The score on the event is the CURRENT score, not a final one, ` +
         `and grading against it publishes a result that one more score can flip. ` +
         `Use tkb_monitor_live_picks for live games - it enforces the over/under asymmetry that a grader cannot - and re-grade once the status reads F.`,
+    };
+  }
+
+  /* `ended` is the documented "the game is over" flag, and it is WEAKER than
+   * finalized rather than equal to it. SGO's guidance is that grading may START
+   * here and should be FINALISED on `finalized`. So this grades, and says plainly
+   * that the result can still be revised - which is more useful than either
+   * refusing a finished game or pretending the number is locked. */
+  if (s.ended === true) {
+    return {
+      final: true,
+      label: label === "unknown" ? "Ended" : label,
+      reason:
+        `NOTE: this event is marked ENDED but NOT yet FINALIZED by SGO. Their own ` +
+        `guidance is that grading can start at ended and should be finalised once ` +
+        `status.finalized is true, and their schema carries a reGrade flag, so a ` +
+        `settled result can still be revised. Safe to log; worth a re-check before ` +
+        `it goes in a public record.`,
     };
   }
 
@@ -253,13 +308,81 @@ export function assessFinality(event: SGOEvent): FinalityVerdict {
  * note appended saying what the second look found. Nothing gets quieter.
  * =========================================================================== */
 
-/** Minimal structural view of BDL's game row. Deliberately not the full type. */
+/**
+ * Minimal structural view of BDL's game row.
+ *
+ * ============================================================================
+ * BALLDONTLIE HAS NO SINGLE GAME SHAPE. IT HAS ONE PER SPORT.
+ * ============================================================================
+ *
+ * Corrected v2.9.4 by a documentation audit, and the version shipped in v2.8.12
+ * was silently broken for the two sports that would use it most:
+ *
+ *   field            NFL / NBA            WNBA                 MLB
+ *   away team        visitor_team         visitor_team         away_team
+ *   home score       home_team_score      home_score           home_team_data.runs
+ *   away score       visitor_team_score   away_score           away_team_data.runs
+ *   status           "Final"              "Final"              "STATUS_FINAL"
+ *
+ * The old interface read `visitor_team`, `home_team_score` and `visitor_team_score`
+ * only. On MLB the away team never resolved, so no row ever matched; on WNBA the
+ * teams matched and both scores read undefined, so the score-agreement guard
+ * refused every time. In both cases the cross-check degraded to "could not
+ * confirm" - safe, and completely useless, and invisible because a
+ * could-not-confirm looks identical to a genuine disagreement.
+ *
+ * `status` IS NOT NORMALISED ACROSS SPORTS, which is the trap underneath the trap:
+ * MLB returns ESPN's raw "STATUS_FINAL" while NFL and NBA return "Final". A matcher
+ * anchored on "final" catches one and not the other.
+ *
+ * `status_state` IS normalised, with the same documented value set on every sport:
+ * scheduled, in_progress, final, postponed, canceled, delayed, suspended,
+ * abandoned, unknown. That is what this now keys on first. (Note "canceled" is
+ * spelled with one L there, and the SGO side of this file spells it "cancelled" -
+ * neither is wrong, they are different vendors.)
+ */
 export interface BDLGameish {
+  /** Normalised across every BDL sport. PREFERRED. */
+  status_state?: string;
+  /** Per-sport and NOT normalised: "Final" on NFL/NBA, "STATUS_FINAL" on MLB. */
   status?: string;
   home_team?: { full_name?: string; display_name?: string; name?: string; abbreviation?: string };
+  /** NFL, NBA, WNBA, NCAAF. */
   visitor_team?: { full_name?: string; display_name?: string; name?: string; abbreviation?: string };
+  /** MLB writes the away side under a different key entirely. */
+  away_team?: { full_name?: string; display_name?: string; name?: string; abbreviation?: string };
+  /** NFL / NBA / NCAAF. */
   home_team_score?: number;
   visitor_team_score?: number;
+  /** WNBA. */
+  home_score?: number;
+  away_score?: number;
+  /** MLB has NO top-level score. Runs live one level down. */
+  home_team_data?: { runs?: number };
+  away_team_data?: { runs?: number };
+}
+
+/** The away-team object, wherever this sport happens to keep it. */
+function awayTeamOf(game: BDLGameish): BDLGameish["home_team"] {
+  return game.visitor_team ?? game.away_team;
+}
+
+/**
+ * Scores, across three different per-sport spellings.
+ *
+ * Returns undefined rather than 0 when absent, because the caller's whole job is
+ * to compare two feeds' numbers and a zero that means "missing" would make two
+ * disagreeing feeds look like they agree on a 0-0.
+ */
+function bdlScores(game: BDLGameish): { home?: number; away?: number } {
+  const home =
+    game.home_team_score ?? game.home_score ?? game.home_team_data?.runs ?? undefined;
+  const away =
+    game.visitor_team_score ?? game.away_score ?? game.away_team_data?.runs ?? undefined;
+  return {
+    home: typeof home === "number" ? home : undefined,
+    away: typeof away === "number" ? away : undefined,
+  };
 }
 
 /**
@@ -298,7 +421,7 @@ function sameGame(event: SGOEvent, game: BDLGameish): boolean {
   if (!sgoHome || !sgoAway) return false;
   return (
     bdlTeamNames(game.home_team).includes(sgoHome) &&
-    bdlTeamNames(game.visitor_team).includes(sgoAway)
+    bdlTeamNames(awayTeamOf(game)).includes(sgoAway)
   );
 }
 
@@ -307,14 +430,23 @@ function sameGame(event: SGOEvent, game: BDLGameish): boolean {
  * measured on this account, so this recognises only strings that unambiguously
  * mean finished and treats everything else as "no information".
  */
-function bdlSaysFinal(status: string | undefined): boolean {
-  if (!status) return false;
-  const s = status.trim().toLowerCase();
+function bdlSaysFinal(game: BDLGameish): boolean {
+  // NORMALISED FIELD FIRST. `status_state` carries the same nine values on every
+  // BDL sport, so this branch is the only one that does not depend on guessing a
+  // vendor's per-sport spelling.
+  const state = game.status_state?.trim().toLowerCase();
+  if (state) return state === "final";
+
+  // Fallback for a row with no status_state. "STATUS_FINAL" is MLB's raw ESPN
+  // string and is why an anchored startsWith("final") was not enough.
+  const s = game.status?.trim().toLowerCase();
+  if (!s) return false;
   return (
     s === "f" ||
     s.startsWith("f ") ||
     s.startsWith("f/") ||
     s.startsWith("final") ||
+    s === "status_final" ||
     s === "closed" ||
     s === "complete" ||
     s === "completed"
@@ -349,17 +481,17 @@ export function reconcileFinalityWithBDL(
 
   const game = matches[0];
 
-  if (!bdlSaysFinal(game.status)) {
+  if (!bdlSaysFinal(game)) {
+    const shown = game.status_state ?? game.status ?? "(none)";
     return {
       resolved: false,
       note:
-        `Second-source check: BALLDONTLIE has this game too and calls its status "${game.status ?? "(none)"}", ` +
+        `Second-source check: BALLDONTLIE has this game too and calls its status "${shown}", ` +
         `which is not an affirmative final. Both feeds are therefore unsettled, and the refusal stands.`,
     };
   }
 
-  const bdlHome = game.home_team_score;
-  const bdlAway = game.visitor_team_score;
+  const { home: bdlHome, away: bdlAway } = bdlScores(game);
   const sgoHome = event.teams?.home?.score;
   const sgoAway = event.teams?.away?.score;
 
@@ -388,7 +520,7 @@ export function reconcileFinalityWithBDL(
     resolved: true,
     note:
       `Finality confirmed by SECOND SOURCE. SGO had not yet set a final status on this event, but BALLDONTLIE ` +
-      `calls it "${game.status}" at ${bdlAway}-${bdlHome} (away-home), which matches SGO's score exactly. ` +
+      `calls it "${game.status_state ?? game.status}" at ${bdlAway}-${bdlHome} (away-home), which matches SGO's score exactly. ` +
       `Graded against SGO's scores, as always - BDL supplied the finality, not the numbers.`,
   };
 }

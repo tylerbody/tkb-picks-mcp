@@ -15,16 +15,32 @@ import type { CfbdCategory } from "./cfbdStatMap.js";
  * hit-rate source for this sport at all. BALLDONTLIE gates NCAAF player stats behind
  * GOAT. CFBD is the remaining source, and its free tier covers player statistics.
  *
- * THE CALL BUDGET IS THE WHOLE DESIGN. The commonly cited free-tier limit is 1,000
- * requests a MONTH (3,000 on a verified .edu key).
+ * THE CALL BUDGET IS THE WHOLE DESIGN. Free tier is 1,000 API calls a MONTH, and
+ * 3,000 on the Academic tier, which is free with a .edu email.
  *
- * THAT FIGURE IS AN UNVERIFIED PLANNING ASSUMPTION, NOT A DOCUMENTED FACT. CFBD's
- * docs deliberately decline to state limits: "The API tiers page is the source for
- * current access levels, limits, and pricing. Those details can change, so they are
- * not duplicated here." So the number this architecture is sized against is exactly
- * the kind of decaying fact this repo forbids quoting from a secondary source. Check
- * collegefootballdata.com/api-tiers, and CFBD's own /api/info operation for real
- * usage, before treating any headroom estimate as real.
+ * CORRECTED v2.9.4. Those numbers were carried here for several releases labelled
+ * "an unverified planning assumption, not a documented fact". They ARE documented,
+ * and always were: collegefootballdata.com/api-tiers publishes the whole ladder
+ * (Free 1k, Academic 3k, then $1/5k, $5/30k, $10/75k, $15/125k, $20/200k,
+ * $30/500k). Hedging a published number is its own kind of wrong - it invites the
+ * reader to re-derive something already settled.
+ *
+ * WHAT IS GENUINELY UNDOCUMENTED, and is now labelled as such rather than guessed:
+ *   - there is NO published per-minute or concurrency limit for CFBD
+ *   - the HTTP STATUS for an exhausted quota is not published. Their errors page
+ *     lists 400/401/404/500 and describes quota only as "a quota or entitlement
+ *     response". The 429 named below is an expectation, not a contract.
+ *
+ * THE AUTHORITATIVE NUMBER IS AN ENDPOINT, NOT A CONSTANT. GET /info returns
+ * patronLevel, tierName, monthlyLimit, remainingCalls, usedCalls, resetAt and
+ * sharedPool. GET /info/usage breaks the shared CFB/CBB pool down by api, with
+ * totals.cfbRequests and totals.cbbRequests. Read those before concluding there is
+ * headroom - and note `resetAt` answers "when does this come back" exactly, which
+ * no comment in this file ever could.
+ *
+ * THE QUOTA IS SHARED WITH CollegeBasketballData. Confirmed on both key pages:
+ * "access tiers determine the shared CFBD and CBBD API quota". November and early
+ * December run both seasons at once, and football can exhaust basketball.
  *
  * The design does not depend on the exact number, which is why it survives being
  * wrong: /games/players accepts YEAR + WEEK with no team filter, and returns every
@@ -195,10 +211,14 @@ export class CFBDClient {
         );
       if (status === 429)
         throw new Error(
-          `CFBD rate limit / quota exhausted (429). The free tier is 1,000 requests ` +
-            `a MONTH (3,000 on a verified .edu key) and does not reset for days. Do ` +
-            `NOT retry in a loop. Check whether something is fetching per game or ` +
-            `per player instead of per week.`
+          `CFBD returned 429. The published free-tier limit is 1,000 calls a MONTH ` +
+            `(3,000 on the free Academic tier with a .edu email), and CFBD publishes ` +
+            `no per-minute limit at all - so this is far more likely to be the MONTHLY ` +
+            `quota than a burst limit. Do NOT retry in a loop. Two things to do: read ` +
+            `GET /info for remainingCalls and resetAt, which is authoritative and gives ` +
+            `the exact reset time, and check whether something is fetching per game or ` +
+            `per player instead of per week. NOTE the quota is SHARED with ` +
+            `CollegeBasketballData, so CFB usage can exhaust CBB and vice versa.`
         );
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`CFBD request failed for ${year} week ${week}: ${msg}`);

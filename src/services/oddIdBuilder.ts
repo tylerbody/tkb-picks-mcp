@@ -117,6 +117,35 @@ export const PERIOD_CODES: Record<string, string> = {
  * THAT STRING IS ALSO A FILTER. SGO returns only events that HAVE the requested
  * market, so an oddID no event carries returns NO EVENTS AT ALL.
  *
+ * ---------------------------------------------------------------------------
+ * THE DOCS DO NOT SAY THIS, AND A DOC AUDIT ON 2026-09-15 NEARLY UNDID THE FIX.
+ * ---------------------------------------------------------------------------
+ *
+ * SGO documents `oddID` as a RESPONSE-SHAPING parameter, grouped with bookmakerID
+ * and playerID and described as "An oddID or comma-separated list of oddIDs to
+ * include odds for". Nowhere do they say an event with zero matching markets is
+ * dropped from `data`. Read the docs alone and you would conclude this parameter
+ * cannot affect which events come back.
+ *
+ * THE MEASUREMENT DISAGREES, and the measurement is what shipped:
+ *
+ *   tkb_get_schedule sport="epl"  with points-home-game-ml-home   ->  0 events
+ *   the same call     sport="epl"  with points-home-reg-ml-home   -> 21 events
+ *
+ * One parameter changed. Twenty-one Premier League fixtures appeared. Whatever the
+ * documentation intends, the observable behaviour is that an event carrying none of
+ * the requested markets does not come back.
+ *
+ * Recorded here so nobody "corrects" this to a hard-coded string on the strength of
+ * a doc page. The doc is silent on the case, not contradictory, and silence loses to
+ * a reproducible measurement.
+ *
+ * FOR ACTUAL EVENT-LEVEL FILTERING, SGO documents two dedicated parameters that this
+ * connector does not currently use: `oddsAvailable` (events whose markets are open
+ * for wagering) and `oddsPresent` (events with any markets at all, open or not).
+ * Those are the supported way to ask "which games have a board", and they are a
+ * better tool than inferring it from a market probe.
+ *
  * Soccer match lines live on the `reg` period, not `game`. So every one of those
  * ten call sites silently excluded EPL and UCL entirely - the schedule tool
  * returned an empty slate for a league playing that week, and v2.9.0's own

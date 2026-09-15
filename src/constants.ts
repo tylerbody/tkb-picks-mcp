@@ -46,9 +46,19 @@ export const BDL_BASE_URL = "https://api.balldontlie.io";
  * problem than the reach caveat. Revisit once CFB boards fill out later in the
  * season - this is one string in one file now, which is the point.
  *
- * NOTE ON THE ID: SGO's public bookmakers page does not list Hard Rock Bet, but
- * live responses return the key `hardrockbet`. Live data beats the doc page, which
- * is demonstrably incomplete (it also omits keys the API returns).
+ * NOTE ON THE ID: `hardrockbet` is now LISTED in SGO's published bookmakers table
+ * (docs/data-types/bookmakers), alongside draftkings, fanduel, betmgm and caesars.
+ * An earlier version of this comment said the page did not list it and that live
+ * data beat the doc page. Re-checked 2026-09-15: the table has it. The underlying
+ * principle stands - that table is explicitly not exhaustive, since SGO says more
+ * bookmakers "can be made available upon request through a custom (AllStar) plan" -
+ * but the specific claim was stale and has been corrected rather than left to
+ * mislead the next reader.
+ *
+ * TWO THINGS FROM THAT PAGE WORTH CARRYING. A bookmaker appearing in the table does
+ * NOT mean this key receives it: SGO filters bookmaker odds by plan and says so in a
+ * response notice rather than an error. And `unknown` is a real bookmakerID in their
+ * list, so a book-specific lookup has to tolerate odds attributed to nobody.
  */
 export const DEFAULT_BOOKMAKERS =
   "draftkings,fanduel,betmgm,caesars,hardrockbet";
@@ -406,6 +416,57 @@ export const REGULATION_MATCH_LINE_SPORTS: SportKey[] = ["epl", "ucl"];
 /** The periodID a MATCH LINE (moneyline, spread, total) settles on for this sport. */
 export function matchLinePeriodFor(sport: SportKey): "full_game" | "regulation" {
   return REGULATION_MATCH_LINE_SPORTS.includes(sport) ? "regulation" : "full_game";
+}
+
+/**
+ * WHAT A GAME TOTAL IS ACTUALLY COUNTING, PER SPORT.
+ *
+ * ADDED v2.9.3, after a live measurement that a doc comment in this repo had
+ * already predicted and nobody had wired up.
+ *
+ * `points` is SGO's universal "stat that decides the winner", and for a moneyline
+ * that is correct in every sport here, including MMA. A TOTAL is a different
+ * question, and the answer is not always points:
+ *
+ *   MEASURED 2026-09-15, UFC 331, Pantoja vs Van:
+ *     tkb_get_odds marketType="moneyline" -> -136 / +106, FanDuel. Correct.
+ *     tkb_get_odds marketType="total"     -> "No market found for total (over)".
+ *
+ *   The tool asked for `points-all-game-ou-over`. A fight total is ROUNDS, and SGO
+ *   prints the market itself on its UFC page as `roundsCompleted-all-game-ou-over`.
+ *   Nothing was broken upstream; the connector was asking for a market that does
+ *   not exist and reporting the absence as "not offered for this game".
+ *
+ * TENNIS IS THE SAME TRAP, and this repo wrote it down before it had a tennis total
+ * to get wrong. From services/marketCatalog.ts: "IF TOTALS ARE EVER ADDED: use
+ * statID `games`, never `points`. `points` carries the SET score and settles the
+ * match winner; `games` carries the game count and is what totals and handicaps are
+ * priced on." That warning sat in a comment where no code could read it. It is a
+ * table row now.
+ *
+ * SOCCER stays on `points`, which IS goals - SGO's soccer stat list has no bare
+ * `goals` statID at all.
+ */
+export const GAME_TOTAL_STAT: Record<SportKey, string> = {
+  mlb: "points",
+  wnba: "points",
+  nfl: "points",
+  cfb: "points",
+  cbb: "points",
+  epl: "points",
+  ucl: "points",
+  // A fight total is rounds completed, not points. Quoted from SGO's UFC page.
+  ufc: "roundsCompleted",
+  // Documented by SGO as the games count rather than the set score. NOT yet
+  // measured against a live tennis board on this account - the account posts
+  // tennis moneylines only - so treat a tennis total as unverified until one
+  // returns a price.
+  atp: "games",
+  wta: "games",
+};
+
+export function gameTotalStatFor(sport: SportKey): string {
+  return GAME_TOTAL_STAT[sport];
 }
 
 /** True where a match can end level and the book prices a third outcome. */

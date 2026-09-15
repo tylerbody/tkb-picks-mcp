@@ -523,6 +523,20 @@ function formatSGOError(err: unknown, context: string): Error {
 }
 
 /**
+ * DOC CHECK 2026-09-15: only `nextCursor`, at the TOP LEVEL, is documented.
+ *
+ * SGO's data-batches guide: "If you received a response from the API and there are
+ * more items to show, you'll get a `nextCursor` at the top level of the response",
+ * and pagination terminates when it is null. The request parameter is `cursor`.
+ *
+ * The snake_case and nested candidates below are NOT documented anywhere and have
+ * never been observed. They are kept rather than deleted because a candidate list
+ * that degrades gracefully is this repo's standing pattern for provider fields
+ * (see bdlStatMap, cfbdStatMap) and an extra branch costs nothing. But do not read
+ * their presence as evidence that SGO emits them - it is not. `nextCursor` is the
+ * real one.
+ */
+/**
  * READ THE CURSOR FROM EVERY KNOWN LOCATION, NOT ONE ASSUMED SHAPE.
  *
  * v2.0.3 stated the rule while fixing BDL: "pagination stopping silently after

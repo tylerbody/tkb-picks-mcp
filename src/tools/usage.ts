@@ -99,13 +99,15 @@ Error Handling:
             `down when idle. Several cold starts a day means this number can read near zero ` +
             `while real monthly usage climbs. A budget you cannot observe is a budget you are ` +
             `assuming, which is the exact reasoning behind every other counter here.\n\n` +
-            `THE AUTHORITATIVE NUMBER is CFBD's own account info endpoint (see the "info" ` +
-            `operations at api.collegefootballdata.com/api/info). Check it directly before ` +
-            `concluding there is headroom.\n\n` +
-            `The commonly cited free-tier limit is 1,000 requests a month (3,000 on a verified ` +
-            `.edu key), but CFBD's docs deliberately do NOT publish limits - they point to the ` +
-            `API tiers page and note the figures change. Treat 1,000 as an unverified planning ` +
-            `assumption, not a fact. The DESIGN holds either way: one request returns a whole ` +
+            `THE AUTHORITATIVE NUMBER IS AN ENDPOINT. GET /info returns monthlyLimit, ` +
+            `remainingCalls, usedCalls and resetAt; GET /info/usage splits the SHARED CFB/CBB ` +
+            `pool into totals.cfbRequests and totals.cbbRequests. Read those before concluding ` +
+            `there is headroom - and remember the pool is shared, so the CollegeBasketballData ` +
+            `line below is drawing on the same allowance.\n\n` +
+            `The free tier is 1,000 calls a month and the Academic tier is 3,000 (free with a ` +
+            `.edu email) - PUBLISHED figures at collegefootballdata.com/api-tiers, not an ` +
+            `assumption. What is genuinely unpublished is any per-minute limit and the status ` +
+            `code for an exhausted quota. The DESIGN holds regardless: one request returns a whole ` +
             `week of box scores, so a prior-season backfill is ~16 requests and an in-season ` +
             `refresh is 1 a week. If this number climbs faster than that, something is fetching ` +
             `per game or per player instead of per week.`

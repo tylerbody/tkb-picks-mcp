@@ -332,3 +332,144 @@ describe("soccer status strings - measured live on EPL and UCL", () => {
     assert.equal(assessFinality(ev({ displayShort: "Forfeit pending" })).final, false);
   });
 });
+
+/**
+ * v2.9.4 - WHAT A DOCUMENTATION AUDIT FOUND THAT LIVE TESTING DID NOT.
+ *
+ * Two things, and the second was shipped broken in v2.8.12 without ever failing
+ * visibly, because its failure mode is a "could not confirm" that looks exactly
+ * like a genuine disagreement.
+ */
+describe("status.finalized - the field SGO tells you to grade on", () => {
+  test("finalized beats everything, including a missing display string", () => {
+    // SGO FAQ, verbatim: "We recommend waiting until status.finalized is true
+    // before you finalise a grade." This file spent two releases inferring
+    // finality from display strings while the feed stated it in a boolean.
+    const v = assessFinality(ev({ finalized: true }));
+    assert.equal(v.final, true);
+    assert.equal(v.reason, "");
+  });
+
+  test("ENDED grades, but says the result can still be revised", () => {
+    // Their guidance: grading may START at ended and be FINALISED at finalized.
+    // The schema also carries reGrade, so a settled result is not immutable.
+    const v = assessFinality(ev({ ended: true }));
+    assert.equal(v.final, true);
+    assert.match(v.reason, /NOT yet FINALIZED/);
+    assert.match(v.reason, /reGrade/);
+  });
+
+  test("A LIVE GAME IS STILL REFUSED even though it has started", () => {
+    assert.equal(assessFinality(ev({ started: true, live: true, displayShort: "4th" })).final, false);
+  });
+
+  test("finalized still cannot resurrect a CANCELLED event", () => {
+    const v = assessFinality(ev({ cancelled: true, finalized: true }));
+    assert.equal(v.final, false);
+    assert.match(v.reason, /CANCELLED/);
+  });
+});
+
+describe("the BDL cross-check speaks every BDL sport, not just NFL", () => {
+  const sgoEvent = (home: number, away: number): SGOEvent =>
+    ({
+      eventID: "E",
+      status: { startsAt: "2026-09-14T23:30:00.000Z" },
+      teams: {
+        home: { names: { long: "Los Angeles Dodgers" }, score: home },
+        away: { names: { long: "San Diego Padres" }, score: away },
+      },
+    }) as unknown as SGOEvent;
+
+  test("MLB: away_team, nested runs, and ESPN's raw STATUS_FINAL", () => {
+    // Every one of these three differs from the NFL shape the v2.8.12 code read,
+    // so an MLB row previously matched NOTHING and the check silently did nothing.
+    const mlbRow = {
+      status: "STATUS_FINAL",
+      status_state: "final",
+      home_team: { full_name: "Los Angeles Dodgers" },
+      away_team: { full_name: "San Diego Padres" },
+      home_team_data: { runs: 5 },
+      away_team_data: { runs: 3 },
+    };
+    const r = reconcileFinalityWithBDL(sgoEvent(5, 3), [mlbRow]);
+    assert.equal(r.resolved, true, "MLB must resolve through away_team and *_team_data.runs");
+  });
+
+  test("MLB status alone, with no status_state, still reads as final", () => {
+    const r = reconcileFinalityWithBDL(sgoEvent(5, 3), [
+      {
+        status: "STATUS_FINAL",
+        home_team: { full_name: "Los Angeles Dodgers" },
+        away_team: { full_name: "San Diego Padres" },
+        home_team_data: { runs: 5 },
+        away_team_data: { runs: 3 },
+      },
+    ]);
+    assert.equal(r.resolved, true, 'startsWith("final") does not catch "STATUS_FINAL"');
+  });
+
+  test("WNBA: home_score / away_score rather than *_team_score", () => {
+    const wnbaEvent = {
+      eventID: "E",
+      status: { startsAt: "2026-09-14T23:30:00.000Z" },
+      teams: {
+        home: { names: { long: "Las Vegas Aces" }, score: 88 },
+        away: { names: { long: "New York Liberty" }, score: 81 },
+      },
+    } as unknown as SGOEvent;
+    const r = reconcileFinalityWithBDL(wnbaEvent, [
+      {
+        status_state: "final",
+        home_team: { full_name: "Las Vegas Aces" },
+        visitor_team: { full_name: "New York Liberty" },
+        home_score: 88,
+        away_score: 81,
+      },
+    ]);
+    assert.equal(r.resolved, true);
+  });
+
+  test("NFL's original shape still works, so this is additive", () => {
+    const r = reconcileFinalityWithBDL(sgoEvent(24, 17), [
+      {
+        status: "Final",
+        home_team: { full_name: "Los Angeles Dodgers" },
+        visitor_team: { full_name: "San Diego Padres" },
+        home_team_score: 24,
+        visitor_team_score: 17,
+      },
+    ]);
+    assert.equal(r.resolved, true);
+  });
+
+  test("status_state OVERRULES a status string that merely looks final", () => {
+    // in_progress is authoritative; the per-sport status field is not.
+    const r = reconcileFinalityWithBDL(sgoEvent(5, 3), [
+      {
+        status: "Final",
+        status_state: "in_progress",
+        home_team: { full_name: "Los Angeles Dodgers" },
+        away_team: { full_name: "San Diego Padres" },
+        home_team_data: { runs: 5 },
+        away_team_data: { runs: 3 },
+      },
+    ]);
+    assert.equal(r.resolved, false);
+    assert.match(r.note, /in_progress/);
+  });
+
+  test("A MISSING SCORE IS NOT A ZERO", () => {
+    // If an absent score read as 0, two feeds that disagree would look like they
+    // agreed on 0-0 and the check would confirm a game it knows nothing about.
+    const r = reconcileFinalityWithBDL(sgoEvent(0, 0), [
+      {
+        status_state: "final",
+        home_team: { full_name: "Los Angeles Dodgers" },
+        away_team: { full_name: "San Diego Padres" },
+      },
+    ]);
+    assert.equal(r.resolved, false);
+    assert.match(r.note, /missing a score/i);
+  });
+});
