@@ -473,3 +473,47 @@ describe("the BDL cross-check speaks every BDL sport, not just NFL", () => {
     assert.match(r.note, /missing a score/i);
   });
 });
+
+/**
+ * v2.9.5 - CANCELLED IS NOT "NOT FINAL YET".
+ *
+ * Measured 2026-09-15 on a cancelled UFC bout (Young vs Steele), the response
+ * contradicted itself:
+ *
+ *   result: "NOT_FINAL"
+ *   detail: "...it belongs in the tracker as Void rather than as a Hit or a Miss."
+ *
+ * A human reads the sentence and files it as void. A tracker reads the field and
+ * files it as ungraded, then waits for a game that is never coming. One response,
+ * two answers.
+ */
+describe("cancelled carries its own verdict", () => {
+  test("a cancelled event is flagged cancelled, not merely not-final", () => {
+    const v = assessFinality(ev({ cancelled: true }));
+    assert.equal(v.final, false);
+    assert.equal(v.cancelled, true);
+  });
+
+  test("an ordinary unfinished game is NOT flagged cancelled", () => {
+    // NOT_FINAL means "ask again later" and must stay distinct.
+    assert.equal(assessFinality(ev({ displayShort: "4th", live: true })).cancelled, undefined);
+    assert.equal(assessFinality(ev({})).cancelled, undefined);
+  });
+
+  test("AN EMPTY displayShort still gets a readable label", () => {
+    // Measured: a cancelled fight whose displayShort was "" reported a blank status
+    // label, because the old fallback only caught the literal string "unknown".
+    assert.equal(assessFinality(ev({ cancelled: true, displayShort: "" })).label, "cancelled");
+    assert.equal(assessFinality(ev({ cancelled: true, displayShort: "   " })).label, "cancelled");
+  });
+
+  test("a real status label survives", () => {
+    assert.equal(assessFinality(ev({ cancelled: true, displayShort: "CANC" })).label, "CANC");
+  });
+
+  test("finalized cannot override a cancellation", () => {
+    const v = assessFinality(ev({ cancelled: true, finalized: true }));
+    assert.equal(v.final, false);
+    assert.equal(v.cancelled, true);
+  });
+});

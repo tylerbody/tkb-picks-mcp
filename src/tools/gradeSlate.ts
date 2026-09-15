@@ -4,7 +4,7 @@ import type { SGOClient } from "../services/sgoClient.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
-import { SUPPORTED_SPORTS, hasDrawOutcome, matchLinePeriodFor, type SportKey } from "../constants.js";
+import { gameTotalStatFor, SUPPORTED_SPORTS, hasDrawOutcome, matchLinePeriodFor, type SportKey } from "../constants.js";
 import type { SGOEvent } from "../types.js";
 import {
   gradeSpread,
@@ -277,7 +277,11 @@ Error Handling:
             for (const p of picks) {
               graded.push({
                 ref: p.ref,
-                result: "NOT_FINAL",
+                // A CANCELLED EVENT IS VOID, NOT "NOT FINAL YET". The prose already
+                // said so; the result field used to disagree with it, so a tracker
+                // filed the pick as ungraded and waited for a game that is never
+                // coming. See services/eventStatus.ts.
+                result: finality.cancelled ? "VOID" : "NOT_FINAL",
                 detail,
                 statusLabel: finality.label,
               });
@@ -357,6 +361,9 @@ Error Handling:
 }
 
 function resolveStatID(sport: SportKey, p: BatchGradeInput["picks"][number]): string | null {
+  // A TOTAL counts rounds in MMA and games in tennis, not points. See
+  // GAME_TOTAL_STAT in constants.ts.
+  if (p.marketType === "total") return gameTotalStatFor(sport);
   if (p.marketType !== "player_prop") return "points";
   if (!p.marketLabel) return null;
   const market = OU_PROP_MARKETS[sport].find(

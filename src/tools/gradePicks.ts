@@ -4,7 +4,7 @@ import type { SGOClient } from "../services/sgoClient.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
-import { SUPPORTED_SPORTS, hasDrawOutcome, matchLinePeriodFor, type SportKey } from "../constants.js";
+import { gameTotalStatFor, SUPPORTED_SPORTS, hasDrawOutcome, matchLinePeriodFor, type SportKey } from "../constants.js";
 import {
   gradeSpread,
   gradeOverUnder,
@@ -248,7 +248,10 @@ Error Handling:
           };
         }
 
-        let statID = "points";
+        // A TOTAL IS NOT ALWAYS COUNTING POINTS. A fight total counts ROUNDS and a
+        // tennis total counts GAMES; `points` is the winner stat, not the total
+        // stat. See GAME_TOTAL_STAT in constants.ts for the measurement.
+        let statID = params.marketType === "total" ? gameTotalStatFor(params.sport) : "points";
         if (params.marketType === "player_prop") {
           const catalog = OU_PROP_MARKETS[params.sport];
           const market = catalog.find(
@@ -348,11 +351,13 @@ Error Handling:
             content: [
               {
                 type: "text" as const,
-                text: `NOT GRADED - ${reason}`,
+                text: `${finality.cancelled ? "VOID" : "NOT GRADED"} - ${reason}`,
               },
             ],
             structuredContent: {
-              result: "NOT_FINAL",
+              // Cancelled is VOID, not NOT_FINAL - the latter means "ask again
+              // later", and a cancelled event will never be final.
+              result: finality.cancelled ? "VOID" : "NOT_FINAL",
               eventID: event.eventID,
               statusLabel: finality.label,
               reason,

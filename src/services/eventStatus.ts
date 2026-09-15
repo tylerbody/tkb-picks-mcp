@@ -158,6 +158,25 @@ export interface FinalityVerdict {
   label: string;
   /** Why, in a sentence the reader can act on. Empty when final. */
   reason: string;
+  /**
+   * CANCELLED IS NOT "NOT FINAL YET", AND v2.9.5 STOPPED SAYING IT WAS.
+   *
+   * Measured 2026-09-15 on a cancelled UFC bout, Young vs Steele:
+   *
+   *   result: "NOT_FINAL"
+   *   detail: "This event is marked CANCELLED ... it belongs in the tracker as
+   *            Void rather than as a Hit or a Miss."
+   *
+   * The prose was right and the machine-readable field contradicted it. Anything
+   * consuming `result` - a tracker, a rollup, the slate summary's own void counter -
+   * files that pick as ungraded and waits for a game that is never coming, while a
+   * human reading the sentence below it files it as void. Two different answers
+   * from one response.
+   *
+   * NOT_FINAL means "ask again later". A cancelled event will never be final, so it
+   * is a different verdict and now carries its own flag.
+   */
+  cancelled?: boolean;
 }
 
 /**
@@ -170,7 +189,11 @@ export function assessFinality(event: SGOEvent): FinalityVerdict {
   if (s.cancelled === true) {
     return {
       final: false,
-      label: label === "unknown" ? "cancelled" : label,
+      cancelled: true,
+      // An EMPTY displayShort is as unlabelled as a missing one. The old check only
+      // caught "unknown", so a cancelled event whose displayShort was "" reported a
+      // blank status label - measured 2026-09-15 on exactly that case.
+      label: label === "unknown" || label.trim() === "" ? "cancelled" : label,
       reason:
         "This event is marked CANCELLED. There is no result to grade and the pick had no action, so it belongs in the tracker as Void rather than as a Hit or a Miss.",
     };

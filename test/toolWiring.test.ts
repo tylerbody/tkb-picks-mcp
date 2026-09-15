@@ -781,3 +781,153 @@ describe("v2.9.2 - moneyline_3way needs no postedLine", () => {
     assert.match(r.content[0].text, /no draw outcome/);
   });
 });
+
+/**
+ * v2.9.3 - the UFC empty-board message, and the wiring of the total statID.
+ *
+ * tools/players.ts got the fighter-aware empty message in v2.9.0. tools/propBoard.ts
+ * did not, and measured live on UFC 331 the two tools disagreed in the same minute -
+ * one explaining the single-participant model, the other saying props "typically post
+ * within a few days of kickoff, and for MLB often only on the morning of".
+ *
+ * Third narrow audit of this release cycle, so both are asserted together here.
+ */
+const UFC_EVENT = {
+  eventID: "n5UUbD5lyFtaziIia8OZ",
+  status: { displayShort: "", startsAt: "2026-09-19T23:00:00.000Z" },
+  teams: {
+    home: { teamID: "JOSHUA_VAN_UFC", names: { long: "Joshua Van" }, score: 0 },
+    away: { teamID: "ALEXANDRE_PANTOJA_UFC", names: { long: "Alexandre Pantoja" }, score: 0 },
+  },
+  // The measured state: fighters in the slots, players object EMPTY.
+  players: {},
+  odds: {},
+};
+
+const ufcSgo = {
+  ...(SGO as object),
+  getAllEvents: async () => [UFC_EVENT],
+  getEvents: async () => ({ data: [UFC_EVENT] }),
+} as never;
+
+describe("v2.9.3 - UFC gets the fight answer, not the baseball answer", () => {
+  test("tkb_get_prop_board no longer tells a fight card to retry near kickoff", async () => {
+    const { server, handlers } = captureServer();
+    registerPropBoardTool(server as never, ufcSgo);
+    const r = await handlers["tkb_get_prop_board"]({
+      sport: "ufc",
+      eventID: "n5UUbD5lyFtaziIia8OZ",
+      ...SCHEMA_DEFAULTS,
+      maxRows: 25,
+    } as never);
+    const text = r.content[0].text;
+    assert.doesNotMatch(text, /morning of/, "that is MLB advice on a fight card");
+    assert.doesNotMatch(text, /within a few days of kickoff/);
+    assert.match(text, /may be permanent/i, "a fight may never carry fighter ids here");
+    assert.match(text, /roundsCompleted/, "name what IS available instead");
+  });
+
+  test("the two tools now agree, which is the actual regression", async () => {
+    const { server: s1, handlers: h1 } = captureServer();
+    registerPlayersTool(s1 as never, ufcSgo);
+    const players = (await h1["tkb_get_players"]({
+      sport: "ufc",
+      eventID: "n5UUbD5lyFtaziIia8OZ",
+      teamSide: "both",
+    } as never)).content[0].text;
+
+    const { server: s2, handlers: h2 } = captureServer();
+    registerPropBoardTool(s2 as never, ufcSgo);
+    const board = (await h2["tkb_get_prop_board"]({
+      sport: "ufc",
+      eventID: "n5UUbD5lyFtaziIia8OZ",
+      ...SCHEMA_DEFAULTS,
+      maxRows: 25,
+    } as never)).content[0].text;
+
+    for (const [name, text] of [["players", players], ["prop board", board]] as const) {
+      assert.doesNotMatch(text, /morning of/, `${name} still gives MLB advice`);
+    }
+  });
+
+  test("a TEAM sport still gets the ordinary not-posted-yet message", async () => {
+    const bare = { ...UFC_EVENT, players: {} };
+    const nflSgo = { ...(SGO as object), getAllEvents: async () => [bare] } as never;
+    const { server, handlers } = captureServer();
+    registerPropBoardTool(server as never, nflSgo);
+    const text = (await handlers["tkb_get_prop_board"]({
+      sport: "nfl",
+      eventID: EVENT_ID,
+      ...SCHEMA_DEFAULTS,
+      maxRows: 25,
+    } as never)).content[0].text;
+    assert.match(text, /not priced yet|kickoff/i);
+  });
+});
+
+/**
+ * v2.9.5 - the cancelled verdict has to reach the CALLER, not just the service.
+ *
+ * The service-level flag is worthless if the grader still writes NOT_FINAL into the
+ * result field a tracker reads.
+ */
+const CANCELLED_EVENT = {
+  eventID: "AvCTui5MU23sk1s0R3hW",
+  status: { displayShort: "CANC", cancelled: true, startsAt: "2026-08-22T16:00:00.000Z" },
+  teams: {
+    home: { teamID: "GAUGE_YOUNG_UFC", names: { long: "Gauge Young" } },
+    away: { teamID: "KODY_STEELE_UFC", names: { long: "Kody Steele" } },
+  },
+  players: {},
+  odds: {},
+};
+
+const cancelledSgo = {
+  ...(SGO as object),
+  getAllEvents: async () => [CANCELLED_EVENT],
+} as never;
+
+describe("v2.9.5 - a cancelled event grades VOID end to end", () => {
+  test("tkb_grade_pick returns VOID, not NOT_FINAL", async () => {
+    const { server, handlers } = captureServer();
+    registerGradePicksTool(server as never, cancelledSgo, BDL);
+    const r = await handlers["tkb_grade_pick"]({
+      sport: "ufc",
+      eventID: "AvCTui5MU23sk1s0R3hW",
+      marketType: "moneyline",
+      side: "home",
+    } as never);
+    const text = r.content[0].text;
+    assert.match(text, /^VOID/, "the headline must agree with the explanation under it");
+    assert.match(text, /CANCELLED/);
+  });
+
+  test("tkb_grade_slate counts it as a VOID rather than leaving it ungraded", async () => {
+    const { server, handlers } = captureServer();
+    registerBatchGradeTool(server as never, cancelledSgo, BDL);
+    const r = await handlers["tkb_grade_slate"]({
+      sport: "ufc",
+      picks: [{ ref: "cancelled bout", eventID: "AvCTui5MU23sk1s0R3hW", marketType: "moneyline", side: "home" }],
+    } as never);
+    const text = r.content[0].text;
+    assert.match(text, /"result":\s*"VOID"/);
+    assert.doesNotMatch(text, /"result":\s*"NOT_FINAL"/);
+  });
+
+  test("an ordinary unfinished game is STILL NOT_FINAL", async () => {
+    // The distinction is the point. Widening VOID to cover every ungraded event
+    // would log real pending picks as no-action.
+    const liveEvent = {
+      ...CANCELLED_EVENT,
+      status: { displayShort: "4th", live: true, startsAt: "2026-08-22T16:00:00.000Z" },
+    };
+    const liveSgo = { ...(SGO as object), getAllEvents: async () => [liveEvent] } as never;
+    const { server, handlers } = captureServer();
+    registerBatchGradeTool(server as never, liveSgo, BDL);
+    const r = await handlers["tkb_grade_slate"]({
+      sport: "ufc",
+      picks: [{ ref: "live bout", eventID: "E", marketType: "moneyline", side: "home" }],
+    } as never);
+    assert.match(r.content[0].text, /"result":\s*"NOT_FINAL"/);
+  });
+});
