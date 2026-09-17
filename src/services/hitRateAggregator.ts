@@ -1,3 +1,4 @@
+import { readMatchTeams } from "./eventShape.js";
 import type { SGOClient } from "./sgoClient.js";
 import { narrowingOddID } from "./oddIdBuilder.js";
 import type { SportKey } from "../constants.js";
@@ -270,8 +271,12 @@ export async function getPlayerHitRate(
     teamGamesScanned++;
 
     const lookup = lookupPlayerStat(event, params.playerID, params.statID);
-    const isHome = event.teams.home.teamID === params.teamID;
-    const opponentTeamID = isHome ? event.teams.away.teamID : event.teams.home.teamID;
+    // ONE MALFORMED EVENT MUST COST ONE ROW, NOT THE WHOLE SAMPLE. Same rule the
+    // CFBD path uses when a single week fails to fetch.
+    const shape = readMatchTeams(event);
+    if (!shape.ok) continue;
+    const isHome = shape.teams.homeID === params.teamID;
+    const opponentTeamID = isHome ? shape.teams.awayID : shape.teams.homeID;
     const opponentName =
       (isHome ? event.teams.away.names?.long : event.teams.home.names?.long) ??
       opponentTeamID;

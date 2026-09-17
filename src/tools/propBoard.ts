@@ -5,12 +5,14 @@ import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
 import { parseOddID, type ParsedOddID } from "../services/oddIdParser.js";
 import {
+  participantModel,
   SUPPORTED_SPORTS,
   supportsCapability,
   unsupportedMessage,
   DEFAULT_BOOKMAKERS,
   type SportKey,
 } from "../constants.js";
+import { readMatchTeams } from "../services/eventShape.js";
 
 /**
  * PROP BOARD - every priced player market on one event, with NO hit-rate gate.
@@ -394,8 +396,14 @@ Error Handling:
         }
 
         const event = events[0]!;
-        const homeID = event.teams.home.teamID;
-        const awayID = event.teams.away.teamID;
+        // Refuse a non-match event readably rather than throwing a bare TypeError.
+        // See services/eventShape.ts.
+        const shape = readMatchTeams(event);
+        if (!shape.ok) {
+          return { content: [{ type: "text" as const, text: shape.reason }] };
+        }
+        const homeID = shape.teams.homeID;
+        const awayID = shape.teams.awayID;
         const teamNames: Record<string, string> = {
           [homeID]: event.teams.home.names?.long ?? homeID,
           [awayID]: event.teams.away.names?.long ?? awayID,
@@ -404,6 +412,43 @@ Error Handling:
 
         const roster = Object.values(event.players ?? {});
         if (roster.length === 0) {
+          // UFC GETS A DIFFERENT ANSWER, AND THIS IS THE THIRD TIME THIS RELEASE
+          // CYCLE THAT AN AUDIT WAS SCOPED TOO NARROWLY.
+          //
+          // v2.9.0 wrote the fighter-aware empty message into tools/players.ts and
+          // stopped there. Measured 2026-09-15 on UFC 331 Pantoja vs Van, the two
+          // tools disagreed in the same minute: tkb_get_players gave the correct
+          // fighter explanation, and this tool told the reader that props "typically
+          // post within a few days of kickoff, and for MLB often only on the morning
+          // of" - advice about baseball, on a fight card, that may be permanently
+          // wrong rather than early.
+          //
+          // The generic text is not merely unhelpful here. It invites a retry that
+          // can never succeed, which is the exact failure class this connector
+          // exists to refuse.
+          if (participantModel(input.sport as SportKey) === "fighters") {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `No FIGHTER props are attached to ${matchup}.\n\n` +
+                    `This may be permanent rather than early. SGO documents UFC as a ` +
+                    `single-participant league where the two fighters occupy the home and ` +
+                    `away slots, and this connector has NOT verified that fighter ids are ` +
+                    `ever surfaced in the players object on this account. Do not read this ` +
+                    `as "check back closer to the fight".\n\n` +
+                    `WHAT IS AVAILABLE RIGHT NOW, and needs no fighter id: the fight ` +
+                    `moneyline via tkb_get_odds marketType="moneyline" (measured working on ` +
+                    `this card), and the rounds total via marketType="total", which settles ` +
+                    `on roundsCompleted rather than points. Method-of-victory markets can be ` +
+                    `pulled but cannot be graded automatically - a UFC event carries a ` +
+                    `winner, not a method.`,
+                },
+              ],
+            };
+          }
+
           return {
             content: [
               {

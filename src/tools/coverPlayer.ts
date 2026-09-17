@@ -4,6 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
+import { readMatchTeams } from "../services/eventShape.js";
 import type { BDLInjury, SGOEvent } from "../types.js";
 
 /**
@@ -174,8 +175,14 @@ NOT a betting-value tool. It ranks marketability and availability only.`,
       }
 
       const event = events[0]!;
-      const homeID = event.teams.home.teamID;
-      const awayID = event.teams.away.teamID;
+      // Refuse a non-match event readably rather than throwing a bare TypeError.
+      // See services/eventShape.ts.
+      const matchShape = readMatchTeams(event);
+      if (!matchShape.ok) {
+        return { content: [{ type: "text" as const, text: matchShape.reason }] };
+      }
+      const homeID = matchShape.teams.homeID;
+      const awayID = matchShape.teams.awayID;
       const teamNames: Record<string, string> = {
         [homeID]: event.teams.home.names?.long ?? homeID,
         [awayID]: event.teams.away.names?.long ?? awayID,

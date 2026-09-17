@@ -219,6 +219,66 @@ export function assessFinality(event: SGOEvent): FinalityVerdict {
   const s = statusOf(event);
   const label = s.displayShort ?? (s.completed === true ? "Final" : "unknown");
 
+  // Has this event actually happened yet? Read once, up here, because the answer
+  // now governs two separate branches: whether a CANCELLED flag is trustworthy,
+  // and whether an unknown status is worth a second source.
+  const startsAt = s.startsAt ? Date.parse(s.startsAt) : NaN;
+  const hasStarted = Number.isNaN(startsAt) ? true : startsAt <= Date.now();
+
+  /* ------------------------------------------------------------------------
+   * A VOID IS A TERMINAL PUBLISHING VERDICT. A HOLD IS NOT. THEY ARE NOT
+   * SYMMETRIC, AND v2.9.7 STOPPED TREATING THEM AS IF THEY WERE.
+   *
+   * Reported 2026-09-17: tkb_grade_pick returned
+   *
+   *   result: "VOID", statusLabel: "DNP"
+   *
+   * for a WTA match, Kostyuk vs Townsend, event YTzyDTwE4oBWSmdN3LNT, scheduled
+   * 2026-09-16T23:00:00Z - which had not started. SGO did set `cancelled: true`,
+   * so v2.9.5's cancelled branch was firing exactly as written. The branch was
+   * still wrong, because it never asked WHEN.
+   *
+   * Consider the two ways of being wrong:
+   *
+   *   Void a match that later plays  -> the pick is already filed as no-action.
+   *                                     Nothing ever re-opens it, because VOID is
+   *                                     a settled answer. The result is silently,
+   *                                     permanently wrong in the tracker.
+   *   Hold a match that was genuinely cancelled -> re-grade once the scheduled
+   *                                     start has passed and the same flag now
+   *                                     produces the void. Cost: one retry.
+   *
+   * Those costs are nowhere near equal, so the tie goes to holding. An event
+   * carrying a cancellation flag BEFORE its own start time is exactly the shape a
+   * provisional feed state takes - a postponement, a re-draw, a walkover entered
+   * early, a status the book later reverses - and this connector cannot tell those
+   * apart from a real cancellation. It says so instead of guessing.
+   *
+   * Once the start time is in the past the flag stands on its own: a match that
+   * should have begun and did not is a void, and that is the branch below.
+   * --------------------------------------------------------------------------*/
+  if (s.cancelled === true && !hasStarted) {
+    return {
+      final: false,
+      // Deliberately NOT cancelled: true. That flag is what drives the VOID
+      // verdict downstream, and voiding an unplayed match is the defect.
+      crossCheckable: false,
+      label: label === "unknown" || label.trim() === "" ? "cancelled" : label,
+      reason:
+        `HOLD THIS ONE, do not file it as a void yet. SGO marks this event CANCELLED, ` +
+        `but its scheduled start (${s.startsAt ?? "unknown"}) has NOT PASSED, so nothing ` +
+        `has had the chance to happen. A cancellation flag on an event that has not ` +
+        `started is as consistent with a postponement, a provisional entry, or a status ` +
+        `the feed later reverses as it is with a real cancellation, and this connector ` +
+        `cannot tell them apart.\n\n` +
+        `WHY THIS IS NOT CALLED A VOID: a void is terminal. Once the pick is filed as ` +
+        `no-action nothing re-opens it, so voiding a match that then plays is a wrong ` +
+        `record that never corrects itself. Holding costs one re-grade. Re-run this after ` +
+        `the scheduled start time: if the flag is still set then, it is a genuine void and ` +
+        `will be reported as one.`,
+    };
+  }
+
   if (s.cancelled === true) {
     return {
       final: false,
@@ -292,11 +352,9 @@ export function assessFinality(event: SGOEvent): FinalityVerdict {
     return { final: true, label, reason: "" };
   }
 
-  // Has this event actually happened yet? An unlabelled status on a game that
-  // starts tomorrow is not an ingest lag, and a second source cannot help.
-  const startsAt = s.startsAt ? Date.parse(s.startsAt) : NaN;
-  const hasStarted = Number.isNaN(startsAt) ? true : startsAt <= Date.now();
-
+  // An unlabelled status on a game that starts tomorrow is not an ingest lag, and
+  // a second source cannot help. `hasStarted` is computed at the top of this
+  // function because the cancelled branch needs the same answer.
   return {
     final: false,
     crossCheckable: hasStarted,

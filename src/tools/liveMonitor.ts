@@ -3,7 +3,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { narrowingOddID, buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
-import { SUPPORTED_SPORTS, matchLinePeriodFor, type SportKey } from "../constants.js";
+import { gameTotalStatFor, SUPPORTED_SPORTS, matchLinePeriodFor, type SportKey } from "../constants.js";
+import { readMatchTeams } from "../services/eventShape.js";
 
 /**
  * LIVE PICK MONITOR / EARLY CASHOUT DETECTOR
@@ -295,8 +296,10 @@ function readLiveStat(
   pick: LiveMonitorInput["picks"][number]
 ): number | null {
   if (pick.marketType === "total") {
-    const h = event.teams.home.score;
-    const a = event.teams.away.score;
+    const shape = readMatchTeams(event);
+    if (!shape.ok) return null;
+    const h = shape.teams.home.score;
+    const a = shape.teams.away.score;
     if (h === undefined || a === undefined) return null;
     return h + a;
   }
@@ -317,7 +320,8 @@ function readLiveStat(
 export function livePickOddID(sport: SportKey, pick: LiveMonitorInput["picks"][number]): string | null {
   if (pick.marketType === "total") {
     return buildOddID({
-      statID: "points",
+      // Rounds in MMA, games in tennis, points everywhere else.
+      statID: gameTotalStatFor(sport),
       entity: "all",
       // A game total is a MATCH LINE, so soccer settles it on regulation.
       period: matchLinePeriodFor(sport),

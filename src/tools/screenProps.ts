@@ -32,6 +32,7 @@ import {
   DEFAULT_BOOKMAKERS,
   type SportKey,
 } from "../constants.js";
+import { readMatchTeams } from "../services/eventShape.js";
 
 /**
  * PROP SCREENER
@@ -654,8 +655,14 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       }
 
       const event = events[0]!;
-      const homeID = event.teams.home.teamID;
-      const awayID = event.teams.away.teamID;
+      // Refuse a non-match event readably rather than throwing a bare TypeError.
+      // See services/eventShape.ts.
+      const shape = readMatchTeams(event);
+      if (!shape.ok) {
+        return { content: [{ type: "text" as const, text: shape.reason }] };
+      }
+      const homeID = shape.teams.homeID;
+      const awayID = shape.teams.awayID;
       const teamNames: Record<string, string> = {
         [homeID]: event.teams.home.names?.long ?? homeID,
         [awayID]: event.teams.away.names?.long ?? awayID,

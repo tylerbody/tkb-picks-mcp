@@ -1,3 +1,4 @@
+import { readMatchTeams } from "./eventShape.js";
 import type { SGOClient } from "./sgoClient.js";
 import { narrowingOddID } from "./oddIdBuilder.js";
 import type { SportKey } from "../constants.js";
@@ -50,7 +51,11 @@ export async function getHomeRoadSplit(
   });
 
   const filtered = events.filter((e) => {
-    const isHome = e.teams.home.teamID === params.teamID;
+    // A NON-MATCH EVENT HAS NO HOME SIDE, so it cannot be classified as a home
+    // or road game and is dropped rather than throwing. See services/eventShape.ts.
+    const shape = readMatchTeams(e);
+    if (!shape.ok) return false;
+    const isHome = shape.teams.homeID === params.teamID;
     return params.location === "home" ? isHome : !isHome;
   });
 
@@ -112,8 +117,8 @@ export async function getOpponentSplit(
 
   const vsOpponent = events.filter((e) => {
     return (
-      e.teams.home.teamID === params.opponentTeamID ||
-      e.teams.away.teamID === params.opponentTeamID
+      e.teams?.home?.teamID === params.opponentTeamID ||
+      e.teams?.away?.teamID === params.opponentTeamID
     );
   });
 

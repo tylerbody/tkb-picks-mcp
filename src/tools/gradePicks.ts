@@ -17,6 +17,7 @@ import {
 } from "../services/pickGrader.js";
 import { lookupPlayerStat } from "../services/hitRateAggregator.js";
 import { assessFinality, crossCheckFinality } from "../services/eventStatus.js";
+import { readMatchTeams } from "../services/eventShape.js";
 import { diagnosePlayerIdMiss } from "../services/playerResolution.js";
 
 /**
@@ -371,10 +372,19 @@ Error Handling:
         // ordinary one; the reader has to be able to see where the finality came from.
         const finalitySource = !finality.final && crossCheckNote ? `\n\n${crossCheckNote}` : "";
 
-        const homeScore = event.teams.home.score;
-        const awayScore = event.teams.away.score;
-        const homeName = event.teams.home.names?.long ?? "home";
-        const awayName = event.teams.away.names?.long ?? "away";
+        // Guard the shape before reading a score off it. A futures or malformed
+        // event used to throw a bare TypeError here. See services/eventShape.ts.
+        const shape = readMatchTeams(event);
+        if (!shape.ok) {
+          return {
+            content: [{ type: "text" as const, text: `NOT GRADED - ${shape.reason}` }],
+            structuredContent: { result: "NO_DATA", eventID: params.eventID, reason: shape.reason },
+          };
+        }
+        const homeScore = shape.teams.home.score;
+        const awayScore = shape.teams.away.score;
+        const homeName = shape.teams.homeName;
+        const awayName = shape.teams.awayName;
 
         // ---- SOCCER MONEYLINE: a level score is a RESULT, not a push ----
         //

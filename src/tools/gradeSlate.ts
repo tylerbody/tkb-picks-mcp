@@ -18,6 +18,7 @@ import {
 } from "../services/pickGrader.js";
 import { lookupPlayerStat } from "../services/hitRateAggregator.js";
 import { assessFinality, crossCheckFinality } from "../services/eventStatus.js";
+import { readMatchTeams } from "../services/eventShape.js";
 import { diagnosePlayerIdMiss } from "../services/playerResolution.js";
 
 /**
@@ -377,10 +378,16 @@ function gradeOne(
   event: SGOEvent,
   p: BatchGradeInput["picks"][number]
 ): GradedPick {
-  const homeScore = event.teams.home.score;
-  const awayScore = event.teams.away.score;
-  const homeName = event.teams.home.names?.long ?? "home";
-  const awayName = event.teams.away.names?.long ?? "away";
+  // Guard the shape before reading a score. One malformed event must produce a
+  // readable row rather than throwing out of the whole slate.
+  const shape = readMatchTeams(event);
+  if (!shape.ok) {
+    return { ref: p.ref, result: "NO_DATA", detail: shape.reason };
+  }
+  const homeScore = shape.teams.home.score;
+  const awayScore = shape.teams.away.score;
+  const homeName = shape.teams.homeName;
+  const awayName = shape.teams.awayName;
 
   // ---- SOCCER: a level score is a RESULT, not a push ----
   if ((p.marketType === "moneyline" || p.marketType === "moneyline_3way") && hasDrawOutcome(sport)) {

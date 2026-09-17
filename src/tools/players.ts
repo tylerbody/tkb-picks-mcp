@@ -3,6 +3,7 @@ import { narrowingOddID } from "../services/oddIdBuilder.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, participantModel, type SportKey } from "../constants.js";
+import { readMatchTeams } from "../services/eventShape.js";
 
 const PlayersInputSchema = z
   .object({
@@ -101,11 +102,18 @@ Error Handling:
         }
 
         const event = events[0];
-        const homeID = event.teams.home.teamID;
-        const awayID = event.teams.away.teamID;
+
+        // A NON-MATCH EVENT USED TO CRASH HERE. Reported 2026-09-17 as
+        // "Cannot read properties of undefined", which named nothing and arrived
+        // mid-game. See services/eventShape.ts.
+        const shape = readMatchTeams(event);
+        if (!shape.ok) {
+          return { content: [{ type: "text" as const, text: shape.reason }] };
+        }
+        const { homeID, awayID, homeName, awayName } = shape.teams;
         const teamNames: Record<string, string> = {
-          [homeID]: event.teams.home.names?.long ?? homeID,
-          [awayID]: event.teams.away.names?.long ?? awayID,
+          [homeID]: homeName,
+          [awayID]: awayName,
         };
 
         const raw = Object.values(event.players ?? {});
