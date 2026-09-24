@@ -42,6 +42,21 @@ export const PERIOD_CODES: Record<string, string> = {
   "4th_set": "4s",
   "5th_set": "5s",
 
+  // ---- HOCKEY PERIODS (v2.10.0) ----
+  //
+  // Documented periodIDs, quoted from SGO's periods page: `1p` "1st Period", `2p`
+  // "2nd Period", `3p` "3rd Period". Named in full here rather than as `1p` so the
+  // input vocabulary stays readable in a tool argument, the same way the inning and
+  // set codes are.
+  //
+  // THREE PERIODS, NO FOURTH. Overtime is `ot` and the shootout is `so`, both already
+  // present in this table for soccer. They are deliberately NOT listed as NHL periods
+  // in marketCatalog - see the note there - but the codes exist if a market is ever
+  // confirmed on them.
+  "1st_period": "1p",
+  "2nd_period": "2p",
+  "3rd_period": "3p",
+
   // ---- REGULATION (v2.9.0, SOCCER) ----
   //
   // NOT a synonym for full_game, and treating it as one is the single most

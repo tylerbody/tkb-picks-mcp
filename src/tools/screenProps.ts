@@ -148,6 +148,12 @@ const DEFAULT_MAX_PLAYERS: Record<SportKey, number> = {
   epl: 30,
   ucl: 30,
 
+  // Two 20-man rosters, of which 18 skaters and 2 goalies dress per side. 40 covers
+  // both benches whole. As with CFB and CBB, the event is fetched once regardless of
+  // how many players are read out of it, so a larger cap costs latency rather than
+  // quota.
+  nhl: 40,
+
   // TWO FIGHTERS. Not a cap in any meaningful sense, it is the size of the sport.
   ufc: 2,
 };

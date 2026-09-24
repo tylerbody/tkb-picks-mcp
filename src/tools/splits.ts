@@ -224,13 +224,38 @@ Error Handling:
           seasonStartsAfter: params.seasonStartsAfter,
         });
 
-        const output = { ...result, source: "sgo_event_tally" };
+        // HOCKEY RECORDS HAVE THREE COLUMNS AND THIS TALLY HAS TWO, so it says which
+        // convention it used rather than letting the number be silently compared with a
+        // box score.
+        //
+        // The NHL has had no ties since 2005, so every game produces a decision and this
+        // tally is COMPLETE - that is why NHL teamSplits is true at all. What it is not
+        // is the league's own record: an overtime or shootout loss is a loss here and its
+        // own column officially, so "20-15 at home" here can sit beside a published
+        // "20-10-5". For a betting read a loss is a loss, so the number is right for the
+        // purpose; a reader comparing it against nhl.com without this sentence would
+        // reasonably conclude the connector was broken.
+        const nhlConvention =
+          params.sport === "nhl"
+            ? ` CONVENTION: overtime and shootout losses are counted as LOSSES here, so this is ` +
+              `a two-column record. The league publishes three columns (W-L-OTL), so this will ` +
+              `not match nhl.com digit for digit and is not meant to - it is the win/loss split a ` +
+              `moneyline cares about.`
+            : "";
+
+        const output = {
+          ...result,
+          source: "sgo_event_tally",
+          ...(params.sport === "nhl"
+            ? { recordConvention: "OT and SO losses counted as losses (two-column, not W-L-OTL)" }
+            : {}),
+        };
 
         return {
           content: [
             {
               type: "text" as const,
-              text: `${result.teamName} is ${result.wins}-${result.losses} ${result.context} this season. (Computed by tallying finalized games, since standings data was unavailable for this sport/season.)\n\n${JSON.stringify(output, null, 2)}`,
+              text: `${result.teamName} is ${result.wins}-${result.losses} ${result.context} this season. (Computed by tallying finalized games, since standings data was unavailable for this sport/season.)${nhlConvention}\n\n${JSON.stringify(output, null, 2)}`,
             },
           ],
           structuredContent: output,

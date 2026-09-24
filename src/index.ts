@@ -8,6 +8,7 @@ import { BDLClient } from "./services/bdlClient.js";
 import { CFBDClient } from "./services/cfbdClient.js";
 import { CBBDClient } from "./services/cbbdClient.js";
 import { MLBStatsClient } from "./services/mlbStatsClient.js";
+import { NHLStatsClient } from "./services/nhlStatsClient.js";
 import { WeatherClient } from "./services/weatherClient.js";
 import { registerScheduleTool } from "./tools/schedule.js";
 import { registerOddsTool } from "./tools/odds.js";
@@ -93,6 +94,19 @@ const cbbd = CBBD_API_KEY ? new CBBDClient(CBBD_API_KEY) : null;
  * The tool fails soft at call time if the feed is unreachable.
  */
 const mlbStats = new MLBStatsClient();
+
+/**
+ * SAME REASONING, FOR HOCKEY. api-web.nhle.com is unauthenticated and unmetered, so
+ * there is nothing to configure and nothing to gate on.
+ *
+ * WORTH KNOWING WHAT THIS ONE CARRIES, because it is more load-bearing than the MLB
+ * client: it is the sole source of NHL hit rates AND the second source that confirms
+ * NHL finality when SGO's ingest lags. BALLDONTLIE cannot do either job on this
+ * account - its tiers are per sport and hockey sits behind ALL-STAR for games and GOAT
+ * for player stats - so there is no fallback behind it. If the league changes a shape,
+ * NHL rates refuse and NHL grading loses its cross-check; nothing silently degrades.
+ */
+const nhlStats = new NHLStatsClient();
 if (!cfbd) {
   console.warn(
     "WARN: CFBD_API_KEY is not set. CFB hit rates will refuse rather than fall back " +
@@ -139,7 +153,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.9.7";
+const SERVER_VERSION = "2.10.0";
 
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -149,21 +163,21 @@ function buildServer(): McpServer {
 
   registerScheduleTool(server, sgo);
   registerOddsTool(server, sgo);
-  registerHitRateTool(server, sgo, bdl, cfbd, cbbd);
+  registerHitRateTool(server, sgo, bdl, cfbd, cbbd, nhlStats);
   registerInjuriesTool(server, bdl);
   registerSplitsTool(server, sgo, bdl);
   registerYesNoPropsTool(server, sgo);
   registerPeriodOddsTool(server, sgo);
   registerWeatherTool(server, weather);
   registerPlayersTool(server, sgo);
-  registerUsageTool(server, sgo, cfbd, cbbd);
+  registerUsageTool(server, sgo, cfbd, cbbd, nhlStats);
   registerLeagueAccessTool(server, sgo);
-  registerGradePicksTool(server, sgo, bdl);
+  registerGradePicksTool(server, sgo, bdl, nhlStats);
   registerScreenPropsTool(server, sgo, bdl, cfbd, cbbd);
   registerCoverPlayerTool(server, sgo, bdl);
   registerTweetCharsTool(server);
   registerBdlStatsProbeTool(server, bdl);
-  registerBatchGradeTool(server, sgo, bdl);
+  registerBatchGradeTool(server, sgo, bdl, nhlStats);
   registerStreakScanTool(server, bdl);
   registerLineMovementTool(server, sgo);
   registerLiveMonitorTool(server, sgo);

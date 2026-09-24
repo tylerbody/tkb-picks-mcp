@@ -1,4 +1,5 @@
 import type { SGOEvent } from "../types.js";
+import { nhlSaysFinal } from "./nhlStatus.js";
 
 /**
  * IS THIS GAME ACTUALLY OVER? Pure, exported, no client anywhere near it.
@@ -701,4 +702,192 @@ export async function crossCheckFinality(
       note: `Second-source check could not run: ${message}`,
     };
   }
+}
+
+/* ===========================================================================
+ * SECOND SOURCE FOR HOCKEY: THE NHL'S OWN FEED
+ * ===========================================================================
+ *
+ * ADDED v2.10.0 with the NHL build.
+ *
+ * WHY NOT BALLDONTLIE, WHICH EVERY OTHER SPORT USES. BDL gates /nhl/v1/games behind
+ * ALL-STAR and its tiers are PER SPORT, so on this account the hockey cross-check
+ * would have 401'd on the day it shipped and degraded to "could not confirm" forever.
+ * A cross-check that can never fire is worse than none, because its silence reads as
+ * a considered answer. The league's own feed is free, needs no key, and carries the
+ * same two facts the reconciler needs: a terminal state and both scores.
+ *
+ * IDENTICAL DISCIPLINE TO THE BDL RECONCILER, deliberately, so the two cannot drift:
+ *   - whole normalised team names, never containment, never a bare abbreviation
+ *   - scores read as undefined rather than 0 when absent
+ *   - an unrecognised state is NO INFORMATION, never "not live, therefore over"
+ *   - SGO's scores are what gets graded. The second source supplies FINALITY ONLY.
+ * ======================================================================== */
+
+/** The narrow structural slice of NHLStatsClient this needs. Keeps the module testable. */
+export interface NhlScoreboardFetcher {
+  getScoreboard(dateISO: string): Promise<
+    {
+      gameState: string;
+      homeName?: string;
+      awayName?: string;
+      homeScore?: number;
+      awayScore?: number;
+      lastPeriodType?: string;
+    }[]
+  >;
+}
+
+type NhlScoreRow = Awaited<ReturnType<NhlScoreboardFetcher["getScoreboard"]>>[number];
+
+/**
+ * PURE. Takes the rows the caller already fetched. Never fetches, never throws.
+ *
+ * ONE HOCKEY-SPECIFIC ADDITION over the BDL version: when the feeds agree, the note
+ * reports HOW the game ended. A 3-2 final in regulation and a 3-2 final in a shootout
+ * are the same score and different results for some markets - a regulation three-way
+ * line, a regulation total, a "team to win in 60 minutes" bet - and `lastPeriodType`
+ * is the field that distinguishes them. Reporting it costs nothing and its absence
+ * would be invisible.
+ */
+export function reconcileFinalityWithNHL(
+  event: SGOEvent,
+  games: NhlScoreRow[]
+): FinalityCrossCheck {
+  const sgoHomeName = normalizeTeamName(event.teams?.home?.names?.long);
+  const sgoAwayName = normalizeTeamName(event.teams?.away?.names?.long);
+
+  if (!sgoHomeName || !sgoAwayName) {
+    return {
+      resolved: false,
+      note:
+        "Second-source check: this SGO event carries no long team names, so there was nothing " +
+        "to match the NHL feed against by name. Partial or abbreviation matching is deliberately " +
+        "not attempted.",
+    };
+  }
+
+  const matches = games.filter(
+    (g) =>
+      normalizeTeamName(g.homeName) === sgoHomeName &&
+      normalizeTeamName(g.awayName) === sgoAwayName
+  );
+
+  if (!matches.length) {
+    return {
+      resolved: false,
+      note:
+        `Second-source check: the NHL feed returned ${games.length} game(s) for that date and NONE ` +
+        `matched this matchup by name in the same home/away orientation, so it could not break the ` +
+        `tie. Whole-name agreement is required here on purpose.`,
+    };
+  }
+
+  const game = matches[0];
+
+  if (!nhlSaysFinal(game.gameState)) {
+    return {
+      resolved: false,
+      note:
+        `Second-source check: the NHL feed has this game too and calls its state "${game.gameState || "(none)"}", ` +
+        `which is not one of the terminal states (FINAL, OFF). Both feeds are therefore unsettled, and ` +
+        `the refusal stands.`,
+    };
+  }
+
+  const sgoHome = event.teams?.home?.score;
+  const sgoAway = event.teams?.away?.score;
+
+  if (
+    game.homeScore === undefined ||
+    game.awayScore === undefined ||
+    sgoHome === undefined ||
+    sgoAway === undefined
+  ) {
+    return {
+      resolved: false,
+      note:
+        `Second-source check: the NHL feed calls this game "${game.gameState}" but one of the two feeds is ` +
+        `missing a score (SGO ${sgoAway ?? "?"}-${sgoHome ?? "?"}, NHL ${game.awayScore ?? "?"}-${game.homeScore ?? "?"}, ` +
+        `away-home). Finality without an agreed score is not enough to grade on.`,
+    };
+  }
+
+  if (game.homeScore !== sgoHome || game.awayScore !== sgoAway) {
+    return {
+      resolved: false,
+      note:
+        `Second-source check: THE TWO FEEDS DISAGREE ON THE SCORE. The NHL calls it "${game.gameState}" at ` +
+        `${game.awayScore}-${game.homeScore} (away-home) while SGO currently shows ${sgoAway}-${sgoHome}. At least ` +
+        `one is still mid-ingest, so this is NOT gradeable yet. Re-run in a few minutes; if the gap persists, ` +
+        `check the box score by hand before posting anything.`,
+    };
+  }
+
+  const ending =
+    game.lastPeriodType === "SO"
+      ? " It went to a SHOOTOUT, which matters for any regulation-scoped market."
+      : game.lastPeriodType === "OT"
+        ? " It went to OVERTIME, which matters for any regulation-scoped market."
+        : game.lastPeriodType === "REG"
+          ? " It ended in regulation."
+          : "";
+
+  return {
+    resolved: true,
+    note:
+      `Finality confirmed by SECOND SOURCE. SGO had not yet set a final status on this event, but the NHL's own ` +
+      `feed calls it "${game.gameState}" at ${game.awayScore}-${game.homeScore} (away-home), which matches SGO's score ` +
+      `exactly.${ending} Graded against SGO's scores, as always - the NHL supplied the finality, not the numbers.`,
+  };
+}
+
+/**
+ * ONE DISPATCH POINT FOR EVERY SECOND SOURCE. Both graders call this and neither
+ * branches on sport itself.
+ *
+ * The house rule this follows is the one SPORT_CONFIG states: a per-tool
+ * `if (sport === ...)` breaks again the moment the next sport arrives with its own
+ * shape. gradePicks and gradeSlate previously called crossCheckFinality directly, so
+ * adding hockey would have meant the same two-line branch in two files - which is
+ * exactly how the v2.9.3 UFC message ended up in players.ts and not in propBoard.ts.
+ *
+ * NEVER THROWS, on either path.
+ */
+export async function crossCheckFinalityForSport(
+  sport: string,
+  sources: { bdl?: GamesFetcher; nhl?: NhlScoreboardFetcher },
+  event: SGOEvent
+): Promise<FinalityCrossCheck> {
+  if (sport === "nhl") {
+    if (!sources.nhl) {
+      return { resolved: false, note: "Second-source check: no NHL feed client available." };
+    }
+    const startsAt = event.status?.startsAt;
+    if (!startsAt) {
+      return {
+        resolved: false,
+        note: "Second-source check: this event carries no startsAt, so there was no date to query the NHL feed with.",
+      };
+    }
+    // Same two-day window the BDL path uses, and for the same reason: a 10pm Eastern
+    // puck drop settles after midnight UTC. Two dates is two requests here rather than
+    // one, because this endpoint is per-date, and both are unbilled.
+    const day = startsAt.slice(0, 10);
+    const nextDay = new Date(new Date(`${day}T00:00:00Z`).getTime() + 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    try {
+      const rows = [
+        ...(await sources.nhl.getScoreboard(day)),
+        ...(await sources.nhl.getScoreboard(nextDay)),
+      ];
+      return reconcileFinalityWithNHL(event, rows);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { resolved: false, note: `Second-source check could not run: ${message}` };
+    }
+  }
+
+  return crossCheckFinality(sources.bdl, sport, event);
 }

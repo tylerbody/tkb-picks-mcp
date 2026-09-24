@@ -333,10 +333,86 @@ export const SPORT_CONFIG = {
     },
   },
 
+  // ---- NHL (v2.10.0) ----
+  //
+  // THE STUB THAT USED TO SIT HERE WAS WRONG IN THREE WAYS, and it is worth naming
+  // them, because it looked authoritative and would have been uncommented on trust:
+  //
+  //   `supports: TEAM_SPORT_CAPABILITIES`  claimed weather: true. Hockey is indoors.
+  //                                        It also claimed injuries: true, and no
+  //                                        free NHL injury feed exists at all.
+  //   `bdlPath: "nhl"`                     pointed hit rates at BALLDONTLIE, which
+  //                                        gates NHL player stats behind GOAT
+  //                                        ($39.99/mo) and NHL games behind ALL-STAR.
+  //
+  // A stale stub that reads like a decision is worse than no stub. This row was
+  // written from measurement instead.
+  //
+  // HIT RATES COME FROM THE NHL'S OWN API, FREE AND WITH NO KEY. Same relationship
+  // MLB has with statsapi.mlb.com, and the reason is the same: the league publishes
+  // it, so there is no quota to spend and no subscription to lapse. Measured
+  // 2026-09-24 against api-web.nhle.com:
+  //
+  //   /v1/player/{id}/game-log/{season}/2   82 games in ONE request
+  //   /v1/score/{date}                      gameState "OFF" plus both scores
+  //   /v1/gamecenter/{id}/boxscore          per-player rows keyed on playerId
+  //   /v1/roster/{team}/{season}            firstName/lastName, full spellings
+  //
+  // See services/nhlStatsClient.ts. That one game-log call is why NHL hit rates are
+  // cheaper than every other sport in this connector, BDL included.
+  //
+  // THE TRAP THAT WILL BITE WHOEVER TOUCHES THIS NEXT: `points` MEANS TWO DIFFERENT
+  // THINGS in the two feeds, and they are one word apart.
+  //
+  //   SGO      `points`           = "Goals scored"          (goals only)
+  //   SGO      `goals+assists`    = "Hockey Points"         (what a bettor calls points)
+  //   NHL API  `goals`            = goals
+  //   NHL API  `points`           = goals + assists
+  //
+  // So SGO `points` maps to NHL `goals`, and SGO `goals+assists` maps to NHL
+  // `points`. Wire them across by name and every "player points" prop in the
+  // connector silently grades against goals alone, which is right about 40% of the
+  // time by accident. Both statIDs are quoted from SGO's stats page; both NHL fields
+  // were read off a live game log. services/nhlStatMap.ts states the crossover once
+  // and nothing else is allowed to map these by hand.
+  //
+  // INJURIES: false, and this is a MISSING SOURCE rather than a missing entitlement
+  // in a way the other sports are not. The NHL publishes no injury endpoint on its
+  // own API, the league leaves designations to team reporting, and BDL puts NHL
+  // injuries behind GOAT. Upgrading BDL for NHL alone would fix it; nothing free will.
+  //
+  // WEATHER: false. Indoors, same as WNBA and CBB. The one exception in the real
+  // world is the outdoor Stadium Series, a handful of games a year, and a stadium
+  // coordinate table built for two games would be worse than returning nothing.
+  //
+  // TEAM SPLITS: true, with a convention caveat the splits tool prints. BDL standings
+  // are ALL-STAR-gated for NHL so that call will 401, and splitsAggregator then falls
+  // back to tallying finalized SGO events - which WORKS for hockey, because the NHL
+  // has had no ties since 2005 and every game produces a decision. What it does not
+  // produce is the league's own three-column record: an overtime or shootout loss is
+  // a loss here and a separate column officially, so "20-15 at home" here can face a
+  // "20-10-5" in a box score. For a betting read a loss is a loss, so the number is
+  // right for the purpose and has to say which convention it used.
+  nhl: {
+    label: "NHL",
+    sgoLeagueID: "NHL",
+    // BDL publishes /nhl/v1/. Populated deliberately even though NHL stats are not
+    // subscribed: BDLClient's TTL tier gate absorbs the 401 and would heal within 30
+    // minutes if the subscription were ever bought, with no redeploy. Same reasoning
+    // as the atp and ufc rows. Hit rates do NOT route here - they go to the NHL's own
+    // API - so a lapsed BDL subscription cannot take NHL hit rates down.
+    bdlPath: "nhl",
+    supports: {
+      playerProps: true,
+      hitRates: true,
+      injuries: false,
+      weather: false,
+      teamSplits: true,
+    },
+  },
+
   // Add when NBA season starts:
   // nba: { label: "NBA", sgoLeagueID: "NBA", bdlPath: "nba", supports: TEAM_SPORT_CAPABILITIES },
-  // Add when NHL season starts:
-  // nhl: { label: "NHL", sgoLeagueID: "NHL", bdlPath: "nhl", supports: TEAM_SPORT_CAPABILITIES },
 } as const;
 
 export type SportKey = keyof typeof SPORT_CONFIG;
@@ -373,6 +449,7 @@ export const PARTICIPANT_MODEL: Record<SportKey, ParticipantModel> = {
   cbb: "roster",
   epl: "roster",
   ucl: "roster",
+  nhl: "roster",
   atp: "participant_slots",
   wta: "participant_slots",
   ufc: "fighters",
@@ -455,6 +532,12 @@ export const GAME_TOTAL_STAT: Record<SportKey, string> = {
   cbb: "points",
   epl: "points",
   ucl: "points",
+  // HOCKEY GOALS ARE `points`, exactly as in soccer. SGO's stats page defines the
+  // hockey `points` statID as "Goals scored" and offers no bare `goals` statID, so a
+  // 6.5 total is points-all-game-ou-over. The word collision with the NHL's own
+  // `points` field (goals plus assists) is real and is handled in nhlStatMap.ts; it
+  // does not reach this table, because a GAME total is goals in both vocabularies.
+  nhl: "points",
   // A fight total is rounds completed, not points. Quoted from SGO's UFC page.
   ufc: "roundsCompleted",
   // Documented by SGO as the games count rather than the set score. NOT yet
@@ -516,7 +599,9 @@ export function unsupportedMessage(
             : `Hit rates are not available for ${label}.`,
 
     injuries:
-      sport === "cbb"
+      sport === "nhl"
+        ? `No injury feed is available for ${label}, and this one is a missing SOURCE rather than a plan limit. The NHL's own public API - which serves every ${label} hit rate in this connector - publishes no injury endpoint, and BALLDONTLIE gates /nhl/v1/player_injuries behind GOAT for hockey specifically, which this account does not hold. Hockey also reports availability more vaguely than any other sport here: clubs announce "upper body" or "lower body" and a goalie starter is often confirmed at warmups. Confirm the projected lines and the starting goalie by live search before posting an ${label} player prop, and treat a goalie saves line as unplayable until the start is confirmed.`
+        : sport === "cbb"
         ? `BALLDONTLIE publishes no NCAAB injuries endpoint. College basketball availability also moves late and is reported by the school rather than a league office, so confirm it by live search against the team's own release before posting a ${label} player prop.`
         : sport === "ufc"
           ? `There is no injury feed for ${label}. A fight is either on the card or off it, and withdrawals are announced by the promotion, often inside the final week. Check the current card by live search before posting - a fighter replacement changes the entire matchup, not just one line.`

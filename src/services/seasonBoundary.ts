@@ -69,6 +69,18 @@ const SEASON_START_MONTH: Record<SportKey, number> = {
   // connector reaches this row today, because UFC hit rates are refused upstream on
   // the capability flag, but the table stays exhaustive over SportKey by design.
   ufc: 0, // January, i.e. the calendar year
+
+  // THE NHL SPANS THE YEAR BOUNDARY, same as CFB, CBB and soccer. The regular season
+  // opens in early October and the Stanley Cup Final ends in June, so a March game
+  // belongs to the season that began the previous October. Read as the calendar year,
+  // every January-through-June game - more than half the season, all of the playoffs -
+  // would be filed under a season that has not started, and the prior-season warning
+  // would fire on current form.
+  //
+  // WORTH KNOWING FOR THE NHL API SPECIFICALLY: its own season id is the pair of
+  // years, "20262027", which nhlStatsClient derives from this same boundary rather
+  // than from a second copy of the rule.
+  nhl: 9, // October
 };
 
 export function seasonForDate(sport: SportKey, dateISO: string): SeasonInfo | null {

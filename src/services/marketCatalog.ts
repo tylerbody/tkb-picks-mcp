@@ -240,6 +240,51 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
     { statID: "takedown_attempts", label: "Takedowns Attempted" },
     { statID: "takedowns_landed", label: "Takedowns Landed" },
   ],
+
+  // ---- NHL (v2.10.0) ----
+  //
+  // READ THE FIRST TWO ROWS TOGETHER OR NOT AT ALL.
+  //
+  // SGO's hockey stat list defines `points` as "Goals scored" and `goals+assists` as
+  // "Hockey Points. Sum of goals scored plus assists". Both quoted verbatim. So the
+  // market a bettor calls "player points" is `goals+assists`, and `points` on its own
+  // is the anytime-goal stat. Labelled here the way a BOOK labels them, because these
+  // labels are what tkb_get_odds matches on and what ends up in a tweet.
+  //
+  // This is the same shape soccer has - `points` is goals there too - which is why
+  // the soccer block above reads identically. Hockey just also sells the combined
+  // stat as its headline prop, so the collision is live rather than theoretical.
+  //
+  // `shots_onGoal` IS THE SHOTS PROP. SGO also has a bare `shots` ("Total shots
+  // taken", which counts attempts that missed or were blocked). Books price shots ON
+  // GOAL. Both are catalogued so a caller can ask for either on purpose, but they are
+  // different numbers and the labels say so.
+  //
+  // `blocks` vs `shots_blocked` POINT IN OPPOSITE DIRECTIONS and are the easiest pair
+  // here to ship backwards. From SGO's list: `blocks` is "shots (taken by the opposing
+  // team) that were blocked" - what the defender did. `shots_blocked` is "shots taken
+  // that were blocked by an opponent" - what happened TO the shooter. A blocked-shots
+  // prop is `blocks`.
+  //
+  // GOALIE SAVES ARE `goalie_saves`, the same statID soccer uses. Not `saves`.
+  nhl: [
+    { statID: "assists", label: "Assists" },
+    { statID: "blocks", label: "Blocked Shots" },
+    { statID: "fantasyScore", label: "Fantasy Score" },
+    { statID: "faceOffs_won", label: "Faceoffs Won" },
+    { statID: "points", label: "Goals" },
+    { statID: "hits", label: "Hits" },
+    { statID: "penaltyMinutes", label: "Penalty Minutes" },
+    { statID: "plusMinus", label: "Plus/Minus" },
+    { statID: "goals+assists", label: "Points" },
+    { statID: "powerPlay_assists", label: "Power Play Assists" },
+    { statID: "powerPlay_goals", label: "Power Play Goals" },
+    { statID: "powerPlay_goals+assists", label: "Power Play Points" },
+    { statID: "goalie_saves", label: "Saves" },
+    { statID: "shots_onGoal", label: "Shots On Goal" },
+    { statID: "shots", label: "Shots Taken (incl. missed and blocked)" },
+    { statID: "shots_blocked", label: "Own Shots Blocked" },
+  ],
 };
 
 /**
@@ -366,6 +411,28 @@ export const YES_NO_MARKETS: Record<SportKey, { statID: string; label: string }[
     { statID: "wonBy_knockout", label: "Win By Knockout / TKO" },
     { statID: "wonBy_submission", label: "Win By Submission" },
   ],
+
+  // ---- NHL ----
+  //
+  // ANYTIME GOALSCORER IS `points`, NOT `goals+assists`. Identical to the soccer rows
+  // above and for the identical reason: hockey `points` is the goals statID. Asking
+  // the combined stat here would price "did he record a point", which is a DIFFERENT
+  // and much shorter-priced market than anytime goalscorer.
+  //
+  // DELIBERATELY SHORT. Only markets whose statID is quoted from SGO's hockey stat
+  // list appear. Hockey's other famous yes/no bets - first goalscorer, a player to
+  // record a hat trick, both teams to score in a period - either have no documented
+  // statID in that list or are period-scoped group markets whose periodID SGO never
+  // prints. Guessing one produces a silent empty that reads as "not offered tonight",
+  // which is the failure this catalog exists to avoid. Confirm against GET /markets
+  // before adding any of them.
+  nhl: [
+    { statID: "points", label: "Anytime Goalscorer" },
+    { statID: "assists", label: "Any Assist" },
+    { statID: "goals+assists", label: "Any Point" },
+    { statID: "shots_onGoal", label: "Any Shot On Goal" },
+    { statID: "penaltyMinutes", label: "Any Penalty Minutes" },
+  ],
 };
 
 /**
@@ -426,4 +493,21 @@ export const SUPPORTED_PERIODS: Record<SportKey, string[]> = {
   // shape. Guessing one would produce silent empties. Confirm it against
   // GET /markets before adding.
   ufc: ["1st_round", "2nd_round", "3rd_round", "4th_round", "5th_round"],
+
+  // HOCKEY PLAYS THREE PERIODS. `1p`, `2p` and `3p` are documented periodIDs
+  // ("1st Period", "2nd Period", "3rd Period").
+  //
+  // `ot` AND `so` ARE LEFT OUT ON PURPOSE, and this is the opposite call from the one
+  // soccer's block makes for the same two codes. Both are real documented periodIDs
+  // and hockey genuinely reaches them - about a quarter of NHL games go past
+  // regulation - but nothing in the docs binds a MARKET to them, and an overtime
+  // moneyline is not a line books routinely post. Requesting one returns no market,
+  // which reads downstream as "not posted yet" rather than "this period is not sold".
+  //
+  // WHAT MATTERS MORE, and is handled elsewhere: a full-game NHL moneyline settles on
+  // `game`, which INCLUDES overtime and the shootout, while three-way regulation
+  // markets settle on `reg`. matchLinePeriodFor() returns full_game for NHL, which is
+  // correct for the standard ML. If regulation three-way lines are ever added, they
+  // need `reg` and a draw outcome, exactly as soccer does.
+  nhl: ["1st_period", "2nd_period", "3rd_period"],
 };

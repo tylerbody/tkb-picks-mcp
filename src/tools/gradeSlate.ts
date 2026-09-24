@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import type { BDLClient } from "../services/bdlClient.js";
+import type { NHLStatsClient } from "../services/nhlStatsClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { gameTotalStatFor, SUPPORTED_SPORTS, hasDrawOutcome, matchLinePeriodFor, type SportKey } from "../constants.js";
@@ -17,7 +18,7 @@ import {
   SPREAD_SIGN_CONVENTION,
 } from "../services/pickGrader.js";
 import { lookupPlayerStat } from "../services/hitRateAggregator.js";
-import { assessFinality, crossCheckFinality } from "../services/eventStatus.js";
+import { assessFinality, crossCheckFinalityForSport } from "../services/eventStatus.js";
 import { readMatchTeams } from "../services/eventShape.js";
 import { diagnosePlayerIdMiss } from "../services/playerResolution.js";
 
@@ -127,7 +128,14 @@ interface GradedPick {
   note?: string | null;
 }
 
-export function registerBatchGradeTool(server: McpServer, sgo: SGOClient, bdl?: BDLClient) {
+export function registerBatchGradeTool(
+  server: McpServer,
+  sgo: SGOClient,
+  bdl?: BDLClient,
+  // The NHL feed is the SECOND SOURCE FOR HOCKEY, because BDL gates NHL games behind
+  // ALL-STAR and its tiers are per sport. See eventStatus.ts.
+  nhl?: NHLStatsClient
+) {
   server.registerTool(
     "tkb_grade_slate",
     {
@@ -266,7 +274,7 @@ Error Handling:
           let crossCheckNote = "";
           let finalityResolved = finality.final;
           if (finality.crossCheckable) {
-            const cross = await crossCheckFinality(bdl, params.sport, event);
+            const cross = await crossCheckFinalityForSport(params.sport, { bdl, nhl }, event);
             crossCheckNote = cross.note;
             finalityResolved = cross.resolved;
           }

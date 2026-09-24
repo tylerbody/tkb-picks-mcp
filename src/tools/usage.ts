@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import type { CFBDClient } from "../services/cfbdClient.js";
 import type { CBBDClient } from "../services/cbbdClient.js";
+import { NHLStatsClient } from "../services/nhlStatsClient.js";
 
 /**
  * API QUOTA MONITOR.
@@ -31,7 +32,10 @@ export function registerUsageTool(
   server: McpServer,
   sgo: SGOClient,
   cfbd: CFBDClient | null,
-  cbbd: CBBDClient | null = null
+  cbbd: CBBDClient | null = null,
+  // Defaulted rather than required: the NHL feed needs no key, so there is no
+  // configuration in which it is absent.
+  nhl: NHLStatsClient = new NHLStatsClient()
 ) {
   server.registerTool(
     "tkb_get_api_usage",
@@ -147,12 +151,40 @@ Error Handling:
           );
         })();
 
+        // THE NHL LINE REPORTS ACTIVITY, NOT BUDGET, AND SAYS WHICH.
+        //
+        // Every other counter here exists because something is being spent: SGO bills
+        // per event object, CFBD and CBBD share a monthly call pool, BDL throttles per
+        // minute. api-web.nhle.com has no key, no quota and no plan, so there is nothing
+        // to run out of, and printing a number without saying that invites someone to
+        // ration a resource that cannot be exhausted.
+        //
+        // The SAME in-memory caveat applies as to the CFBD counter: this resets on every
+        // restart, and Render's free tier spins down when idle.
+        const nhlLine = (() => {
+          const n = nhl.usage();
+          return (
+            `NHL API (api-web.nhle.com): ${n.requests} request(s) THIS PROCESS ONLY, ` +
+            `${n.hits} cache hit(s), ${n.misses} miss(es), ${n.coalesced} coalesced, ` +
+            `${n.errors} error(s).\n\n` +
+            `THERE IS NO BUDGET HERE. No key, no quota, no plan - so this counter is an ` +
+            `activity readout rather than a spend figure, and nothing needs rationing. ` +
+            `An NHL hit rate costs two requests (the player's whole season game log, plus ` +
+            `the club schedule for a play-rate denominator) and zero billable objects, ` +
+            `which makes it the cheapest rate path in this connector.\n\n` +
+            `WHAT TO WATCH INSTEAD IS THE ERROR COUNT. These endpoints are UNDOCUMENTED ` +
+            `and carry no stability promise, so a climbing error count is the early signal ` +
+            `that the league changed a shape. Errors here surface as refusals naming ` +
+            `services/nhlStatsClient.ts rather than as wrong numbers.`
+          );
+        })();
+
         return {
           content: [
             {
               type: "text" as const,
               text:
-                `SportsGameOdds account usage:\n\n${truncated}\n\n${cacheLine}\n\n${cfbdLine}\n\n${cbbdLine}\n\n` +
+                `SportsGameOdds account usage:\n\n${truncated}\n\n${cacheLine}\n\n${cfbdLine}\n\n${cbbdLine}\n\n${nhlLine}\n\n` +
                 `Reminder: billing is per EVENT OBJECT returned, not per market. Hit-rate ` +
                 `checks are the heaviest consumer in this connector, which is why identical ` +
                 `team-history fetches are cached.`,

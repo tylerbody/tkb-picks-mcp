@@ -79,6 +79,17 @@ const DAYS_PER_TEAM_GAME: Record<SportKey, number> = {
   // across weight classes, camps and layoffs. Even with a stat source, a counted UFC
   // hit rate would need a different design than a rolling date window.
   ufc: 120,
+
+  // NHL teams play roughly every other day across an 82-game, six-month season, with
+  // back-to-backs and a bye week pulling in both directions. 2.2 is deliberately
+  // generous for the reason stated above: a window that is too small loses recent
+  // games silently, while too large costs a few extra event objects.
+  //
+  // NOTE THAT NHL HIT RATES DO NOT NORMALLY REACH THIS AGGREGATOR AT ALL. They are
+  // served by the NHL's own game-log endpoint, which returns a whole season in one
+  // request and needs no window sizing. This row governs only the SGO fallback path
+  // and the team-game math shared with it.
+  nhl: 2.2,
 };
 
 /**

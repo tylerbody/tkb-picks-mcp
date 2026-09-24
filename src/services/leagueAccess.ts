@@ -101,6 +101,11 @@ const LEAGUE_TIERS: Record<SportKey, LeagueTierInfo> = {
     documentedFrom: "unlisted",
     note: "Not in any published example list. MEASURED WORKING 2026-09-14: 24 events returned.",
   },
+  nhl: {
+    documentedFrom: "amateur",
+    note:
+      "NHL is named on the free plan, so it survives a swap back to the rookie key - the same property that made NCAAB and the Champions League safe to build on, and that EPL and UFC lack.",
+  },
   ufc: {
     documentedFrom: "unlisted",
     note:

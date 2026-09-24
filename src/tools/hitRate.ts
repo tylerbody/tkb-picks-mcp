@@ -21,6 +21,9 @@ import {
   priorSeasonBdlLookback,
 } from "../services/bdlHitRateAggregator.js";
 import { isStatSupported } from "../services/bdlStatMap.js";
+import { NHLStatsClient } from "../services/nhlStatsClient.js";
+import { getNhlPlayerHitRate } from "../services/nhlHitRateAggregator.js";
+import { allNhlClubCodes, nhlClubCode } from "../services/nhlTeams.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 
 const HitRateInputSchema = z
@@ -86,7 +89,11 @@ export function registerHitRateTool(
   sgo: SGOClient,
   bdl: BDLClient,
   cfbd: CFBDClient | null,
-  cbbd: CBBDClient | null = null
+  cbbd: CBBDClient | null = null,
+  // NOT optional in practice: the NHL feed needs no key, so there is no configuration
+  // under which it is absent. Defaulted rather than required so the existing call
+  // sites and tests keep compiling.
+  nhl: NHLStatsClient = new NHLStatsClient()
 ) {
   server.registerTool(
     "tkb_get_player_hit_rate",
@@ -164,6 +171,87 @@ Error Handling:
         // for a returning starter. So a missing CFBD key REFUSES rather than falls
         // back, per the rule this connector is built on - an unanswerable question
         // gets a refusal, not a plausible answer.
+        // ---- HOCKEY GOES TO THE NHL'S OWN FEED, AND ONLY THERE ----
+        //
+        // NO KEY, NO QUOTA, TWO REQUESTS. Unlike CFB and CBB, this branch cannot fail
+        // on a missing key, because there is no key: api-web.nhle.com is open. What it
+        // CAN fail on is a name or a club code, and both are reported by name.
+        //
+        // WHY NOT BDL, WHICH EVERY OTHER PRO SPORT USES HERE: its tiers are per sport
+        // and hockey player stats sit behind GOAT ($39.99/mo) with games behind
+        // ALL-STAR. Routing hockey there would have shipped a feature that 401s.
+        //
+        // WHY NOT THE SGO FALLBACK: the same reason CFB and CBB refuse it. An SGO
+        // event carries a hockey box score inconsistently, and an empty one reads as
+        // a DNP - the exact mechanism that produced a returning starter at a 0.2 play
+        // rate in v2.7.0.
+        if (params.sport === "nhl" && params.dataSource !== "sgo" && params.dataSource !== "bdl") {
+          const club = nhlClubCode(params.teamID);
+          if (!club) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `Could not resolve "${params.teamID}" to an NHL club.\n\n` +
+                    `The NHL feed keys rosters and schedules on a THREE-LETTER CLUB CODE, and ` +
+                    `this resolver accepts an SGO teamID, a full club name, or the code itself. ` +
+                    `None matched.\n\n` +
+                    `Valid codes: ${allNhlClubCodes().join(", ")}.\n\n` +
+                    `This is a refusal rather than a best guess on purpose: a wrong club returns ` +
+                    `a roster that does not contain the player, which reads as "he is not on this ` +
+                    `team" and sends you looking in the wrong place.`,
+                },
+              ],
+            };
+          }
+
+          try {
+            const result = await getNhlPlayerHitRate(nhl, {
+              playerName: params.playerName,
+              teamAbbrev: club,
+              statID: params.statID,
+              line: params.line,
+              direction: params.direction,
+              targetAppearances: params.lookbackGames,
+            });
+
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    (result.sampleWarning ? `${result.sampleWarning}\n\n` : "") +
+                    `${result.playerName}: ${result.gamesHit} of ${result.gamesConsidered} ` +
+                    `${params.direction} ${params.line} ${params.statID}` +
+                    (result.matchedFields.length ? ` (read from ${result.matchedFields.join(", ")})` : "") +
+                    `.\n\n` +
+                    `Source: the NHL's own game log, season ${result.seasonId}. ` +
+                    `${result.teamGamesPlayed} completed ${club} regular-season games in the denominator.` +
+                    (result.recentAvailability.note ? `\n\nAVAILABILITY: ${result.recentAvailability.note}` : "") +
+                    (result.seasonWarning ? `\n\n${result.seasonWarning}` : "") +
+                    `\n\n` +
+                    JSON.stringify(result, null, 2),
+                },
+              ],
+              structuredContent: { ...result, nhlClubResolved: club },
+            };
+          } catch (err) {
+            // A REFUSAL, NOT AN ERROR CARD. Every throw out of that aggregator is a
+            // message written to be read: an unmapped stat names the mapped ones and
+            // says whether the box score could serve it, and a name miss reports the
+            // roster it searched and how many names were in it.
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: err instanceof Error ? err.message : String(err),
+                },
+              ],
+            };
+          }
+        }
+
         // ---- COLLEGE BASKETBALL GOES TO CollegeBasketballData, AND ONLY THERE ----
         //
         // Same rule as CFB, same reason, decided in advance rather than after an
