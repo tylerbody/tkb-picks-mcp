@@ -29,11 +29,13 @@ import {
 } from "../src/services/nhlStatMap.js";
 import {
   countTeamGamesPlayed,
+  getNhlPlayerHitRate,
   nhlSeasonIdForDate,
   resolveNhlPlayer,
   sortLogNewestFirst,
 } from "../src/services/nhlHitRateAggregator.js";
 import { allNhlClubCodes, nhlClubCode, NHL_CLUB_CODES } from "../src/services/nhlTeams.js";
+import { describeRecency } from "../src/services/sampleRecency.js";
 import { reconcileFinalityWithNHL } from "../src/services/eventStatus.js";
 import type { SGOEvent } from "../src/types.js";
 
@@ -503,5 +505,249 @@ describe("name normalisation", () => {
     assert.equal(normaliseNhlName("Montréal"), "montreal");
     assert.equal(normaliseNhlName("Ukko-Pekka"), "ukkopekka");
     assert.equal(normaliseNhlName(undefined), "");
+  });
+});
+
+/* ===========================================================================
+ * v2.10.1 - TWO DEFECTS FOUND BY TESTING THE DEPLOYED v2.10.0 BUILD
+ *
+ * 1. The play rate compared a CAPPED numerator against a WHOLE SEASON, so it
+ *    tracked the lookback argument rather than the player, and every NHL hit rate
+ *    came back flagged IRREGULAR.
+ * 2. This aggregator never called describeRecency, which all four others do, so a
+ *    sample from a finished season reported as current form with no warning.
+ * ======================================================================== */
+
+describe("v2.10.1 play rate is measured over the window the sample spans", () => {
+  // A club that has played 20 games, every other day from Oct 9.
+  const clubGames = Array.from({ length: 20 }, (_, i) => ({
+    gameDate: `2026-10-${String(9 + i * 2).padStart(2, "0")}`.slice(0, 10),
+    gameType: 2,
+    gameState: "OFF",
+  }));
+
+  test("THE BUG: the full-season count is independent of the sample window", () => {
+    // This is what the old denominator was, and why a 10-appearance sample against it
+    // produced 12% for a player who had played nearly every game.
+    const whole = countTeamGamesPlayed(clubGames, "2026-11-30");
+    assert.equal(whole, 20);
+  });
+
+  test("bounding the window to the sample gives a denominator that means something", () => {
+    // Last five club games only.
+    const windowed = countTeamGamesPlayed(clubGames, "2026-11-30", "2026-10-39".slice(0, 10));
+    assert.ok(windowed < 20);
+  });
+
+  test("a window start on the oldest counted game includes that game", () => {
+    assert.equal(countTeamGamesPlayed(clubGames, "2026-10-13", "2026-10-09"), 3);
+  });
+
+  test("the window still excludes preseason and unplayed games", () => {
+    const mixed = [
+      { gameDate: "2026-10-09", gameType: 1, gameState: "OFF" },
+      { gameDate: "2026-10-11", gameType: 2, gameState: "OFF" },
+      { gameDate: "2026-10-13", gameType: 2, gameState: "FUT" },
+    ];
+    assert.equal(countTeamGamesPlayed(mixed, "2026-10-20", "2026-10-09"), 1);
+  });
+
+  test("an empty window is 0, not a crash or a full-season fallback", () => {
+    assert.equal(countTeamGamesPlayed(clubGames, "2026-10-08", "2026-10-01"), 0);
+  });
+});
+
+describe("v2.10.1 a finished season is not current form", () => {
+  // The exact shape measured live: every counted game from Nov 2025 to Apr 2026, read
+  // on 2026-09-24, two weeks before the next season opens.
+  const staleLog = [
+    { date: "2026-04-14", statValue: 0 },
+    { date: "2026-04-09", statValue: 1 },
+    { date: "2026-04-03", statValue: 0 },
+    { date: "2026-03-28", statValue: 0 },
+    { date: "2026-03-18", statValue: 0 },
+  ];
+  const asOf = new Date("2026-09-24T00:00:00Z");
+
+  test("THE BUG: the season LABEL says current, because the year has not rolled over", () => {
+    // Both of these were correct in v2.10.0 and that was the problem.
+    assert.equal(seasonForDate("nhl", "2026-04-14")?.seasonYear, 2025);
+    assert.equal(seasonForDate("nhl", "2026-09-24")?.seasonYear, 2025);
+  });
+
+  test("describeRecency catches what the season label cannot", () => {
+    const r = describeRecency(staleLog, {}, asOf);
+    assert.equal(r.isStale, true);
+    assert.ok(r.daysSinceMostRecent !== null && r.daysSinceMostRecent > 150);
+    assert.ok(r.warning && r.warning.length > 0);
+  });
+
+  test("a sample from THIS week is not stale", () => {
+    const fresh = [
+      { date: "2026-09-23", statValue: 1 },
+      { date: "2026-09-21", statValue: 0 },
+      { date: "2026-09-19", statValue: 2 },
+    ];
+    assert.equal(describeRecency(fresh, {}, asOf).isStale, false);
+  });
+});
+
+describe("v2.10.1 the aggregator END TO END, against a stub feed", () => {
+  /* WHY THIS EXISTS AND THE HELPER TESTS ABOVE WERE NOT ENOUGH.
+   *
+   * Mutation-testing v2.10.1 caught the windowed denominator but NOT a mutation that
+   * broke the aggregator's describeRecency call, because every recency assertion above
+   * calls describeRecency directly. A guard is only wired in if something tests the
+   * wiring, which is the same lesson as the v2.8.12 cross-check that sat unreachable
+   * behind a gate nothing exercised. */
+
+  const club = (n: number, startDay = 9) =>
+    Array.from({ length: n }, (_, i) => ({
+      gameId: 1000 + i,
+      gameDate: `2026-10-${String(startDay + i * 2).padStart(2, "0")}`,
+      gameType: 2,
+      gameState: "OFF",
+      homeAbbrev: "BUF",
+      awayAbbrev: "TOR",
+    }));
+
+  const stub = (opts: {
+    log: { gameDate: string; points?: number; goals?: number }[];
+    clubGames: ReturnType<typeof club>;
+    isGoalie?: boolean;
+  }) =>
+    ({
+      getRoster: async () => [
+        {
+          playerId: 7,
+          fullName: "Test Skater",
+          teamAbbrev: "BUF",
+          positionCode: opts.isGoalie ? "G" : "C",
+          isGoalie: !!opts.isGoalie,
+        },
+      ],
+      getPlayerGameLog: async () =>
+        opts.log.map((r, i) => normaliseNhlGameLogEntry({ gameId: 500 + i, ...r })),
+      getClubSchedule: async () => opts.clubGames,
+    }) as unknown as Parameters<typeof getNhlPlayerHitRate>[0];
+
+  test("a durable player is NOT flagged IRREGULAR any more", async () => {
+    // Played 10 of the 11 club games in the window. v2.10.0 reported this as 10 of 82.
+    const log = club(10).map((g) => ({ gameDate: g.gameDate, points: 1 }));
+    const r = await getNhlPlayerHitRate(
+      stub({ log, clubGames: club(11) }),
+      {
+        playerName: "Test Skater",
+        teamAbbrev: "BUF",
+        statID: "goals+assists",
+        line: 0.5,
+        direction: "over",
+        asOf: new Date("2026-10-29T00:00:00Z"),
+      }
+    );
+    assert.equal(r.gamesConsidered, 10);
+    assert.equal(r.recentAvailability.flag, "OK");
+    assert.ok(r.recentAvailability.playRate > 0.85, `playRate was ${r.recentAvailability.playRate}`);
+  });
+
+  test("THE LOOKBACK NO LONGER MOVES THE PLAY RATE", async () => {
+    // The v2.10.0 bug in one assertion: same player, two lookbacks, one answer.
+    const log = club(20).map((g) => ({ gameDate: g.gameDate, points: 1 }));
+    const args = {
+      playerName: "Test Skater",
+      teamAbbrev: "BUF",
+      statID: "goals+assists",
+      line: 0.5,
+      direction: "over" as const,
+      asOf: new Date("2026-11-20T00:00:00Z"),
+    };
+    const short = await getNhlPlayerHitRate(stub({ log, clubGames: club(20) }), {
+      ...args,
+      targetAppearances: 5,
+    });
+    const long = await getNhlPlayerHitRate(stub({ log, clubGames: club(20) }), {
+      ...args,
+      targetAppearances: 20,
+    });
+    assert.equal(short.recentAvailability.playRate, 1);
+    assert.equal(long.recentAvailability.playRate, 1);
+  });
+
+  test("a genuinely scratched player IS still flagged", async () => {
+    // Played 5 of the club's 20 games in the window. The flag has to survive the fix.
+    const clubGames = club(20);
+    const log = [clubGames[0], clubGames[4], clubGames[8], clubGames[12], clubGames[19]].map((g) => ({
+      gameDate: g.gameDate,
+      points: 0,
+    }));
+    const r = await getNhlPlayerHitRate(stub({ log, clubGames }), {
+      playerName: "Test Skater",
+      teamAbbrev: "BUF",
+      statID: "goals+assists",
+      line: 0.5,
+      direction: "over",
+      asOf: new Date("2026-11-20T00:00:00Z"),
+    });
+    assert.equal(r.recentAvailability.flag, "IRREGULAR");
+    assert.ok(r.recentAvailability.playRate < 0.5);
+  });
+
+  test("A STALE SAMPLE WARNS THROUGH seasonWarning, which is the field writers obey", async () => {
+    // The live Vatrano case: April games read in late September.
+    const log = [
+      { gameDate: "2026-04-14", points: 0 },
+      { gameDate: "2026-04-09", points: 1 },
+      { gameDate: "2026-04-03", points: 0 },
+      { gameDate: "2026-03-28", points: 0 },
+      { gameDate: "2026-03-18", points: 0 },
+    ];
+    const clubGames = [
+      { gameId: 1, gameDate: "2026-04-14", gameType: 2, gameState: "OFF", homeAbbrev: "BUF", awayAbbrev: "TOR" },
+      { gameId: 2, gameDate: "2026-04-09", gameType: 2, gameState: "OFF", homeAbbrev: "BUF", awayAbbrev: "TOR" },
+      { gameId: 3, gameDate: "2026-04-03", gameType: 2, gameState: "OFF", homeAbbrev: "BUF", awayAbbrev: "TOR" },
+      { gameId: 4, gameDate: "2026-03-28", gameType: 2, gameState: "OFF", homeAbbrev: "BUF", awayAbbrev: "TOR" },
+      { gameId: 5, gameDate: "2026-03-18", gameType: 2, gameState: "OFF", homeAbbrev: "BUF", awayAbbrev: "TOR" },
+    ];
+    const r = await getNhlPlayerHitRate(stub({ log, clubGames }), {
+      playerName: "Test Skater",
+      teamAbbrev: "BUF",
+      statID: "goals+assists",
+      line: 0.5,
+      direction: "over",
+      asOf: new Date("2026-09-24T00:00:00Z"),
+    });
+    assert.ok(r.seasonWarning, "seasonWarning must fire on a finished-season sample");
+    assert.match(r.seasonWarning ?? "", /NOT CURRENT FORM/);
+    assert.match(r.seasonWarning ?? "", /last season/);
+    assert.equal(r.recency.isStale, true);
+  });
+
+  test("a CURRENT sample carries no season warning at all", async () => {
+    const log = club(8).map((g) => ({ gameDate: g.gameDate, points: 1 }));
+    const r = await getNhlPlayerHitRate(stub({ log, clubGames: club(8) }), {
+      playerName: "Test Skater",
+      teamAbbrev: "BUF",
+      statID: "goals+assists",
+      line: 0.5,
+      direction: "over",
+      asOf: new Date("2026-10-24T00:00:00Z"),
+    });
+    assert.equal(r.seasonWarning, null);
+  });
+
+  test("a GOALIE timeshare is described as one, not flagged as irregular", async () => {
+    const clubGames = club(20);
+    const log = [0, 2, 4, 6, 8, 10, 12].map((i) => ({ gameDate: clubGames[i].gameDate, shotsAgainst: 30, goalsAgainst: 2 }));
+    const r = await getNhlPlayerHitRate(stub({ log, clubGames, isGoalie: true }), {
+      playerName: "Test Skater",
+      teamAbbrev: "BUF",
+      statID: "goalie_saves",
+      line: 25.5,
+      direction: "over",
+      asOf: new Date("2026-11-20T00:00:00Z"),
+    });
+    assert.equal(r.isGoalie, true);
+    assert.match(r.recentAvailability.note ?? "", /GOALIE/);
+    assert.equal(r.gamesHit, 7); // 28 saves each, all over 25.5
   });
 });

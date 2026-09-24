@@ -1,5 +1,6 @@
 import type { GameLogEntry, HitRateResult } from "../types.js";
 import { seasonForDate } from "./seasonBoundary.js";
+import { describeRecency, type SampleRecency } from "./sampleRecency.js";
 import {
   NHL_GAME_TYPE_REGULAR,
   nhlSaysFinal,
@@ -60,6 +61,10 @@ export interface NhlHitRateParams {
 }
 
 export interface NhlHitRateExtras {
+  /** The recency assessment every other aggregator in this repo already returns. */
+  recency: SampleRecency;
+  /** The club's completed regular-season games, whole season, for context. */
+  teamGamesInSeason: number;
   nhlPlayerId: number | null;
   matchedFields: string[];
   /** True when the resolved player is a goalie, whose stat vocabulary differs. */
@@ -121,22 +126,50 @@ export function sortLogNewestFirst(log: NhlGameLogEntry[]): NhlGameLogEntry[] {
 }
 
 /**
- * PURE. How many REGULAR-SEASON games has this club actually completed, on or before
- * the given date?
+ * PURE. How many REGULAR-SEASON games has this club actually completed in a window?
  *
  * Three filters, each load-bearing:
  *   gameType === 2   drops PRESEASON, which this endpoint includes. A preseason game
  *                    in the denominator understates every regular's availability.
  *   terminal state   drops scheduled games. A season schedule is the whole 82.
- *   date bound       drops anything after the cutoff, so a mid-season rate is not
- *                    divided by games that have not been played.
+ *   date bounds      drops anything outside the window being measured.
+ *
+ * ============================================================================
+ * `onOrAfter` EXISTS BECAUSE v2.10.0 SHIPPED WITH A PLAY RATE THAT WAS NONSENSE
+ * ============================================================================
+ *
+ * MEASURED LIVE 2026-09-24, Frank Vatrano, the same request twice:
+ *
+ *   lookbackGames 10  ->  playRate 0.12, flag IRREGULAR
+ *   lookbackGames 40  ->  playRate 0.49, flag IRREGULAR
+ *
+ * The rate tracked the LOOKBACK, not the player. The numerator stops at
+ * targetAppearances by design, and the denominator was the club's whole completed
+ * season, so the two measured different spans and the quotient meant nothing. Every
+ * NHL hit rate therefore carried "Played 10 of 82 team games (12%) ... Check
+ * availability before posting" no matter how durable the player was.
+ *
+ * WHY THAT IS WORSE THAN NO FLAG, in this repo's own words from v2.5.0, when the
+ * IRREGULAR flag was crying wolf on Cam Schlittler: "a flag that cries wolf on healthy
+ * starters trains the reader to ignore it, and its whole value is the real catches."
+ * A warning that fires on everyone is indistinguishable from no warning, except that
+ * it also costs the reader's attention.
+ *
+ * So the denominator is now the club's completed games INSIDE the window the counted
+ * appearances actually span. "He played 10 of his team's last 11" is a fact about the
+ * player; "10 of 82" was a fact about the lookback argument.
  */
 export function countTeamGamesPlayed(
   games: { gameDate: string; gameType: number; gameState: string }[],
-  onOrBefore: string
+  onOrBefore: string,
+  onOrAfter?: string
 ): number {
   return games.filter(
-    (g) => g.gameType === NHL_GAME_TYPE_REGULAR && nhlSaysFinal(g.gameState) && g.gameDate <= onOrBefore
+    (g) =>
+      g.gameType === NHL_GAME_TYPE_REGULAR &&
+      nhlSaysFinal(g.gameState) &&
+      g.gameDate <= onOrBefore &&
+      (onOrAfter === undefined || g.gameDate >= onOrAfter)
   ).length;
 }
 
@@ -192,7 +225,8 @@ export async function getNhlPlayerHitRate(
   const ordered = sortLogNewestFirst(rawLog).filter((e) => !e.gameDate || e.gameDate <= asOfDay);
 
   const clubGames = await nhl.getClubSchedule(params.teamAbbrev, seasonId);
-  const teamGamesPlayed = countTeamGamesPlayed(clubGames, asOfDay);
+  // Full-season figure, kept for context and for the zero-appearance case.
+  const teamGamesInSeason = countTeamGamesPlayed(clubGames, asOfDay);
 
   const log: GameLogEntry[] = [];
   const matchedFields = new Set<string>();
@@ -251,9 +285,23 @@ export async function getNhlPlayerHitRate(
   const currentSeasonGames = log.filter((l) => l.seasonYear === currentSeason).length;
   const priorSeasonGames = log.length - currentSeasonGames;
 
-  // PLAY RATE. Denominator is the club's completed regular-season games, which is why
-  // the second request exists. Without it this would be appearances over appearances,
-  // which is 1.0 for a scratched player and therefore worse than no number.
+  // PLAY RATE, OVER THE WINDOW THE SAMPLE ACTUALLY SPANS. See countTeamGamesPlayed
+  // for the v2.10.0 bug this replaces: comparing a capped numerator against a whole
+  // season made the rate a function of the lookback argument rather than of the player.
+  //
+  // The window starts at the OLDEST COUNTED APPEARANCE, so the player is present at
+  // its left edge by construction. That is the intended question - "of his team's
+  // games since then, how many did he play" - and it is why a mid-sample absence still
+  // shows up while a short lookback no longer invents one.
+  const countedDates = log
+    .filter((l) => l.dataStatus === "value" && l.date)
+    .map((l) => l.date)
+    .sort();
+  const windowStart = countedDates.length ? countedDates[0] : undefined;
+  const teamGamesPlayed = windowStart
+    ? countTeamGamesPlayed(clubGames, asOfDay, windowStart)
+    : teamGamesInSeason;
+
   const playRate = teamGamesPlayed > 0 ? appearances / teamGamesPlayed : 0;
 
   let flag: "OK" | "IRREGULAR" | "ROTATION_NORMAL" | "UNKNOWN";
@@ -269,7 +317,8 @@ export async function getNhlPlayerHitRate(
     // goalie a starter, not a question mark, so the same threshold cannot be used.
     flag = playRate >= 0.4 ? "OK" : "ROTATION_NORMAL";
     note =
-      `GOALIE. Started ${appearances} of ${teamGamesPlayed} team games (${(playRate * 100).toFixed(0)}%). ` +
+      `GOALIE. Started ${appearances} of the ${teamGamesPlayed} team games since ${windowStart} ` +
+      `(${(playRate * 100).toFixed(0)}%). ` +
       (playRate >= 0.4
         ? `That is a starter's workload.`
         : `That is a BACKUP or timeshare workload, and a saves line is only playable once the ` +
@@ -281,12 +330,36 @@ export async function getNhlPlayerHitRate(
   } else {
     flag = "IRREGULAR";
     note =
-      `Played ${appearances} of ${teamGamesPlayed} team games (${(playRate * 100).toFixed(0)}%). ` +
+      `Played ${appearances} of the ${teamGamesPlayed} team games since ${windowStart} ` +
+      `(${(playRate * 100).toFixed(0)}%). ` +
       `Missing rows are DNPs - scratched, injured, or called up mid-season - and the rate below ` +
       `is computed only over the games he played. Check availability before posting.`;
   }
 
   const sampleSufficient = appearances >= minSufficient;
+
+  /* ------------------------------------------------------------------------
+   * STALENESS. THE GUARD ALREADY EXISTED AND THIS AGGREGATOR DID NOT CALL IT.
+   *
+   * services/sampleRecency.ts was built in v2.5.2 for exactly this failure, after a
+   * Chris Bassitt screen presented ninety-six-day-old form as current with
+   * seasonWarning: null. All four other aggregators - bdl, sgo, cfbd, cbbd - call
+   * describeRecency. The NHL one shipped without it in v2.10.0.
+   *
+   * WHAT THAT COST, MEASURED LIVE 2026-09-24: a Vatrano rate built entirely from games
+   * dated November 2025 to April 2026 came back with `seasonWarning: null` and
+   * `currentSeasonGames: 40`. Both fields were CORRECT - the NHL season year does not
+   * roll over until October, so a game in April 2026 really does belong to the season
+   * labelled 2025, which was still the current one that day. And the answer was still
+   * useless: it was five-month-old form, from a season that had ended, two weeks before
+   * a new one started, and nothing in the response said so.
+   *
+   * That is the gap sampleRecency.ts opens its own header by describing: season
+   * labelling cannot see a sample that is stale WITHIN its season. Hockey has the
+   * longest exposure to it of any sport here, because the June-to-October offseason sits
+   * entirely inside one season year.
+   * --------------------------------------------------------------------------*/
+  const recency = describeRecency(log, {}, asOf);
 
   return {
     playerName: player.fullName,
@@ -306,9 +379,17 @@ export async function getNhlPlayerHitRate(
     teamGamesScanned: teamGamesPlayed,
     hitScanCeiling: appearances >= targetAppearances,
     sampleSufficient,
-    sampleWarning: sampleSufficient
-      ? null
-      : `SAMPLE OF ${appearances}. A rate on fewer than ${minSufficient} appearances is not evidence and must not be quoted as one.`,
+    // COMBINED, the same way cbbd and cfbd combine them: a caller that reads one
+    // warning field must not miss a second one that also fired.
+    sampleWarning:
+      [
+        sampleSufficient
+          ? null
+          : `SAMPLE OF ${appearances}. A rate on fewer than ${minSufficient} appearances is not evidence and must not be quoted as one.`,
+        recency.warning,
+      ]
+        .filter(Boolean)
+        .join(" ") || null,
     playerRole: "position_player",
     recentAvailability: {
       gamesPlayed: appearances,
@@ -323,10 +404,30 @@ export async function getNhlPlayerHitRate(
     priorSeasonGames,
     seasonsRepresented,
     crossesSeasonBoundary: seasonsRepresented.length > 1,
+    // STALENESS IS ROUTED INTO seasonWarning ON PURPOSE, not only into sampleWarning.
+    // The tool contract that thread-writers follow is "if seasonWarning is non-null, do
+    // NOT present the number as current-season form", and a sample from a season that
+    // has ENDED needs exactly that treatment even when the season label says it is
+    // current. The offseason case is named explicitly rather than left to the generic
+    // prose, because "five months old" and "he missed six weeks in February" call for
+    // different sentences in a thread.
     seasonWarning:
-      priorSeasonGames > 0
-        ? `${priorSeasonGames} of these games are from a PRIOR season. Do not describe them as current form.`
-        : null,
+      [
+        priorSeasonGames > 0
+          ? `${priorSeasonGames} of these games are from a PRIOR season. Do not describe them as current form.`
+          : null,
+        recency.isStale && recency.daysSinceMostRecent !== null && recency.daysSinceMostRecent > 60
+          ? `THIS SAMPLE IS NOT CURRENT FORM. The most recent counted game was ` +
+            `${recency.daysSinceMostRecent} days ago (${log.find((l) => l.dataStatus === "value")?.date ?? "unknown"}). ` +
+            `The NHL season label does not roll over until October, so these games can be ` +
+            `reported as "current season" and still be from a season that has finished. Say ` +
+            `"last season" in the thread, or wait for current-season games.`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" ") || null,
+    recency,
+    teamGamesInSeason,
     nhlPlayerId: player.playerId,
     matchedFields: [...matchedFields],
     isGoalie: player.isGoalie,
