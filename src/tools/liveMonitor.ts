@@ -290,12 +290,37 @@ Error Handling:
 
 const PERIOD_FULL_GAME = "game";
 
-function readLiveStat(
+/**
+ * EXPORTED FOR TESTS, v2.10.2. A mutation that deleted this function's sport check
+ * failed no test, because the only assertions covering it were reading the
+ * GAME_TOTAL_STAT table directly rather than this function. That is the second time in
+ * two releases the helper was tested and the wiring was not.
+ */
+export function readLiveStat(
   sport: SportKey,
   event: { results?: Record<string, Record<string, Record<string, number>>>; teams: { home: { score?: number }; away: { score?: number } } },
   pick: LiveMonitorInput["picks"][number]
 ): number | null {
   if (pick.marketType === "total") {
+    /* ------------------------------------------------------------------------
+     * A TOTAL IS THE SCORE SUM ONLY WHERE THE SPORT'S TOTAL COUNTS POINTS.
+     *
+     * `livePickOddID`, thirty lines below in this same file, already asks
+     * gameTotalStatFor(sport) for exactly this reason. This function did not, so a
+     * UFC rounds total and a tennis games total were both monitored against
+     * home.score + away.score.
+     *
+     * WHY THAT IS WORSE HERE THAN IN AN ODDS TOOL: this tool's output says CLEARED or
+     * DEAD, and a CLEARED is read as "safe to post as cashed". Monitoring a five-round
+     * fight's rounds total against a scorecard sum produces a confident verdict about
+     * a quantity nobody bet.
+     *
+     * The three sports whose totals are not points - UFC (roundsCompleted), ATP and
+     * WTA (games) - now return null, which this tool already handles as "cannot read
+     * this live" rather than as a verdict.
+     * ----------------------------------------------------------------------*/
+    if (gameTotalStatFor(sport) !== "points") return null;
+
     const shape = readMatchTeams(event);
     if (!shape.ok) return null;
     const h = shape.teams.home.score;

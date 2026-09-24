@@ -3,8 +3,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID, PERIOD_CODES } from "../services/oddIdBuilder.js";
 import { SUPPORTED_PERIODS } from "../services/marketCatalog.js";
-import { extractPricedLine } from "../services/oddsPricing.js";
-import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import { extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
+import { DEFAULT_BOOKMAKERS, SUPPORTED_SPORTS, gameTotalStatFor, type SportKey } from "../constants.js";
 
 const PeriodOddsInputSchema = z
   .object({
@@ -21,6 +21,12 @@ const PeriodOddsInputSchema = z
     side: z
       .enum(["home", "away", "over", "under"])
       .describe("Which side of the bet - home/away for moneyline/spread, over/under for total."),
+    preferredBookmakers: z
+      .string()
+      .default(DEFAULT_BOOKMAKERS)
+      .describe(
+        "Comma-separated bookmaker IDs to price against. DEFAULTS to the shared DEFAULT_BOOKMAKERS list in src/constants.ts. ADDED IN v2.10.2 - this tool previously accepted no book parameter and sent no bookmakerID, so a first-half or first-5-innings price was published from whichever venue SGO happened to list first. That is the same defect v2.8.6 fixed in tkb_get_odds, tkb_get_yes_no_prop and tkb_get_line_movement; this tool was the fourth call site and was missed. Pass 'all' to disable for diagnosis only - never publish a price from an unfiltered board."
+      ),
   })
   .strict();
 
@@ -87,8 +93,16 @@ Error Handling:
           params.side === "over" || params.side === "under" ? "all" : params.side;
         const side = params.side;
 
+        // A PERIOD TOTAL COUNTS WHATEVER THE SPORT'S TOTAL COUNTS. `points` is right for
+        // a moneyline in every sport here, and wrong for a total in three of them: a UFC
+        // rounds total is `roundsCompleted` and a tennis set total is `games`, per
+        // GAME_TOTAL_STAT. Hardcoding `points` asked for the set SCORE on a tennis set
+        // total and reported the miss as "not offered for this game".
+        const statID =
+          params.betType === "total" ? gameTotalStatFor(params.sport) : "points";
+
         const oddID = buildOddID({
-          statID: "points",
+          statID,
           entity,
           period: params.period as keyof typeof PERIOD_CODES,
           betType: betTypeCode,
@@ -96,11 +110,17 @@ Error Handling:
         });
 
         const leagueID = sgo.leagueIDFor(params.sport);
+        const bookFilter =
+          params.preferredBookmakers.trim().toLowerCase() === "all"
+            ? undefined
+            : params.preferredBookmakers;
+
         const events = await sgo.getAllEvents({
           leagueID,
           eventIDs: params.eventID,
           oddsAvailable: true,
           oddIDs: oddID,
+          ...(bookFilter ? { bookmakerID: bookFilter } : {}),
         });
 
         if (!events.length) {
@@ -141,7 +161,14 @@ Error Handling:
           eventID: event.eventID,
           line: pricing.value!.line,
           americanOdds: pricing.value!.americanOdds,
+          // ROUNDED FORM RETURNED, never computed by hand at publish time. The rule is
+          // stated in services/oddsPricing.ts and four price-returning tools were not
+          // following it.
+          roundedOdds: pricing.value!.americanOdds
+            ? roundToNearestTen(pricing.value!.americanOdds)
+            : null,
           bookmaker: pricing.value!.bookmaker,
+          pricedAgainst: bookFilter ?? "ALL VENUES - diagnostic only, do not publish",
         };
 
         return {

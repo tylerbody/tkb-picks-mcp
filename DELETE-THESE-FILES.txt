@@ -1,0 +1,7 @@
+DELETE these two paths after unzipping:
+
+  src/services/constants.ts   dead byte-identical copy of src/constants.ts, zero importers
+  index.ts                    stale pre-refactor entry point, SERVER_VERSION 2.5.3, never compiled
+
+The second one is preserved in archive/ (see archive/README-dead-entrypoint.md).
+Neither is in this zip, because a zip can only add files.

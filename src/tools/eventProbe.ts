@@ -281,6 +281,29 @@ async function probeClosingLine(
       openCloseKeysInByBookmaker: bookLineLike,
       lineCarryingFieldsTopLevel: topNumberFields,
       lineCarryingFieldsInByBookmaker: bookNumberFields,
+      /* ----------------------------------------------------------------------
+       * THE SAMPLED VALUES WERE IN THE TEXT ONLY, AND THAT MADE THE TOOL USELESS
+       * FOR THE ONE QUESTION IT EXISTS TO ANSWER.
+       *
+       * A client that renders structuredContent when both are present - which is the
+       * common case - never saw the sample, so the probe reported which KEYS exist and
+       * hid the VALUES. Measured 2026-09-24: answering "are Kalshi and Polymarket
+       * quoting American odds or probabilities" took five probes and a detour through
+       * tkb_get_line_movement, because this field was text-only. The answer was in the
+       * first response the whole time.
+       *
+       * LABELLED AS UNPUBLISHABLE IN THE PAYLOAD ITSELF, not just in the tool
+       * description. These are raw byBookmaker entries with no isRealBookmaker filter
+       * applied, deliberately - seeing a blocked venue's number is the point of a
+       * diagnostic - which is exactly why the warning travels with the data.
+       * --------------------------------------------------------------------*/
+      sampledBooks,
+      sampledBooksWarning:
+        "DIAGNOSTIC ONLY - NEVER PUBLISH THESE. Raw byBookmaker entries, unfiltered, so " +
+        "they can include pick'em apps, prediction markets, offshore books and Fliff, all " +
+        "of which this connector refuses as price sources. SGO normalises every venue to " +
+        "American odds, so a Polymarket -145 and a DraftKings -145 are indistinguishable " +
+        "by shape. Use tkb_get_odds for anything that reaches a thread.",
       verdict,
     },
   };

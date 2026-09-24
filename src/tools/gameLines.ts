@@ -3,7 +3,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
-import { SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, matchLinePeriodFor, type SportKey } from "../constants.js";
+import { gameTotalStatFor, SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, matchLinePeriodFor, type SportKey } from "../constants.js";
+import { readMatchTeams } from "../services/eventShape.js";
 import type { SGOEvent } from "../types.js";
 
 /**
@@ -115,8 +116,8 @@ function oddIDsFor(sport: SportKey, kinds: MarketKind[]): string[] {
   }
   if (kinds.includes("total")) {
     ids.push(
-      buildOddID({ statID: "points", entity: "all", period: matchLinePeriodFor(sport), betType: "ou", side: "over" }),
-      buildOddID({ statID: "points", entity: "all", period: matchLinePeriodFor(sport), betType: "ou", side: "under" })
+      buildOddID({ statID: gameTotalStatFor(sport), entity: "all", period: matchLinePeriodFor(sport), betType: "ou", side: "over" }),
+      buildOddID({ statID: gameTotalStatFor(sport), entity: "all", period: matchLinePeriodFor(sport), betType: "ou", side: "under" })
     );
   }
   return ids;
@@ -150,8 +151,15 @@ function readGame(
   event: SGOEvent,
   kinds: MarketKind[]
 ): GameLineRow {
-  const homeName = event.teams.home.names?.long ?? event.teams.home.teamID;
-  const awayName = event.teams.away.names?.long ?? event.teams.away.teamID;
+  // A NON-MATCH EVENT HERE KILLED THE WHOLE SLATE, not just its own row: readGame is
+  // mapped over every event, so one TypeError escaped the map and the outer handler
+  // returned "Error fetching game lines: Cannot read properties of undefined" for all
+  // fifteen games. See services/eventShape.ts. The v2.9.7 sweep applied that guard to
+  // nine files and this was one of four it missed, because the list was enumerated
+  // rather than re-grepped.
+  const shape = readMatchTeams(event);
+  const homeName = shape.ok ? shape.teams.homeName : "unknown";
+  const awayName = shape.ok ? shape.teams.awayName : "unknown";
 
   const row: GameLineRow = {
     eventID: event.eventID,
@@ -215,12 +223,12 @@ function readGame(
 
   if (kinds.includes("total")) {
     const over = read(
-      buildOddID({ statID: "points", entity: "all", period: matchLinePeriodFor(sport), betType: "ou", side: "over" }),
+      buildOddID({ statID: gameTotalStatFor(sport), entity: "all", period: matchLinePeriodFor(sport), betType: "ou", side: "over" }),
       true,
       `game total over`
     );
     const under = read(
-      buildOddID({ statID: "points", entity: "all", period: matchLinePeriodFor(sport), betType: "ou", side: "under" }),
+      buildOddID({ statID: gameTotalStatFor(sport), entity: "all", period: matchLinePeriodFor(sport), betType: "ou", side: "under" }),
       true,
       `game total under`
     );

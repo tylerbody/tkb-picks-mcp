@@ -44,6 +44,31 @@ export interface SGOBookmakerOdds {
   available?: boolean;
   lastUpdatedAt?: string;
   deeplink?: string;
+
+  /* ----------------------------------------------------------------------------
+   * OPEN AND CLOSE, PER BOOK. Declared 2026-09-24 after measuring them, because
+   * services/oddsPricing.ts now reads the opening number from HERE rather than from
+   * the top-level cross-book fields.
+   *
+   * COVERAGE IS PER MARKET AND EVERY ONE OF THESE IS OPTIONAL FOR A REASON.
+   * Measured with includeOpenCloseOdds=true across six probes:
+   *
+   *   MLB player prop, game underway   openOverUnder AND closeOverUnder present
+   *   NFL / NHL game total, upcoming   openOverUnder present, no close
+   *   NHL moneyline, upcoming          openOdds only - a moneyline has no line by
+   *                                    nature, so this is correct, not missing data
+   *   NHL preseason, exchange-only     none of them
+   *
+   * The close appears to materialise only once the market has closed; every unstarted
+   * market probed lacked it. Treat that as the working explanation, not a measured rule,
+   * and never assume any of these is present.
+   * --------------------------------------------------------------------------*/
+  openOdds?: string;
+  openOverUnder?: string;
+  openSpread?: string;
+  closeOdds?: string;
+  closeOverUnder?: string;
+  closeSpread?: string;
 }
 
 export interface SGOOdd {

@@ -52,9 +52,21 @@ function isNotable(
   return windSpeedMph >= windBar || precipProbability >= 40 || tempF >= 95 || tempF <= coldBar;
 }
 
-function parseWindSpeedMph(windSpeed: string): number {
+/**
+ * NULL WHEN UNPARSEABLE, NOT ZERO.
+ *
+ * This returned 0 for a string it could not read, and 0 mph is "dead calm" - a real,
+ * publishable condition. So an NWS string in an unexpected shape was reported as
+ * perfect conditions rather than as unknown ones, and `isNotable` then said the weather
+ * was not a factor.
+ *
+ * Absent-read-as-zero is a bug class this repo has shipped twice before (v2.0.1,
+ * v2.6.6) and it is invisible both times, because zero is always a legal value.
+ */
+function parseWindSpeedMph(windSpeed: string | undefined): number | null {
+  if (!windSpeed) return null;
   const numbers = windSpeed.match(/\d+/g);
-  if (!numbers || !numbers.length) return 0;
+  if (!numbers || !numbers.length) return null;
   return Math.max(...numbers.map(Number));
 }
 
@@ -259,11 +271,30 @@ Error Handling:
         const windMph = parseWindSpeedMph(period.windSpeed);
         // BUG FIX (found via live test): probabilityOfPrecipitation is an object
         // { unitCode, value }, not a plain number - must extract .value.
-        const precipProb = period.probabilityOfPrecipitation?.value ?? 0;
-        const notable = isNotable(params.sport, windMph, precipProb, period.temperature);
+        //
+        // AND ITS `value` IS TYPED `number | null` BY THE PROVIDER. It was being read
+        // with `?? 0`, so "the forecast does not state a precipitation chance" was
+        // published as "0% chance of precipitation". Unknown and dry are different
+        // answers and only one of them is safe to build a total on.
+        const precipRaw = period.probabilityOfPrecipitation?.value;
+        const precipProb = typeof precipRaw === "number" ? precipRaw : null;
+
+        // An UNKNOWN input cannot make something notable, and must not make it
+        // un-notable either. Missing values are excluded from the test and reported.
+        const unknownFields = [
+          windMph === null ? "wind speed" : null,
+          precipProb === null ? "precipitation chance" : null,
+        ].filter(Boolean) as string[];
+
+        const notable = isNotable(
+          params.sport,
+          windMph ?? 0,
+          precipProb ?? 0,
+          period.temperature
+        );
         const impact =
           params.sport === "nfl" || params.sport === "cfb"
-            ? footballImpact(windMph, precipProb, period.temperature)
+            ? footballImpact(windMph ?? 0, precipProb ?? 0, period.temperature)
             : [];
 
         const output = {
@@ -277,8 +308,28 @@ Error Handling:
           windSpeedMph: windMph,
           windDirection: period.windDirection,
           shortForecast: period.shortForecast,
+          // null, not 0, when the forecast does not state one. A consumer that wants a
+          // number must decide what to do about the absence rather than be handed a zero.
           precipitationChance: precipProb,
           isNotable: notable,
+          ...(unknownFields.length
+            ? {
+                unknownFields,
+                dataNote:
+                  `The forecast did not state: ${unknownFields.join(", ")}. Those are reported as ` +
+                  `null rather than 0, and were treated as non-contributing when deciding ` +
+                  `isNotable - so an "ordinary conditions" verdict here is weaker than usual. ` +
+                  `Check the forecast directly before letting a total ride on it.`,
+              }
+            : {}),
+          // THE FORECAST PERIOD IS NOT THE GAME TIME. This tool takes the FIRST NWS
+          // period and accepts no kickoff time, so a 7pm game checked at 9am is described
+          // by the daytime forecast. periodName says which one it is; this says why that
+          // matters, because nothing else did.
+          periodCaveat:
+            `These are the conditions for "${period.name}", the NEXT forecast period, not ` +
+            `necessarily the period the game is played in. Check periodName against the ` +
+            `scheduled start before quoting this in a thread.`,
           ...(impact.length ? { marketImpact: impact } : {}),
         };
 

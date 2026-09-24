@@ -76,6 +76,31 @@ interface Candidate {
   excludeReason: string | null;
 }
 
+/**
+ * WHO DID THIS PLAYER'S TEAM PLAY IN THIS EVENT?
+ *
+ * EXTRACTED AND EXPORTED IN v2.10.2 because the inline version was wrong for months and
+ * no test could reach it. It read `ev.teams.home.teamID === playerID`, comparing a TEAM
+ * id against a PLAYER id - never equal - so the ternary always took its else branch and
+ * the opponent was unconditionally the AWAY team. For any player on the away side that
+ * published his own club as the opponent: "3 HR on 09-12 vs Seattle Mariners", written
+ * about a Mariner.
+ *
+ * A mutation reintroducing that comparison failed no test, which is why this is a named
+ * function now rather than an expression inside a closure.
+ *
+ * Returns "" rather than a guess when the event is not a readable two-participant match,
+ * or when the player's team is not one of the two sides - a wrong opponent in a published
+ * line is worse than no opponent.
+ */
+export function opponentNameFor(event: SGOEvent, playerTeamID: string): string {
+  const shape = readMatchTeams(event);
+  if (!shape.ok) return "";
+  if (shape.teams.homeID === playerTeamID) return shape.teams.awayName;
+  if (shape.teams.awayID === playerTeamID) return shape.teams.homeName;
+  return "";
+}
+
 export function registerCoverPlayerTool(
   server: McpServer,
   sgo: SGOClient,
@@ -235,9 +260,30 @@ NOT a betting-value tool. It ranks marketability and availability only.`,
           startsAfter: windowStart.toISOString(),
           startsBefore: now.toISOString(),
           oddIDs: narrowingOddID(input.sport as SportKey),
-          limit: RECENT_GAMES_WINDOW,
         });
-        return teamEvents.slice(0, RECENT_GAMES_WINDOW);
+
+        /* --------------------------------------------------------------------
+         * SORT BY DATE, THEN TAKE TEN. NOT THE OTHER WAY AROUND.
+         *
+         * This previously passed `limit: 10` and then sliced the first ten, against a
+         * feed whose ordering hitRateAggregator.ts states outright is "confirmed NOT
+         * most-recent-first", adding that "any event ceiling is actively dangerous".
+         * So the ten games were an arbitrary ten of the 45-day window.
+         *
+         * Everything downstream reads as recency: `gamesPlayedLast10`, the play rate, the
+         * exclusion note "appeared in only 2 of the team's last 10 games", and
+         * notableFrom's "most recent appearance". A healthy starter could be excluded from
+         * the cover pick, and a month-old game printed as his latest.
+         * ------------------------------------------------------------------*/
+        const dated = [...teamEvents].sort((a, b) => {
+          const da = a.status?.startsAt;
+          const db = b.status?.startsAt;
+          if (!da && !db) return 0;
+          if (!da) return 1; // undated sorts LAST, never to the front
+          if (!db) return -1;
+          return new Date(db).getTime() - new Date(da).getTime();
+        });
+        return dated.slice(0, RECENT_GAMES_WINDOW);
       }
 
       const [homeGames, awayGames] = await Promise.all([
@@ -262,14 +308,29 @@ NOT a betting-value tool. It ranks marketability and availability only.`,
       function notableFrom(
         games: SGOEvent[],
         playerID: string,
-        sport: SportKey
+        sport: SportKey,
+        teamIDOfPlayer: string
       ): string | null {
         for (const ev of games) {
           const line = ev.results?.["game"]?.[playerID];
           if (!line) continue;
 
-          const opp =
-            ev.teams.home.teamID === playerID ? "" : ev.teams.away.names?.long ?? "";
+          /* ------------------------------------------------------------------
+           * THE OPPONENT WAS BEING READ OFF A COMPARISON THAT IS NEVER TRUE.
+           *
+           * This read `ev.teams.home.teamID === playerID`, comparing a TEAM id against a
+           * PLAYER id. Those never match, so the ternary always took its else branch and
+           * `opp` was unconditionally the AWAY team's name. For any player on the away
+           * side that published his own club as the opponent:
+           *
+           *   "3 HR on 09-12 vs Seattle Mariners"   ...written about a Mariner.
+           *
+           * The player's own team is known here - it is the key this function was called
+           * under - so the opponent is now the OTHER side of that event, and an event that
+           * cannot be read as a two-participant match yields no opponent rather than a
+           * wrong one.
+           * ----------------------------------------------------------------*/
+          const opp = opponentNameFor(ev, teamIDOfPlayer);
           const date = ev.status?.startsAt?.slice(5, 10) ?? "";
 
           if (sport === "mlb") {
@@ -331,7 +392,7 @@ NOT a betting-value tool. It ranks marketability and availability only.`,
           excludeReason = `appeared in only ${played} of the team's last ${teamGamesSeen} games`;
         }
 
-        const notable = notableFrom(games, p.playerID, input.sport as SportKey);
+        const notable = notableFrom(games, p.playerID, input.sport as SportKey, p.teamID);
         const weight = marketWeight.get(p.playerID) ?? 0;
 
         let score = 0;

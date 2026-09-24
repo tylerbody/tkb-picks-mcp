@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { resolveStat, isStatSupported } from "../services/bdlStatMap.js";
 import { currentSeason } from "../services/seasonBoundary.js";
+import { describeRecency, type SampleRecency } from "../services/sampleRecency.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 
 /**
@@ -81,6 +82,10 @@ interface StreakFinding {
   averageInWindow: number | null;
   standoutGame: { value: number; date: string; opponent: string } | null;
   headline: string;
+  /** The recency assessment every other counted-sample producer already returns. */
+  recency: SampleRecency;
+  /** Non-null when this streak is not current form. Read before writing "N straight". */
+  staleWarning: string | null;
 }
 
 export function registerStreakScanTool(server: McpServer, bdl: BDLClient) {
@@ -229,6 +234,25 @@ Error Handling:
 
           if (streak < params.minStreak && !isStandout) continue;
 
+          /* --------------------------------------------------------------------
+           * IS THIS STREAK CURRENT, OR IS IT A STREAK FROM MAY?
+           *
+           * This is the SIXTH counted-sample producer in the repo and was the only one
+           * not calling describeRecency. All five hit-rate aggregators call it, and the
+           * NHL one shipped without it in v2.10.0 and was fixed in v2.10.1 - this is the
+           * same omission found one release later by audit rather than by a wrong tweet.
+           *
+           * A STREAK IS MORE EXPOSED TO THIS THAN A HIT RATE IS, because the headline
+           * this tool writes is literally "has cleared X in N straight games". Three games
+           * from May with a two-month hole in front of them satisfy "N straight" exactly,
+           * and the sentence is false in the way that matters. Absent rows are skipped at
+           * the resolve step above, so the gap is invisible in `values`.
+           * ------------------------------------------------------------------*/
+          const recency = describeRecency(
+            values.map((g) => ({ date: g.date, statValue: g.v })),
+            {}
+          );
+
           const headline =
             streak >= params.minStreak
               ? `${player.first_name} ${player.last_name} has cleared ${params.threshold} in ${streak} straight games`
@@ -247,6 +271,10 @@ Error Handling:
                 ? { value: standoutRow.v, date: standoutRow.date, opponent: standoutRow.opp }
                 : null,
             headline,
+            // NOT A FILTER. A stale streak can still be a real angle; what it cannot be
+            // is written as "N straight" with no mention of when those games were.
+            recency,
+            staleWarning: recency.warning,
           });
         } catch (err) {
           skipped.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
@@ -254,6 +282,13 @@ Error Handling:
       }
 
       findings.sort((a, b) => b.activeStreak - a.activeStreak);
+
+      const staleCount = findings.filter((f) => f.staleWarning).length;
+      const staleNote = staleCount
+        ? `\n\nSTALE: ${staleCount} of ${findings.length} finding(s) carry a recency warning. ` +
+          `Read each one's staleWarning before writing "in N straight games" - a streak that ` +
+          `ended two months ago satisfies the count and not the sentence.`
+        : "";
 
       const skipNote = skipped.length
         ? `\n\nSKIPPED (${skipped.length}):\n${skipped.join("\n")}`
@@ -282,7 +317,7 @@ Error Handling:
             text:
               `${findings.length} notable finding(s):\n\n` +
               findings.map((f) => `- ${f.headline}`).join("\n") +
-              `\n\n${JSON.stringify(findings, null, 2)}${skipNote}`,
+              `\n\n${JSON.stringify(findings, null, 2)}${staleNote}${skipNote}`,
           },
         ],
         structuredContent: { findings, skipped },

@@ -3,8 +3,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
-import { extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
-import { SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, matchLinePeriodFor, type SportKey } from "../constants.js";
+import { extractOpeningFromBook, extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
+import { readMatchTeams } from "../services/eventShape.js";
+import { gameTotalStatFor, SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, matchLinePeriodFor, type SportKey } from "../constants.js";
 import { diagnosePlayerIdMiss } from "../services/playerResolution.js";
 
 /**
@@ -119,7 +120,10 @@ Error Handling:
           };
         }
 
-        let statID = "points";
+        // A TOTAL IS NOT ALWAYS COUNTING POINTS. A fight total counts ROUNDS and a
+        // tennis total counts GAMES; `points` is the winner stat, not the total
+        // stat. See GAME_TOTAL_STAT in constants.ts for the measurement.
+        let statID = params.marketType === "total" ? gameTotalStatFor(params.sport) : "points";
         if (params.marketType === "player_prop") {
           const market = OU_PROP_MARKETS[params.sport].find(
             (m) => m.label.toLowerCase() === params.marketLabel!.toLowerCase()
@@ -206,8 +210,35 @@ Error Handling:
           marketDescription: `${params.marketType} ${params.side}`,
         });
 
-        const openOddsRaw = odd.openOdds ?? odd.openBookOdds;
-        const openLineRaw = odd.openOverUnder ?? odd.openSpread;
+        /* ----------------------------------------------------------------------
+         * THE OPENING NUMBER NOW PASSES THROUGH THE SAME FILTER AS THE CURRENT ONE.
+         *
+         * MEASURED 2026-09-24, NHL Rangers @ Islanders moneyline, an event whose only
+         * two venues are polymarket and kalshi:
+         *
+         *   currentOdds: null        correctly refused, prediction markets are blocked
+         *   openingOdds: "-145"      came through anyway
+         *   bookmaker:   null        with no attribution at all
+         *
+         * `odd.openBookOdds` is SGO's TOP-LEVEL MEDIAN ACROSS BOOKS, which this repo's
+         * own rule says is never a publishable price, and `odd.openOdds` at the top level
+         * is not attributable to any book either. Neither passed through
+         * extractPricedLine, which is the only place the block list and the fair-odds
+         * refusal are enforced. So a "this line moved" post - a use this tool's own
+         * description advertises - could be built on a Polymarket median.
+         *
+         * THIS IS THE v2.8.3 BUG A SECOND TIME. That release found this tool pricing
+         * against "whichever venue SGO returned first"; v2.8.6 fixed it by adding a
+         * bookmaker parameter, and the fix reached the CURRENT price only. The opening
+         * price kept reading top-level fields no filter looks at.
+         *
+         * The open is now read from the SAME book entry the current price came from, so
+         * the two ends of a movement claim are always the same venue, and an opening
+         * number with no attributable book is reported as unavailable rather than guessed.
+         * --------------------------------------------------------------------------*/
+        const openFromBook = extractOpeningFromBook(odd as never, current.priced ? current.value?.bookmaker : undefined);
+        const openOddsRaw = openFromBook.odds;
+        const openLineRaw = openFromBook.line;
 
         const openLine =
           typeof openLineRaw === "string" ? parseFloat(openLineRaw) : (openLineRaw as number | undefined);
@@ -247,14 +278,36 @@ Error Handling:
               ? `Line has not moved from its ${openLine} open.`
               : `Price moved but the line itself is unavailable.`;
 
+        // A MOVEMENT COMPUTED ACROSS TWO DIFFERENT VENUES IS NOT MOVEMENT. Both ends now
+        // come from the same book by construction, and if they cannot, the note says so
+        // rather than letting a venue difference read as a market move.
+        const provenanceNote =
+          openFromBook.bookmaker && current.priced && current.value?.bookmaker
+            ? openFromBook.bookmaker === current.value.bookmaker
+              ? ""
+              : ` NOTE: the open and the current price come from DIFFERENT books ` +
+                `(${openFromBook.bookmaker} vs ${current.value.bookmaker}), so part of this ` +
+                `difference may be venue rather than movement.`
+            : openOddsRaw
+              ? ` NOTE: the opening price could not be attributed to a specific book, so ` +
+                `treat this movement as indicative rather than exact.`
+              : "";
+
         const output = {
           eventID: event.eventID,
-          matchup: `${event.teams.away.names?.long ?? event.teams.away.teamID} @ ${event.teams.home.names?.long ?? event.teams.home.teamID}`,
+          matchup: (() => {
+            const ms = readMatchTeams(event);
+            return ms.ok ? `${ms.teams.awayName} @ ${ms.teams.homeName}` : "unknown matchup";
+          })(),
           market: params.marketType,
           side: params.side,
           player: params.playerName ?? params.playerID ?? null,
           openingLine: openLine ?? null,
           openingOdds: openOddsRaw ? String(openOddsRaw) : null,
+          openingOddsRounded: openOddsRaw ? roundToNearestTen(String(openOddsRaw)) : null,
+          // WHICH BOOK THE OPEN CAME FROM. Previously absent, which is how a median
+          // across prediction markets could be read as an opening price.
+          openingBookmaker: openFromBook.bookmaker ?? null,
           currentLine: currentLine ?? null,
           currentOdds: current.priced ? current.value?.americanOdds ?? null : null,
           currentOddsRounded: current.priced && current.value?.americanOdds
@@ -262,7 +315,7 @@ Error Handling:
             : null,
           lineMovement: lineMove,
           movementDirection: direction,
-          description,
+          description: description + provenanceNote,
           bookmaker: current.priced ? current.value?.bookmaker ?? null : null,
         };
 

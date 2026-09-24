@@ -140,7 +140,13 @@ export async function getOpponentSplit(
 }
 
 function getWinLoss(event: SGOEvent, teamID: string): "win" | "loss" | "unknown" {
-  const { home, away } = event.teams;
+  // GENUINELY REACHABLE: getOpponentSplit filters on `e.teams?.away?.teamID`, which
+  // admits an event that has an away side and no home side. That event reached this
+  // destructure and threw. "unknown" is already this function's answer for anything it
+  // cannot settle, so a malformed event costs its own row and nothing else.
+  const shape = readMatchTeams(event);
+  if (!shape.ok) return "unknown";
+  const { home, away } = shape.teams;
   if (home.score === undefined || away.score === undefined) return "unknown";
 
   const isHome = home.teamID === teamID;

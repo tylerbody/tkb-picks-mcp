@@ -1024,6 +1024,38 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
                 );
                 return undefined as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
               }
+              if (input.sport === "nhl") {
+                /* -------------------------------------------------------------
+                 * HOCKEY MUST NEVER REACH THE SGO FALLBACK BELOW.
+                 *
+                 * FOUND BY AUDIT 2026-09-24, one release after NHL shipped. NHL passes
+                 * both capability guards (hitRates: true, correctly - the NHL's own API
+                 * serves them), and no hockey stat is mapped in bdlStatMap, so every NHL
+                 * candidate fell through "stat not mapped" straight into
+                 * getPlayerHitRate(sgo, ...).
+                 *
+                 * That is the exact path tools/hitRate.ts refuses for hockey by name,
+                 * and for the reason v2.7.0 established on the football side: SGO carries
+                 * GAMES but not player box scores for these leagues, so every empty game
+                 * reads as a DNP and a returning starter screens at a 0.2 play rate. Here
+                 * it would be worse than in hitRate, because the screener RANKS on the
+                 * number it computes, so a fabricated rate does not just appear, it wins
+                 * the board and becomes the published "X of his last Y".
+                 *
+                 * REFUSING RATHER THAN WIRING THE NHL CLIENT IN, for now, because the
+                 * screener's per-player rate call is a different shape from the NHL
+                 * aggregator's team-and-season one and doing it properly is its own
+                 * change. tkb_get_prop_board plus tkb_get_player_hit_rate cover hockey
+                 * today, and the second of those DOES use the NHL feed.
+                 * ------------------------------------------------------------*/
+                bdlFailures.set(
+                  "nhl rates come from the NHL feed, not this screener - use tkb_get_player_hit_rate",
+                  (bdlFailures.get(
+                    "nhl rates come from the NHL feed, not this screener - use tkb_get_player_hit_rate"
+                  ) ?? 0) + 1
+                );
+                return undefined as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
+              }
               rate = await getPlayerHitRate(sgo, {
                 sport: input.sport as SportKey,
                 teamID: player.teamID,

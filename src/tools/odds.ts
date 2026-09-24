@@ -1,10 +1,11 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
+import { readMatchTeams } from "../services/eventShape.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { extractPricedLine } from "../services/oddsPricing.js";
-import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, matchLinePeriodFor, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
+import { gameTotalStatFor, SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, matchLinePeriodFor, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
 import type { NormalizedOddsLine } from "../types.js";
 import { diagnosePlayerIdMiss } from "../services/playerResolution.js";
 
@@ -158,7 +159,10 @@ Error Handling:
           };
         }
 
-        let statID = "points";
+        // A TOTAL IS NOT ALWAYS COUNTING POINTS. A fight total counts ROUNDS and a
+        // tennis total counts GAMES; `points` is the winner stat, not the total
+        // stat. See GAME_TOTAL_STAT in constants.ts for the measurement.
+        let statID = params.marketType === "total" ? gameTotalStatFor(params.sport) : "points";
         if (params.marketType === "player_prop") {
           const catalog = OU_PROP_MARKETS[params.sport];
           const market = catalog.find(
@@ -342,10 +346,14 @@ Error Handling:
           };
         }
 
+        // Reached on every successful response, on an event resolved from an arbitrary
+        // caller-supplied eventID that is never shape-checked. Fourth of the four sites
+        // the v2.9.7 sweep missed.
+        const oddsShape = readMatchTeams(event);
         const output = {
           eventID: event.eventID,
-          homeTeam: event.teams.home.names?.long ?? event.teams.home.teamID,
-          awayTeam: event.teams.away.names?.long ?? event.teams.away.teamID,
+          homeTeam: oddsShape.ok ? oddsShape.teams.homeName : "unknown",
+          awayTeam: oddsShape.ok ? oddsShape.teams.awayName : "unknown",
           lineCount: lines.length,
           lines,
           ...(unpricedReasons.length ? { unpricedSides: unpricedReasons } : {}),

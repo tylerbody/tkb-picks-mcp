@@ -255,12 +255,27 @@ export function extractPricedLine(
   }
 
   const americanOdds = book?.[1]?.odds ?? odd.bookOdds!;
-  const line =
-    book?.[1]?.spread ??
-    book?.[1]?.overUnder ??
-    odd.bookSpread ??
-    odd.bookOverUnder ??
-    undefined;
+
+  /* --------------------------------------------------------------------------
+   * THE LINE COMES FROM THE SAME BOOK AS THE PRICE, OR IT DOES NOT COME AT ALL.
+   *
+   * This previously fell back to `odd.bookSpread ?? odd.bookOverUnder`, which are
+   * SGO's TOP-LEVEL CROSS-BOOK figures, not any single book's number. The price was
+   * still read from `byBookmaker.<book>.odds`, so the two halves of a published pick
+   * could come from different places and be labelled with one book's name:
+   *
+   *   "OVER 4.5 (-115, DraftKings)"   where DraftKings' actual number was 5.5
+   *
+   * A price and a line that disagree are worse than a missing line, because the
+   * missing line is refused three lines below and the mismatch is not detectable by
+   * anyone reading the output. pickGrader.ts already documents `bookOverUnder` as a
+   * converged consensus figure rather than a book's number, which is exactly why it
+   * must not be a fallback here.
+   *
+   * A book quoting a price with no line is now handled by the requireLine refusal,
+   * the same as a market with no price at all.
+   * ------------------------------------------------------------------------*/
+  const line = book?.[1]?.spread ?? book?.[1]?.overUnder ?? undefined;
 
   if (opts.requireLine && (line === undefined || line === null || line === "")) {
     return {
@@ -324,4 +339,84 @@ export function impliedProbability(american: string | number): number {
  */
 export function computeEdge(hitRate: number, american: string | number): number {
   return hitRate - impliedProbability(american);
+}
+
+/**
+ * THE OPENING NUMBER, FROM A NAMED, PUBLISHABLE BOOK, OR NOT AT ALL.
+ *
+ * ============================================================================
+ * WHY THIS IS NOT JUST `odd.openBookOdds`
+ * ============================================================================
+ *
+ * MEASURED 2026-09-24 on an NHL moneyline whose only two venues were polymarket and
+ * kalshi. tkb_get_line_movement returned:
+ *
+ *   currentOdds: null        correctly refused, prediction markets are blocked
+ *   openingOdds: "-145"      came through anyway
+ *   bookmaker:   null        with no attribution
+ *
+ * because the opening price was read straight off the odd as
+ * `odd.openOdds ?? odd.openBookOdds`, bypassing extractPricedLine entirely.
+ *
+ * `openBookOdds` is a MEDIAN ACROSS BOOKS. This file's own rule, stated at the top,
+ * is that a usable price must be traceable to a named sportsbook - which is why the
+ * price check tests `book` rather than the presence of `bookOdds`. The opening price
+ * was never held to it.
+ *
+ * ============================================================================
+ * PREFERRING THE SAME BOOK AS THE CURRENT PRICE
+ * ============================================================================
+ *
+ * A movement claim subtracts two numbers. If they come from different venues, part of
+ * the difference is the venue, and "this total moved a full point" becomes an artifact.
+ * So this takes the book the current price came from when that book also carries an
+ * open, and only then falls back to any other real book - reporting which, so the
+ * caller can say so.
+ *
+ * Returns undefined fields rather than zeros or consensus values. An unattributable
+ * open is reported as absent, which is the honest answer and the one the caller can
+ * act on.
+ */
+export interface OpeningFromBook {
+  odds?: string;
+  line?: string;
+  bookmaker?: string;
+}
+
+export function extractOpeningFromBook(
+  odd: SGOOdd,
+  preferBookmaker?: string
+): OpeningFromBook {
+  const entries = odd.byBookmaker;
+  if (!entries || typeof entries !== "object") return {};
+
+  const read = (key: string): OpeningFromBook | null => {
+    const e = entries[key];
+    if (!e) return null;
+    const odds = typeof e.openOdds === "string" ? e.openOdds : undefined;
+    const line =
+      typeof e.openOverUnder === "string"
+        ? e.openOverUnder
+        : typeof e.openSpread === "string"
+          ? e.openSpread
+          : undefined;
+    if (odds === undefined && line === undefined) return null;
+    return { odds, line, bookmaker: key };
+  };
+
+  // 1. The book the current price came from, so both ends of a movement agree.
+  if (preferBookmaker && isRealBookmaker(preferBookmaker)) {
+    const same = read(preferBookmaker);
+    if (same) return same;
+  }
+
+  // 2. Any other REAL book. Blocked venues are never a source, opening or current.
+  for (const key of Object.keys(entries)) {
+    if (!isRealBookmaker(key)) continue;
+    const hit = read(key);
+    if (hit) return hit;
+  }
+
+  // 3. Nothing attributable. NOT a fallback to openBookOdds - that is the bug.
+  return {};
 }
