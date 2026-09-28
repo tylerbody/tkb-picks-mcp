@@ -152,6 +152,34 @@ export interface BoardResolvers {
 }
 
 /**
+ * ROW CAP BY SPORT, v2.10.7.
+ *
+ * A flat 80 was wrong in a way that was invisible. Measured 2026-09-28 on
+ * Philadelphia at Chicago, eventID iVXqTw1LGEj0TGVxDgTs: 142 rows built, 70 returned,
+ * and every returned row was a Bears player, because the truncation cut follows SGO's
+ * response order rather than anything meaningful. A thread builder reading that board
+ * saw half a game and had no way to know.
+ *
+ * The numbers below are sized off measured row counts per sport, not guessed:
+ * NFL carries the widest market set (22 distinct on one team's half of a board), a
+ * full MLB event has been measured at 254 built rows and can carry far more markets
+ * than that, and NHL at 102. The cap exists to stop an unbounded payload, so it is
+ * set well above a normal full board rather than near it.
+ */
+export function defaultMaxRowsFor(sport: SportKey): number {
+  switch (sport) {
+    case "nfl":
+    case "mlb":
+      return 400;
+    case "cfb":
+    case "nhl":
+      return 300;
+    default:
+      return 150;
+  }
+}
+
+/**
  * Collapse priced sides into one row per player/market.
  *
  * PURE AND EXPORTED, for the reason given on parseOddID. Both real split-line
@@ -272,10 +300,16 @@ const PropBoardInputSchema = z
       .number()
       .int()
       .min(5)
-      .max(250)
-      .default(80)
+      .max(600)
+      .optional()
       .describe(
-        "Backstop on rows returned. A live MLB event can carry 1,180 markets. Truncation is always reported, never silent."
+        "Backstop on rows returned. OMIT IT and the cap comes from the sport (v2.10.7): NFL and MLB 400, CFB and NHL 300, everything else 150. The old flat default of 80 was measured returning 70 of 142 rows on one NFL game, and because the cut follows SGO's response order that was ONE TEAM's board presented as the game's. Ceiling raised from 250 to 600. Truncation is always reported, never silent."
+      ),
+    includeAltLines: z
+      .boolean()
+      .default(false)
+      .describe(
+        "ADDED v2.10.7. Ask SGO for ALTERNATE lines as well as the main one. A book posts a main receiving-yards number plus a ladder of alts, and with this OFF, which it has always been, the board shows only the main line and every alt is invisible. Turn it on when the question is 'what is available on this player', because the main line alone is not the whole market. It materially increases response size, which is the OOM risk this connector has been bitten by once, so it stays off by default and the row cap still applies."
       ),
     includeUnpriced: z
       .boolean()
@@ -321,9 +355,10 @@ rates, no edge, and no ranking. It answers "what is bettable", not "what is good
 Args:
   - sport, eventID
   - markets (optional): label filter, e.g. ['Receiving Yards']
-  - preferredBookmakers (default 'draftkings,fanduel,betmgm,caesars', 'all' to disable)
+  - preferredBookmakers (defaults to the 8-book house list in constants.ts, 'all' to disable)
   - maxPlayers (optional): no default cap
-  - maxRows (default 80)
+  - includeAltLines (default false): also fetch each market's ALTERNATE lines
+  - maxRows (omit for the sport default: NFL and MLB 400, CFB and NHL 300, else 150)
   - includeUnpriced (default false): also name catalog markets no book has priced
 
 Returns per row: player, team, market, line, both sides with real and rounded
@@ -414,6 +449,9 @@ Error Handling:
           leagueID,
           eventIDs: input.eventID,
           bookmakerID: bookFilter,
+          // v2.10.7: opt-in. Off by default for payload size, but reachable now
+          // instead of being a permanently invisible slice of the market.
+          includeAltLines: input.includeAltLines,
         });
 
         if (!events.length) {
@@ -428,6 +466,9 @@ Error Handling:
         }
 
         const event = events[0]!;
+        // v2.10.7: an omitted maxRows resolves per sport rather than to a flat 80.
+        const effectiveMaxRows =
+          input.maxRows ?? defaultMaxRowsFor(input.sport as SportKey);
         // Refuse a non-match event readably rather than throwing a bare TypeError.
         // See services/eventShape.ts.
         const shape = readMatchTeams(event);
@@ -508,15 +549,67 @@ Error Handling:
         const unpriced = new Map<string, string>(); // "player | market" -> reason bucket
         let cancelledCount = 0;
 
-        for (const [oddID, odd] of Object.entries(event.odds ?? {})) {
-          const parsed = parseOddID(oddID);
-          if (!parsed) continue;
+        /* ---- COMPLETENESS ACCOUNTING, ADDED v2.10.7 ----
+         *
+         * This loop DISCARDS most of what SGO sends and, until now, said nothing about
+         * it. A board that silently drops four fifths of an event reads as "this is
+         * every prop" to whoever is building a thread from it. These counters are the
+         * denominator: every odd is either turned into a row or counted here under the
+         * reason it was dropped.
+         *
+         * They are diagnostics, not gates. Nothing about which props are eligible
+         * changed in this release; only whether the caller can see what was removed.
+         */
+        let seenOdds = 0;
+        let droppedUnparsable = 0;
+        let droppedNotOverUnder = 0;
+        let droppedNonGamePeriod = 0;
+        const droppedPeriods = new Map<string, number>();
+        let droppedNotInCatalog = 0;
+        const droppedStatIDs = new Map<string, number>();
+        let droppedTeamOrUnknownEntity = 0;
 
-          if (parsed.betType !== "ou") continue;
-          if (parsed.period !== "game") continue;
+        for (const [oddID, odd] of Object.entries(event.odds ?? {})) {
+          seenOdds++;
+          const parsed = parseOddID(oddID);
+          if (!parsed) {
+            droppedUnparsable++;
+            continue;
+          }
+
+          // YES/NO AND OTHER BET TYPES. Anytime-scorer, first-scorer, double-double
+          // and every other milestone market lives on betType `yn` and has never
+          // appeared on this board in any sport. It is reachable only one player at a
+          // time through tkb_get_yes_no_prop.
+          if (parsed.betType !== "ou") {
+            droppedNotOverUnder++;
+            continue;
+          }
+
+          // PERIOD PROPS. Halves, quarters, hockey periods and first-N-innings props
+          // are real markets and are all discarded here, because the board is
+          // full-game only.
+          if (parsed.period !== "game") {
+            droppedNonGamePeriod++;
+            droppedPeriods.set(parsed.period, (droppedPeriods.get(parsed.period) ?? 0) + 1);
+            continue;
+          }
+
           if (parsed.side !== "over" && parsed.side !== "under") continue;
-          if (!statIDToLabel.has(parsed.statID)) continue;
-          if (!allowedPlayerIDs.has(parsed.entity)) continue;
+
+          // NOT IN THE HARDCODED CATALOG. This is the one that can hide a market the
+          // books do offer, because OU_PROP_MARKETS is maintained by hand. Recording
+          // the statIDs makes catalog drift visible without a /markets call.
+          if (!statIDToLabel.has(parsed.statID)) {
+            droppedNotInCatalog++;
+            droppedStatIDs.set(parsed.statID, (droppedStatIDs.get(parsed.statID) ?? 0) + 1);
+            continue;
+          }
+
+          if (!allowedPlayerIDs.has(parsed.entity)) {
+            droppedTeamOrUnknownEntity++;
+            continue;
+          }
 
           const label = statIDToLabel.get(parsed.statID)!;
           const playerName = playerByID.get(parsed.entity)?.name ?? parsed.entity;
@@ -566,8 +659,8 @@ Error Handling:
           marketLabel: (statID) => statIDToLabel.get(statID) ?? statID,
         }, { includeAllBooks: input.includeAllBooks });
 
-        const truncated = allRows.length > input.maxRows;
-        const rows = allRows.slice(0, input.maxRows);
+        const truncated = allRows.length > effectiveMaxRows;
+        const rows = allRows.slice(0, effectiveMaxRows);
 
         const bookLine = bookFilter
           ? `Priced against: ${bookFilter}.`
@@ -677,6 +770,45 @@ Error Handling:
             unpricedMarketCount: unpriced.size,
             cancelledCount,
             pricedAgainst: bookFilter ?? "all",
+            maxRowsApplied: effectiveMaxRows,
+            altLinesIncluded: input.includeAltLines,
+            /* WHAT THIS BOARD IS NOT SHOWING YOU, v2.10.7.
+             *
+             * `seenOdds` is the denominator: every odd SGO returned for this event.
+             * Each dropped bucket names why those odds never became rows. This exists
+             * because a board that discards four fifths of an event used to read as
+             * "every prop in this game", and a thread built off that assumption is
+             * building off a slice. */
+            coverage: {
+              seenOdds,
+              rowsBuilt: allRows.length,
+              rowsReturned: rows.length,
+              dropped: {
+                notOverUnder: droppedNotOverUnder,
+                nonGamePeriod: droppedNonGamePeriod,
+                notInCatalog: droppedNotInCatalog,
+                teamOrUnknownEntity: droppedTeamOrUnknownEntity,
+                unparsableOddID: droppedUnparsable,
+              },
+              // Named so a real gap is identifiable rather than just counted.
+              nonGamePeriodsSeen: Object.fromEntries(
+                [...droppedPeriods.entries()].sort((a, b) => b[1] - a[1])
+              ),
+              statIDsNotInCatalog: Object.fromEntries(
+                [...droppedStatIDs.entries()].sort((a, b) => b[1] - a[1])
+              ),
+              note:
+                `Over/under, full-game, catalog markets only. ` +
+                `notOverUnder is mostly yes/no milestone markets (anytime scorer, first scorer, ` +
+                `double-double), reachable only via tkb_get_yes_no_prop. nonGamePeriod is halves, ` +
+                `quarters, hockey periods and first-N-innings props. notInCatalog means the books ` +
+                `price a market that OU_PROP_MARKETS does not list, which is catalog drift and ` +
+                `the statIDs are named above. ` +
+                (input.includeAltLines
+                  ? `Alt lines WERE requested.`
+                  : `Alt lines were NOT requested, so only each market's main line is here; ` +
+                    `pass includeAltLines to see the ladder.`),
+            },
             rows,
             ...(input.includeUnpriced
               ? { unpricedMarkets: [...unpriced.keys()].sort() }
