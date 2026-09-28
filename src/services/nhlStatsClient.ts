@@ -219,7 +219,35 @@ export function normaliseNhlGameLogEntry(raw: Record<string, unknown>): NhlGameL
 
   const shotsAgainst = stats.shotsAgainst;
   const goalsAgainst = stats.goalsAgainst;
-  if (shotsAgainst !== undefined && goalsAgainst !== undefined) {
+  /* ---- A ZERO-SHOT GOALIE ROW IS NOT A ZERO-SAVE GAME (v2.10.4) ----
+   *
+   * A DRESSED BACKUP GOALIE APPEARS IN THE BOX SCORE WITH ZEROS. shotsAgainst 0 and
+   * goalsAgainst 0 are both DEFINED, so the old condition derived a confident
+   * `saves: 0` for a goalie who never took the ice.
+   *
+   * That zero is worse than a missing value, because the discriminator that protects
+   * every other market cannot see it. `lookupPlayerStat` separates a real absence
+   * from a missing box score by asking whether the game carries player-keyed results
+   * for ANYONE on the roster, and a dressed backup HAS a row, so `player_absent`
+   * never fires. gradePlayerProp then takes the `kind: "value"` branch and grades a
+   * real 0, which silently credits any under.
+   *
+   * MEASURED 2026-09-28. Adin Hill, Saves over 21.5, Vegas 0-4 to Utah on
+   * 2026-03-20, eventID 3jD7dD8JeuQ8KX9Wi6OV: `result LOSS, actualValue 0,
+   * participationResolved true, note null`. Only Hill was priced; Schmid had no
+   * Saves line. Zero saves in a game where the team conceded four is not a result.
+   *
+   * SO: DO NOT DERIVE SAVES WHEN NO SHOTS WERE FACED. Leaving `stats.saves` unset
+   * routes the caller to stat_unsettled ("he appeared but this stat has not settled")
+   * rather than to a fabricated zero. A goalie who genuinely faced zero shots has no
+   * measurable save total either, so refusing is correct in BOTH readings of the row
+   * and the tool never has to guess which one it is looking at.
+   *
+   * THIS ALSO FIXES THE HIT-RATE PATH, not just grading. A backup's fake 0 was a
+   * counted sample dragging a goalie's save rate down, so a Saves screen was scoring
+   * against games he did not play.
+   */
+  if (shotsAgainst !== undefined && goalsAgainst !== undefined && shotsAgainst > 0) {
     stats.saves = shotsAgainst - goalsAgainst;
   }
 

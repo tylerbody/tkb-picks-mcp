@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
-import { buildOddID } from "../services/oddIdBuilder.js";
+import { buildOddID, narrowingOddID } from "../services/oddIdBuilder.js";
 import { extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
 import { gameTotalStatFor, SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, matchLinePeriodFor, type SportKey } from "../constants.js";
 import { readMatchTeams } from "../services/eventShape.js";
@@ -359,15 +359,83 @@ Error Handling:
             startsAfter = `${input.date}T00:00:00Z`;
             startsBefore = `${input.date}T23:59:59Z`;
           }
-          requestCount = 1;
-          events = await sgo.getAllEvents({
+
+          /* ---- A DATE RANGE USED TO SILENTLY SHRINK THE SLATE (FIXED v2.10.4) ----
+           *
+           * THE DEFECT. This branch asked SGO for a window with the six team oddIDs AND
+           * `bookmakerID` attached, and SGO DROPPED EVERY EVENT WITH NOTHING PRICED AT
+           * THOSE BOOKS. The code below then reported on the events it received, so a
+           * window holding twelve games returned four and the `withNothing` list, which
+           * exists precisely to stop this, had nothing to put in it. The eventIDs branch
+           * was never affected: SGO ignores event-SELECTION filters when eventIDs is
+           * supplied, so it returns every id asked for and the missing/unpriced report
+           * works.
+           *
+           * MEASURED 2026-09-28 on NHL opening week, 2026-10-06 to 2026-10-08:
+           *   date range     -> gameCount 4
+           *   same 12 ids    -> gameCount 12, 4 priced, 8 listed with unpriced arrays
+           *
+           * WHY IT IS THE WORST OF THE THREE FIXES IN THIS RELEASE. It does not produce
+           * a wrong number, it produces a SHORT SLATE that looks complete, which is the
+           * exact failure this tool's own description promises to prevent: "Games with no
+           * priced team markets are listed explicitly rather than dropped, so a short
+           * board is never mistaken for a short slate." Early-season NHL is when most of
+           * a slate is unpriced, so a run on 10/06 would have seen four games, reported
+           * four games, and never known it missed eight.
+           *
+           * THE FIX: RESOLVE THE WINDOW TO IDS FIRST, THEN USE THE PATH THAT ALREADY
+           * REPORTS GAPS. Enumeration uses narrowingOddID and passes NO bookmakerID,
+           * which is how schedule.ts gets a complete slate for the same window: the
+           * narrowing oddID raises the page cap without filtering on whether anything is
+           * priced, and omitting the book filter is what stops events being dropped.
+           *
+           * It costs one extra ranged fetch. SGO bills per event object, so a 12-game
+           * window goes from about 12 entities to about 24, against a 3,000,000/day
+           * allowance measured at ~1,200 used. Correctness is worth twice nothing.
+           */
+          const slate = await sgo.getAllEvents({
             leagueID,
             startsAfter,
             startsBefore,
-            oddIDs,
-            bookmakerID: bookFilter,
+            oddIDs: narrowingOddID(input.sport as SportKey),
             limit: 100,
           });
+          requestCount = 1;
+
+          const slateIDs = slate.map((e) => e.eventID).filter((id): id is string => Boolean(id));
+
+          if (!slateIDs.length) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `No ${input.sport.toUpperCase()} games found in the requested window.`,
+                },
+              ],
+            };
+          }
+
+          // CHUNKED AT 20 because a CFB Saturday runs past any single comma-separated
+          // list worth sending, and the eventIDs argument on this tool caps at 20 for
+          // the same reason. Each chunk is one request and the count is reported.
+          const CHUNK = 20;
+          for (let i = 0; i < slateIDs.length; i += CHUNK) {
+            const batch = slateIDs.slice(i, i + CHUNK);
+            const batchEvents = await sgo.getAllEvents({
+              leagueID,
+              eventIDs: batch.join(","),
+              oddIDs,
+              bookmakerID: bookFilter,
+              limit: 100,
+            });
+            requestCount += 1;
+            events = events.concat(batchEvents);
+          }
+
+          // Any id the window produced that the odds fetch did not return is reported
+          // the same way an explicitly requested id would be, rather than vanishing.
+          const returned = new Set(events.map((e) => e.eventID));
+          missingEventIDs = slateIDs.filter((id) => !returned.has(id));
         }
 
         if (!events.length) {
@@ -394,10 +462,16 @@ Error Handling:
           ? `Priced against: ${bookFilter}.`
           : `Priced against ALL venues - filter disabled. Diagnostic only.`;
 
+        // The wording has to be true on BOTH paths as of v2.10.4: on the eventIDs path
+        // the caller supplied these ids, on the date-range path the window enumeration
+        // did. Either way an id that went in and did not come back is reported.
         const missingLine = missingEventIDs.length
-          ? `\n\nREQUESTED BUT NOT RETURNED (${missingEventIDs.length}): ` +
-            `${missingEventIDs.join(", ")}. Confirm these eventIDs are correct and belong to ` +
-            `${input.sport.toUpperCase()}.`
+          ? `\n\nASKED FOR BUT NOT RETURNED (${missingEventIDs.length}): ` +
+            `${missingEventIDs.join(", ")}. ` +
+            (input.eventIDs?.length
+              ? `Confirm these eventIDs are correct and belong to ${input.sport.toUpperCase()}.`
+              : `These came out of the schedule for this window but the odds fetch did not ` +
+                `return them, so treat the board as INCOMPLETE rather than as the full slate.`)
           : "";
 
         const emptyLine = withNothing.length

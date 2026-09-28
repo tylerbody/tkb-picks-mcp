@@ -321,8 +321,61 @@ Error Handling:
               ? `up ${Math.abs(lineMove)}`
               : `down ${Math.abs(lineMove)}`;
 
-        const description =
-          lineMove !== null && lineMove !== 0
+        /* ---- THE "CURRENT" PRICE ON A STARTED EVENT IS NOT A PRE-GAME PRICE (v2.10.4) ----
+         *
+         * Once a game is under way, `byBookmaker.<book>.odds` is the LIVE price, and once
+         * it is over it is the LAST-SEEN price, which is usually a late in-game number.
+         * Neither is the same market as the open, so subtracting one from the other is
+         * not a line move. The open itself stays trustworthy: it is read from a real
+         * book's open field and is a genuine pre-game number.
+         *
+         * MEASURED 2026-09-28, both halves of the problem:
+         *
+         *   LIVE   Dodgers at Giants total, 6th inning. Open 8.5 at +104 (fanduel),
+         *          "current" 3.5 at +124. The 3.5 prices REMAINING runs. The tool said
+         *          "Opened at 8.5 and sits at 3.5 now, down 5", which is not a 5-run
+         *          market move and reads like one.
+         *   FINAL  Boston at Florida moneyline, final 2-1 Florida. Open +120
+         *          (draftkings), "current" -20000, captured when Florida had all but
+         *          won. A CLV number off that pair is nonsense.
+         *
+         * WHY IT MATTERS MORE THAN THE WRONG NUMBER: this tool's own description
+         * advertises building a "this line moved" post, so the sentence is the product.
+         * "This total has moved down 5" is exactly the bullet a build subagent would
+         * lift straight into a tweet.
+         *
+         * SO: A STARTED EVENT GETS THE OPEN AND NO MOVEMENT CLAIM. lineMovement goes
+         * null, the direction says so, and the description explains what the current
+         * number actually is instead of narrating a move across two different markets.
+         * The pre-game path is untouched, which is the only path a build run uses.
+         *
+         * `started` is read from the event rather than inferred from the clock where it
+         * is available, and falls back to comparing startsAt against now when it is not.
+         * An unparseable startsAt is treated as STARTED, matching the eventStatus.ts
+         * cancelled-branch convention: the conservative reading is the one that refuses.
+         */
+        const status = (event.status ?? {}) as Record<string, unknown>;
+        const startsAtMs =
+          typeof status.startsAt === "string" ? Date.parse(status.startsAt) : NaN;
+        const hasStarted =
+          status.started === true
+            ? true
+            : status.started === false
+              ? false
+              : Number.isNaN(startsAtMs)
+                ? true
+                : startsAtMs <= Date.now();
+
+        const isFinal = status.completed === true || status.ended === true;
+
+        const description = hasStarted
+          ? (openLine !== undefined
+              ? `Opened at ${openLine}${openOddsRaw ? ` at ${openOddsRaw}` : ""}. NO MOVEMENT REPORTED: `
+              : `Opening price ${openOddsRaw ?? "unavailable"}. NO MOVEMENT REPORTED: `) +
+            `this event has ${isFinal ? "finished" : "started"}, so the current number is a ` +
+            `${isFinal ? "last-seen" : "live in-play"} price rather than a pre-game one, and it is not the ` +
+            `same market as the open. Use the open on its own, or cite a book for the close.`
+          : lineMove !== null && lineMove !== 0
             ? `Opened at ${openLine} and sits at ${currentLine} now, ${direction}.`
             : openLine !== undefined
               ? `Line has not moved from its ${openLine} open.`
@@ -363,9 +416,15 @@ Error Handling:
           currentOddsRounded: current.priced && current.value?.americanOdds
             ? roundToNearestTen(current.value.americanOdds)
             : null,
-          lineMovement: lineMove,
-          movementDirection: direction,
-          description: description + provenanceNote,
+          lineMovement: hasStarted ? null : lineMove,
+          movementDirection: hasStarted
+            ? (isFinal ? "not comparable (event finished)" : "not comparable (event in progress)")
+            : direction,
+          // STRUCTURAL, so a caller does not have to parse prose to learn the current
+          // price is post-kickoff. v2.10.4.
+          currentPriceIsPostStart: hasStarted,
+          eventIsFinal: isFinal,
+          description: description + (hasStarted ? "" : provenanceNote),
           bookmaker: current.priced ? current.value?.bookmaker ?? null : null,
         };
 
