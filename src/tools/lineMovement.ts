@@ -42,7 +42,9 @@ const LineMovementInputSchema = z
     side: z
       .enum(["over", "under", "home", "away"])
       .default("over")
-      .describe("Which side of the market."),
+      .describe(
+        "Which side of the market. THE VALID VALUES DEPEND ON marketType: moneyline and spread take 'home' or 'away', while total and player_prop take 'over' or 'under'. The default of 'over' is therefore only valid for total and player_prop; a moneyline or spread call MUST pass home or away explicitly. See the SIDE VOCABULARY note in the handler for why this is validated rather than defaulted."
+      ),
     marketLabel: z.string().optional().describe("Required for player_prop, e.g. 'Hits'."),
     playerID: z.string().optional().describe("Required for player_prop."),
     playerName: z.string().optional(),
@@ -114,6 +116,54 @@ Error Handling:
               {
                 type: "text" as const,
                 text: "Error: marketType='player_prop' requires both marketLabel and playerID.",
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        // ---- SIDE VOCABULARY, ADDED v2.10.3 ----
+        //
+        // THE SIDE VOCABULARY IS PER MARKET TYPE AND THE SCHEMA CANNOT EXPRESS THAT.
+        // `side` defaults to "over", which is correct for a total and a player prop
+        // and MEANINGLESS for a moneyline or a spread: those are sided by team.
+        // Below, `entity` is set from `side` for ml and sp, so a defaulted call built
+        // `points-over-game-ml-over` and SGO answered "No market found", which reads
+        // as "this event has no moneyline" rather than "you asked with a bad side".
+        //
+        // MEASURED 2026-09-28 on NHL Boston at Florida (a finalized April 2026 event
+        // reachable now that the key is on the Pro plan): marketType="moneyline" with
+        // no side returned "No market found for points-over-game-ml-over", while the
+        // same call with side="home" returned a real DraftKings open of +120. The data
+        // was there the whole time; only the oddID was wrong.
+        //
+        // REFUSE RATHER THAN GUESS. Defaulting a moneyline to "home" would answer a
+        // question the caller did not ask, and on a two-sided market that is a coin
+        // flip dressed as an answer. Naming the valid values costs one retry.
+        const TEAM_SIDED = params.marketType === "moneyline" || params.marketType === "spread";
+        const sideIsTeam = params.side === "home" || params.side === "away";
+        if (TEAM_SIDED && !sideIsTeam) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `Error: marketType='${params.marketType}' is sided by TEAM, so side must be 'home' or 'away'. ` +
+                  `Got '${params.side}'${params.side === "over" ? " (the schema default, which only fits a total or a player prop)" : ""}. ` +
+                  `Re-run with side='home' or side='away'. This is a bad argument, NOT evidence that the event lacks a ${params.marketType}.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        if (!TEAM_SIDED && sideIsTeam) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `Error: marketType='${params.marketType}' is sided by OVER/UNDER, so side must be 'over' or 'under'. Got '${params.side}'. ` +
+                  `Re-run with side='over' or side='under'. This is a bad argument, NOT evidence that the event lacks a ${params.marketType}.`,
               },
             ],
             isError: true,
