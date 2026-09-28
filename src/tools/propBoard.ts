@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
-import { extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
+import { allBookPrices, extractPricedLine, roundToNearestTen, type BookPrice } from "../services/oddsPricing.js";
 import { parseOddID, type ParsedOddID } from "../services/oddIdParser.js";
 import {
   participantModel,
@@ -105,12 +105,26 @@ export interface PricedSide {
   line: number;
   americanOdds: string;
   bookmaker: string;
+  /** Every real book's price on this side, best first. v2.10.5. */
+  allBooks?: BookPrice[];
 }
 
 export interface SidePrice {
   line: number;
   americanOdds: string;
   roundedOdds: string;
+  /**
+   * v2.10.5. The best price any real book has on this side, and whether the book
+   * shown above is that book. `firstAvailableBook` picks whichever venue SGO
+   * returned first, so these two routinely differ, and a caller that publishes
+   * `americanOdds` without reading `bestPrice` is accepting a worse number than the
+   * account can actually get.
+   */
+  bestPrice?: { bookmaker: string; americanOdds: string; line?: string } | null;
+  betterPriceAvailable?: boolean;
+  bookCount?: number;
+  /** Populated only when includeAllBooks is set, to keep the default payload small. */
+  allBooks?: BookPrice[];
   bookmaker: string;
 }
 
@@ -150,7 +164,8 @@ export interface BoardResolvers {
  */
 export function buildBoardRows(
   sides: PricedSide[],
-  resolve: BoardResolvers
+  resolve: BoardResolvers,
+  opts: { includeAllBooks?: boolean } = {}
 ): BoardRow[] {
   const byKey = new Map<string, { over?: PricedSide; under?: PricedSide }>();
 
@@ -175,15 +190,26 @@ export function buildBoardRows(
     const splitLine =
       over !== undefined && under !== undefined && over.line !== under.line;
 
-    const toSidePrice = (s: PricedSide | undefined): SidePrice | null =>
-      s
-        ? {
-            line: s.line,
-            americanOdds: s.americanOdds,
-            roundedOdds: roundToNearestTen(s.americanOdds),
-            bookmaker: s.bookmaker,
-          }
-        : null;
+    const toSidePrice = (s: PricedSide | undefined): SidePrice | null => {
+      if (!s) return null;
+      // v2.10.5: surface the best available price alongside the selected one. The
+      // selected book comes from firstAvailableBook, which is arbitrary, so these
+      // differ often enough that hiding the difference costs real money.
+      const books = s.allBooks ?? [];
+      const best = books[0];
+      return {
+        line: s.line,
+        americanOdds: s.americanOdds,
+        roundedOdds: roundToNearestTen(s.americanOdds),
+        bookmaker: s.bookmaker,
+        bestPrice: best
+          ? { bookmaker: best.bookmaker, americanOdds: best.americanOdds, line: best.line }
+          : null,
+        betterPriceAvailable: Boolean(best && best.bookmaker !== s.bookmaker),
+        bookCount: books.length,
+        ...(opts.includeAllBooks ? { allBooks: books } : {}),
+      };
+    };
 
     rows.push({
       playerID,
@@ -256,6 +282,12 @@ const PropBoardInputSchema = z
       .default(false)
       .describe(
         "Also list markets that exist in SGO's catalog for this event but that NO sportsbook has priced. Useful for telling 'not offered' apart from 'not posted yet'. Their prices are model estimates and are never returned, only the market names."
+      ),
+    includeAllBooks: z
+      .boolean()
+      .default(false)
+      .describe(
+        "ADDED v2.10.5. Include EVERY real book's price on each side, best first, as `allBooks`. Off by default because it multiplies payload size. The board always reports `bestPrice`, `betterPriceAvailable` and `bookCount` per side regardless, so you can see when the displayed book is not the best one without asking for the full set. Use this when line shopping, or when a book you can see in its own app appears to be missing: it is usually present in the data and simply lost the display slot, because the shown price comes from whichever book SGO returned first rather than from the best one."
       ),
   })
   .strict();
@@ -521,6 +553,7 @@ Error Handling:
             line,
             americanOdds: priced.value.americanOdds,
             bookmaker: priced.value.bookmaker ?? "unknown",
+            allBooks: allBookPrices(odd),
           });
         }
 
@@ -531,7 +564,7 @@ Error Handling:
             return t ? (teamNames[t] ?? t) : "unknown";
           },
           marketLabel: (statID) => statIDToLabel.get(statID) ?? statID,
-        });
+        }, { includeAllBooks: input.includeAllBooks });
 
         const truncated = allRows.length > input.maxRows;
         const rows = allRows.slice(0, input.maxRows);

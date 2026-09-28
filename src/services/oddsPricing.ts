@@ -208,6 +208,75 @@ function firstAvailableBook(
 }
 
 /**
+ * EVERY REAL BOOK'S PRICE ON ONE ODD, BEST FIRST. Added v2.10.5.
+ *
+ * ============================================================================
+ * WHY THIS EXISTS: firstAvailableBook DISCARDS THE REST OF THE MARKET
+ * ============================================================================
+ *
+ * `extractPricedLine` reports ONE price per side, chosen by `firstAvailableBook`,
+ * which is whichever entry SGO happened to return first among the books that pass
+ * the filter. It is not the best price and it is not a stable choice: add a book to
+ * DEFAULT_BOOKMAKERS and a different venue can win the slot on the same market.
+ *
+ * TWO CONSEQUENCES, BOTH MEASURED 2026-09-28 on NHL Boston at Florida:
+ *
+ *   1. A BOOK LOOKS ABSENT WHEN IT IS FULLY PRICED. Filtered to hardrockbet alone
+ *      that event produced 89 rows across 15 players and six markets. On the
+ *      multi-book board Hard Rock appeared on almost nothing, because other books
+ *      kept winning the slot. The owner could see those prices in the Hard Rock app
+ *      while the board implied they did not exist. That is not a coverage gap, it is
+ *      a display artifact, and it is the more misleading of the two.
+ *
+ *   2. THE ACCOUNT PUBLISHES A PRICE IT DID NOT HAVE TO ACCEPT. Taking an arbitrary
+ *      book instead of the best available one is a standing drag on every pick, and
+ *      it interacts with the -125 to -200 band in the gates draft: whether a prop
+ *      clears the floor at all can depend on which book happened to be first.
+ *
+ * WHAT THIS FUNCTION DOES AND DELIBERATELY DOES NOT DO. It returns the full set so a
+ * caller can see and shop the market. It does NOT change what `extractPricedLine`
+ * selects, because flipping the default selection alters the output of every tool at
+ * once and that is the owner's call, not a side effect of a visibility fix.
+ *
+ * ORDERING IS BY VALUE TO THE BETTOR, not by book name: for either side of an
+ * over/under, a longer price is strictly better, so American odds sort descending
+ * (+150 ahead of -110 ahead of -200). Every entry still passes `isRealBookmaker`, so
+ * pick'em apps, Fliff, prediction markets and offshore venues never appear here.
+ */
+export interface BookPrice {
+  bookmaker: string;
+  americanOdds: string;
+  line?: string;
+}
+
+/** Numeric value of an American odds string, for comparison only. */
+function americanValue(odds: string): number {
+  const n = parseFloat(String(odds).replace(/[+\s]/g, ""));
+  return Number.isNaN(n) ? Number.NEGATIVE_INFINITY : n;
+}
+
+export function allBookPrices(odd: SGOOdd | undefined): BookPrice[] {
+  if (!odd?.byBookmaker) return [];
+  const out: BookPrice[] = [];
+  for (const [key, b] of Object.entries(odd.byBookmaker)) {
+    if (!isRealBookmaker(key)) continue;
+    const entry = b as { odds?: string; spread?: string; overUnder?: string; available?: boolean };
+    if (!entry.odds) continue;
+    if (entry.available === false) continue;
+    out.push({
+      bookmaker: key,
+      americanOdds: entry.odds,
+      // Same rule as the priced line: the number comes from the SAME book as the
+      // price or it does not come at all.
+      line: entry.spread ?? entry.overUnder ?? undefined,
+    });
+  }
+  // Best for the bettor first. A longer price is better on either side of an O/U.
+  out.sort((a, b) => americanValue(b.americanOdds) - americanValue(a.americanOdds));
+  return out;
+}
+
+/**
  * Extract a genuinely book-priced line, or explain why one isn't available.
  *
  * @param requireLine set true for over/under and spread markets, where a price

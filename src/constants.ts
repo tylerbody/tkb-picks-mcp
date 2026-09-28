@@ -61,7 +61,31 @@ export const BDL_BASE_URL = "https://api.balldontlie.io";
  * list, so a book-specific lookup has to tolerate odds attributed to nobody.
  */
 export const DEFAULT_BOOKMAKERS =
-  "draftkings,fanduel,betmgm,caesars,hardrockbet";
+  "draftkings,fanduel,betmgm,caesars,hardrockbet,betrivers,espnbet,ballybet";
+
+/**
+ * WIDENED 2026-09-28 from five books to eight, on measurement rather than preference.
+ *
+ * BetRivers, ESPN Bet and Bally Bet are regulated US books and were in NO block list.
+ * They were simply absent from this string, so every prop tool filtered them out
+ * silently while treating them as if they did not exist.
+ *
+ * MEASURED on NHL Boston at Florida, eventID QRDNo27CIPW3UiHjAzAV, a finalized
+ * 2026-04-02 event with a full board:
+ *
+ *   old five books      80 priced rows
+ *   filter disabled    102 priced rows
+ *
+ * And it was not only a row count. The `Goals` market at line 0.5, which is anytime
+ * goalscorer in over/under form, came back ONE-SIDED under the old list (longshot
+ * overs, no under, so the devig gate could never run) and TWO-SIDED once ESPN Bet was
+ * visible, because ESPN Bet is what prices the under 0.5.
+ *
+ * The four block lists in oddsPricing.ts are untouched and still apply: pick'em apps,
+ * Fliff, prediction markets and offshore books each stay blocked for their own
+ * documented reason. This change adds regulated venues that were never blocked, it
+ * does not relax a block.
+ */
 
 /**
  * WHAT A SPORT CAN ACTUALLY DO.
