@@ -257,23 +257,48 @@ function americanValue(odds: string): number {
 
 export function allBookPrices(odd: SGOOdd | undefined): BookPrice[] {
   if (!odd?.byBookmaker) return [];
-  const out: BookPrice[] = [];
-  for (const [key, b] of Object.entries(odd.byBookmaker)) {
-    if (!isRealBookmaker(key)) continue;
-    const entry = b as { odds?: string; spread?: string; overUnder?: string; available?: boolean };
-    if (!entry.odds) continue;
-    if (entry.available === false) continue;
-    out.push({
-      bookmaker: key,
-      americanOdds: entry.odds,
-      // Same rule as the priced line: the number comes from the SAME book as the
-      // price or it does not come at all.
-      line: entry.spread ?? entry.overUnder ?? undefined,
-    });
-  }
-  // Best for the bettor first. A longer price is better on either side of an O/U.
-  out.sort((a, b) => americanValue(b.americanOdds) - americanValue(a.americanOdds));
-  return out;
+
+  const collect = (predicate: (e: { odds?: string; available?: boolean }) => boolean): BookPrice[] => {
+    const out: BookPrice[] = [];
+    for (const [key, b] of Object.entries(odd.byBookmaker!)) {
+      if (!isRealBookmaker(key)) continue;
+      const entry = b as { odds?: string; spread?: string; overUnder?: string; available?: boolean };
+      if (!entry.odds) continue;
+      if (!predicate(entry)) continue;
+      out.push({
+        bookmaker: key,
+        americanOdds: entry.odds,
+        // Same rule as the priced line: the number comes from the SAME book as the
+        // price or it does not come at all.
+        line: entry.spread ?? entry.overUnder ?? undefined,
+      });
+    }
+    // Best for the bettor first. A longer price is better on either side of an O/U.
+    out.sort((a, b) => americanValue(b.americanOdds) - americanValue(a.americanOdds));
+    return out;
+  };
+
+  /* ---- THE CANDIDATE POOL MUST MATCH firstAvailableBook, FIXED v2.10.5a ----
+   *
+   * The first cut of this function skipped `available === false` unconditionally and
+   * returned an EMPTY array on every settled event, because a finished market has
+   * every book flagged unavailable. Measured on NHL Boston at Florida: the board came
+   * back with the selected price intact and `bookCount: 0, bestPrice: null` on every
+   * single side, while Hard Rock demonstrably priced those same markets.
+   *
+   * `firstAvailableBook` is two-tier: it PREFERS a book marked available, and falls
+   * back to any book carrying odds when none is. This has to use the same two tiers,
+   * or `bestPrice` is drawn from a smaller pool than the price it is being compared
+   * against, which is how you get "no best price" sitting next to a real one.
+   *
+   * WHY THE UNIT TESTS MISSED IT, worth recording: they hand-built byBookmaker entries
+   * with `available: true` and asserted on the helper, and the board test supplied
+   * `allBooks` directly rather than letting the push site compute it. So the helper was
+   * correct and the seam was never exercised. That is the exact failure toolWiring.test.ts
+   * was written about, repeated here by the author of this comment.
+   */
+  const available = collect((e) => e.available !== false);
+  return available.length ? available : collect(() => true);
 }
 
 /**

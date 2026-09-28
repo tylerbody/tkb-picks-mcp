@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { allBookPrices } from "../src/services/oddsPricing.js";
+import { allBookPrices, extractPricedLine } from "../src/services/oddsPricing.js";
 import { buildBoardRows, type PricedSide } from "../src/tools/propBoard.js";
 import { DEFAULT_BOOKMAKERS } from "../src/constants.js";
 
@@ -123,6 +123,63 @@ describe("v2.10.5 allBookPrices returns the whole market, best first", () => {
   test("an odd with no byBookmaker yields an empty array rather than throwing", () => {
     assert.deepEqual(allBookPrices(undefined), []);
     assert.deepEqual(allBookPrices({ oddID: "x" } as never), []);
+  });
+});
+
+describe("v2.10.5a a settled event, where every book is flagged unavailable", () => {
+  /**
+   * THE BUG THIS PINS. The first cut skipped `available === false` unconditionally, so
+   * on any finished market it returned an EMPTY array. Measured live on NHL Boston at
+   * Florida: every side came back `bookCount: 0, bestPrice: null` while the selected
+   * price was intact and Hard Rock demonstrably priced the same markets.
+   *
+   * `firstAvailableBook` prefers an available book and falls back to any book with
+   * odds. `allBookPrices` has to use the SAME two tiers, or bestPrice is drawn from a
+   * smaller pool than the price it is compared against.
+   */
+  const settled = {
+    oddID: "goalie_saves-X-game-ou-over",
+    byBookmaker: {
+      betmgm: { odds: "-125", overUnder: "24.5", available: false },
+      hardrockbet: { odds: "-115", overUnder: "24.5", available: false },
+      fanduel: { odds: "-130", overUnder: "24.5", available: false },
+      bovada: { odds: "+200", overUnder: "24.5", available: false },
+    },
+  } as never;
+
+  test("THE BUG: a fully unavailable market still returns its books", () => {
+    const books = allBookPrices(settled);
+    assert.equal(books.length, 3, "all three real books should come back");
+    assert.equal(books[0]!.bookmaker, "hardrockbet");
+    assert.equal(books[0]!.americanOdds, "-115");
+  });
+
+  test("the block list still applies on the fallback tier", () => {
+    assert.ok(!allBookPrices(settled).some((b) => b.bookmaker === "bovada"));
+  });
+
+  test("when SOME books are available, only those are considered", () => {
+    const mixed = {
+      oddID: "x",
+      byBookmaker: {
+        betmgm: { odds: "-125", available: true },
+        // Longer price but stale, so it must NOT win bestPrice.
+        hardrockbet: { odds: "+150", available: false },
+      },
+    } as never;
+    const books = allBookPrices(mixed);
+    assert.equal(books.length, 1);
+    assert.equal(books[0]!.bookmaker, "betmgm");
+  });
+
+  test("WIRING: the pool matches firstAvailableBook, so the selected book is always in it", () => {
+    // extractPricedLine picks via firstAvailableBook. Whatever it selects must appear
+    // in allBookPrices, otherwise betterPriceAvailable can contradict itself.
+    const priced = extractPricedLine(settled, { requireLine: true, marketDescription: "saves" });
+    assert.equal(priced.priced, true);
+    const selected = priced.value!.bookmaker!;
+    const pool = allBookPrices(settled).map((b) => b.bookmaker);
+    assert.ok(pool.includes(selected), `selected book ${selected} is missing from the pool`);
   });
 });
 
