@@ -8,6 +8,12 @@ import {
 } from "../services/marketCatalog.js";
 import { allBookPrices, extractPricedLine, roundToNearestTen, type BookPrice } from "../services/oddsPricing.js";
 import { PERIOD_CODES } from "../services/oddIdBuilder.js";
+import {
+  flexBoolean,
+  flexIntOptional,
+  asBoolean,
+  asNumber,
+} from "../services/flexibleInput.js";
 import { parseOddID, type ParsedOddID } from "../services/oddIdParser.js";
 import {
   participantModel,
@@ -572,21 +578,11 @@ const PropBoardInputSchema = z
       .describe(
         "Comma-separated bookmaker IDs to price against. DEFAULTS to the shared DEFAULT_BOOKMAKERS list in src/constants.ts (draftkings, fanduel, betmgm, caesars, hardrockbet). Pass 'all' to disable the filter for diagnosis only - never publish a price from an unfiltered board."
       ),
-    maxPlayers: z
-      .number()
-      .int()
-      .min(1)
-      .max(60)
-      .optional()
+    maxPlayers: flexIntOptional(1, 60)
       .describe(
         "Optional cap on players included. NO DEFAULT CAP, unlike tkb_screen_props - this tool makes no per-player requests so there is no latency cost to justify one. If passed, the cut follows SGO's response order rather than player quality, and the board says so."
       ),
-    maxRows: z
-      .number()
-      .int()
-      .min(5)
-      .max(600)
-      .optional()
+    maxRows: flexIntOptional(5, 600)
       .describe(
         "Backstop on rows returned. OMIT IT and the cap comes from the sport (v2.10.7): NFL and MLB 400, CFB and NHL 300, everything else 150. The old flat default of 80 was measured returning 70 of 142 rows on one NFL game, and because the cut follows SGO's response order that was ONE TEAM's board presented as the game's. Ceiling raised from 250 to 600. Truncation is always reported, never silent."
       ),
@@ -596,36 +592,23 @@ const PropBoardInputSchema = z
       .describe(
         "ADDED v2.10.8. Which period's props to return. Defaults to `full_game`, which is what this board has always returned and the only thing it could return before now. Pass a PERIOD_CODES key from src/services/oddIdBuilder.ts to reach period props instead: football and basketball use 1st_half, 2nd_half, 1st_quarter through 4th_quarter; hockey uses 1st_period, 2nd_period, 3rd_period and regulation; baseball uses 1st_inning through 9th_inning plus 1st_3_innings, 1st_5_innings and 1st_7_innings; soccer uses 1st_half, 2nd_half and regulation. MEASURED which codes actually carry odds, 2026-09-28: NFL 1h/2h/1q/2q/3q/4q, CFB and WNBA 1h/1q/2q/3q/4q, MLB 1i to 9i plus 1h plus 1ix3/1ix5/1ix7, NHL 1p/2p/3p/reg, EPL 1h/2h/reg. A period with no posted markets returns an empty board and says so, which is the correct outcome."
       ),
-    includeAltLines: z
-      .boolean()
-      .default(false)
+    includeAltLines: flexBoolean(false)
       .describe(
         "ADDED v2.10.7. Ask SGO for ALTERNATE lines as well as the main one. A book posts a main receiving-yards number plus a ladder of alts, and with this OFF, which it has always been, the board shows only the main line and every alt is invisible. Turn it on when the question is 'what is available on this player', because the main line alone is not the whole market. It materially increases response size, which is the OOM risk this connector has been bitten by once, so it stays off by default and the row cap still applies."
       ),
-    includeYesNo: z
-      .boolean()
-      .default(false)
+    includeYesNo: flexBoolean(false)
       .describe(
         "ADDED v2.11.0. Also return the YES/NO milestone markets on this event - anytime goalscorer, any home run, any touchdown, double-double, first basket - as a separate `yesNoRows` array. These have always been in the payload this board fetches and were silently discarded: measured 686 of 1104 odds on an NHL board, 757 of 1814 on NFL, about 100 per WNBA game. They cost no extra request. OFF BY DEFAULT ONLY FOR SIZE: an NHL board carries roughly 340 of these on top of its over/under rows and returning both by default pushes the response past the tool-result ceiling. The coverage block always reports how many are waiting, so turning this on is never a guess. Each row carries `gradeable` plus a `crossCheck` that verifies the yes price against the SAME book's over/under at 0.5."
       ),
-    maxYesNoRows: z
-      .number()
-      .int()
-      .min(5)
-      .max(600)
-      .optional()
+    maxYesNoRows: flexIntOptional(5, 600)
       .describe(
         "Backstop on yes/no rows returned, independent of maxRows so one section cannot starve the other. Omit and it follows the same sport-aware default as maxRows. Truncation is always reported."
       ),
-    includeUnpriced: z
-      .boolean()
-      .default(false)
+    includeUnpriced: flexBoolean(false)
       .describe(
         "Also list markets that exist in SGO's catalog for this event but that NO sportsbook has priced. Useful for telling 'not offered' apart from 'not posted yet'. Their prices are model estimates and are never returned, only the market names."
       ),
-    includeAllBooks: z
-      .boolean()
-      .default(false)
+    includeAllBooks: flexBoolean(false)
       .describe(
         "ADDED v2.10.5. Include EVERY real book's price on each side, best first, as `allBooks`. Off by default because it multiplies payload size. The board always reports `bestPrice`, `betterPriceAvailable` and `bookCount` per side regardless, so you can see when the displayed book is not the best one without asking for the full set. Use this when line shopping, or when a book you can see in its own app appears to be missing: it is usually present in the data and simply lost the display slot, because the shown price comes from whichever book SGO returned first rather than from the best one."
       ),
@@ -717,6 +700,18 @@ Error Handling:
           };
         }
 
+        /* NORMALISED IN CODE, NOT ONLY IN THE SCHEMA, v2.11.1. See flexibleInput.ts:
+         * a direct handler call skips zod, and `includeYesNo: "false"` arriving as a
+         * string is truthy, which would turn the section ON for a caller asking to
+         * turn it off. Same reasoning as the v2.10.8 fix for `period`. */
+        const wantYesNo = asBoolean(input.includeYesNo, false);
+        const wantAltLines = asBoolean(input.includeAltLines, false);
+        const wantUnpriced = asBoolean(input.includeUnpriced, false);
+        const wantAllBooks = asBoolean(input.includeAllBooks, false);
+        const askedMaxRows = asNumber(input.maxRows);
+        const askedMaxYesNoRows = asNumber(input.maxYesNoRows);
+        const askedMaxPlayers = asNumber(input.maxPlayers);
+
         const sport = input.sport as SportKey;
         const leagueID = sgo.leagueIDFor(sport);
         const catalog = OU_PROP_MARKETS[sport] ?? [];
@@ -770,7 +765,7 @@ Error Handling:
           bookmakerID: bookFilter,
           // v2.10.7: opt-in. Off by default for payload size, but reachable now
           // instead of being a permanently invisible slice of the market.
-          includeAltLines: input.includeAltLines,
+          includeAltLines: wantAltLines,
         });
 
         if (!events.length) {
@@ -812,11 +807,11 @@ Error Handling:
 
         // v2.10.7: an omitted maxRows resolves per sport rather than to a flat 80.
         const effectiveMaxRows =
-          input.maxRows ?? defaultMaxRowsFor(input.sport as SportKey);
+          askedMaxRows ?? defaultMaxRowsFor(input.sport as SportKey);
         // Its own cap, so a wide yes/no set cannot crowd out over/under rows or the
         // reverse. Same sport-aware default.
         const effectiveMaxYesNoRows =
-          input.maxYesNoRows ?? defaultMaxRowsFor(input.sport as SportKey);
+          askedMaxYesNoRows ?? defaultMaxRowsFor(input.sport as SportKey);
         // Refuse a non-match event readably rather than throwing a bare TypeError.
         // See services/eventShape.ts.
         const shape = readMatchTeams(event);
@@ -939,9 +934,9 @@ Error Handling:
         }
 
         const rosterClipped =
-          input.maxPlayers !== undefined && roster.length > input.maxPlayers;
+          askedMaxPlayers !== undefined && roster.length > askedMaxPlayers;
         const included =
-          input.maxPlayers !== undefined ? roster.slice(0, input.maxPlayers) : roster;
+          askedMaxPlayers !== undefined ? roster.slice(0, askedMaxPlayers) : roster;
         const allowedPlayerIDs = new Set(included.map((p) => p.playerID));
         const playerByID = new Map(roster.map((p) => [p.playerID, p]));
 
@@ -1184,7 +1179,7 @@ Error Handling:
             return t ? (teamNames[t] ?? t) : "unknown";
           },
           marketLabel: (statID) => statIDToLabel.get(statID) ?? statID,
-        }, { includeAllBooks: input.includeAllBooks });
+        }, { includeAllBooks: wantAllBooks });
 
         const truncated = allRows.length > effectiveMaxRows;
         const rows = allRows.slice(0, effectiveMaxRows);
@@ -1204,7 +1199,7 @@ Error Handling:
           overAtHalf: (playerID, statID) => ouHalfBooks.get(`${playerID}|${statID}`) ?? [],
         });
         const yesNoTruncated = allYesNoRows.length > effectiveMaxYesNoRows;
-        const yesNoRows = input.includeYesNo
+        const yesNoRows = wantYesNo
           ? allYesNoRows.slice(0, effectiveMaxYesNoRows)
           : [];
         const yesNoMismatches = allYesNoRows.filter(
@@ -1252,7 +1247,7 @@ Error Handling:
         const oneSided = rows.filter((r) => r.sidesPriced === 1).length;
 
         const rosterLine = rosterClipped
-          ? ` ROSTER CLIPPED: ${roster.length} players attached, ${input.maxPlayers} ` +
+          ? ` ROSTER CLIPPED: ${roster.length} players attached, ${askedMaxPlayers} ` +
             `included. The cut follows SGO's response order, not player quality. Drop ` +
             `maxPlayers to see the whole board.`
           : "";
@@ -1274,7 +1269,7 @@ Error Handling:
         const unpricedNote = unpriced.size
           ? ` ${unpriced.size} further market(s) exist in the catalog with no book price ` +
             `yet` +
-            (input.includeUnpriced ? `, listed below` : `; pass includeUnpriced to name them`) +
+            (wantUnpriced ? `, listed below` : `; pass includeUnpriced to name them`) +
             `.`
           : "";
 
@@ -1286,7 +1281,7 @@ Error Handling:
          * thing this release fixes is a caller believing the board was complete. */
         const yesNoNote = !allYesNoRows.length
           ? ` No yes/no milestone markets are priced on this event.`
-          : input.includeYesNo
+          : wantYesNo
             ? ` ${yesNoRows.length} YES/NO milestone market(s) included below as ` +
               `yesNoRows` +
               (yesNoTruncated
@@ -1314,7 +1309,7 @@ Error Handling:
           `source exists, and remember that early-season CFB and any WNBA market have ` +
           `no computable rate at all - preview language only.`;
 
-        const unpricedList = input.includeUnpriced
+        const unpricedList = wantUnpriced
           ? `\n\nUNPRICED (in catalog, no book has posted):\n` +
             [...unpriced.entries()]
               .sort((a, b) => a[0].localeCompare(b[0]))
@@ -1328,7 +1323,7 @@ Error Handling:
               type: "text" as const,
               text:
                 `${summary}\n\n${JSON.stringify(rows, null, 2)}` +
-                (input.includeYesNo && yesNoRows.length
+                (wantYesNo && yesNoRows.length
                   ? `\n\nYES/NO MARKETS:\n${JSON.stringify(yesNoRows, null, 2)}`
                   : "") +
                 unpricedList,
@@ -1354,7 +1349,7 @@ Error Handling:
             maxRowsApplied: effectiveMaxRows,
             period: requestedPeriod,
             periodCode,
-            altLinesIncluded: input.includeAltLines,
+            altLinesIncluded: wantAltLines,
             /* WHAT THIS BOARD IS NOT SHOWING YOU, v2.10.7.
              *
              * `seenOdds` is the denominator: every odd SGO returned for this event.
@@ -1396,7 +1391,7 @@ Error Handling:
                 ),
               },
               yesNo: {
-                included: input.includeYesNo,
+                included: wantYesNo,
                 seenOdds: ynSeen,
                 sidesAccepted: ynSides.length,
                 rowsBuilt: allYesNoRows.length,
@@ -1480,19 +1475,19 @@ Error Handling:
                 `statIDs are named. noBookPrice is a market carrying only a fair-odds model ` +
                 `number, which is never publishable. otherBetTypes is moneylines and ` +
                 `spreads, which belong to tkb_get_game_lines, not here. ` +
-                (input.includeYesNo
+                (wantYesNo
                   ? `Yes/no rows ARE included.`
                   : `Yes/no rows were NOT requested: ${allYesNoRows.length} are built and ` +
                     `waiting, pass includeYesNo to see them.`) +
                 ` ` +
-                (input.includeAltLines
+                (wantAltLines
                   ? `Alt lines WERE requested.`
                   : `Alt lines were NOT requested, so only each market's main line is here; ` +
                     `pass includeAltLines to see the ladder.`),
             },
             rows,
-            ...(input.includeYesNo ? { yesNoRows } : {}),
-            ...(input.includeUnpriced
+            ...(wantYesNo ? { yesNoRows } : {}),
+            ...(wantUnpriced
               ? {
                   unpricedMarkets: [...unpriced.keys()].sort(),
                   unpricedYesNoMarkets: [...unpricedYesNo.keys()].sort(),

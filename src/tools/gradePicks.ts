@@ -4,6 +4,7 @@ import type { SGOClient } from "../services/sgoClient.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import type { NHLStatsClient } from "../services/nhlStatsClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
+import { flexNumberOptional, asNumber } from "../services/flexibleInput.js";
 import {
   OU_PROP_MARKETS,
   YES_NO_MARKETS,
@@ -93,9 +94,7 @@ const GradeInputSchema = z
       .optional()
       .describe("Required for player_prop and player_yes_no. SGO playerID."),
     playerName: z.string().optional().describe("Player display name, for output labeling."),
-    postedLine: z
-      .number()
-      .optional()
+    postedLine: flexNumberOptional()
       .describe(
         "The line exactly as YOU posted it. REQUIRED for spread, total and player_prop - " +
           "those markets are refused without it, because on a finalized event the feed's own " +
@@ -198,6 +197,10 @@ Error Handling:
     },
     async (params: GradeInput) => {
       try {
+        // Same reason as the prop board: a direct handler call skips zod, so a string
+        // postedLine would flow into the grading arithmetic as a string.
+        const postedLine = asNumber(params.postedLine);
+
         const isPlayerMarket =
           params.marketType === "player_prop" || params.marketType === "player_yes_no";
 
@@ -247,7 +250,7 @@ Error Handling:
           };
         }
 
-        if (!marketHasNoLine && params.postedLine === undefined) {
+        if (!marketHasNoLine && postedLine === undefined) {
           return {
             content: [
               { type: "text" as const, text: missingPostedLineRefusal(params.marketType) },
@@ -642,7 +645,7 @@ Error Handling:
             side,
             homeScore,
             awayScore,
-            line: params.postedLine!,
+            line: postedLine!,
             pickedName: side === "home" ? homeName : awayName,
             opponentName: side === "home" ? awayName : homeName,
           });
@@ -657,7 +660,7 @@ Error Handling:
             margin: graded.margin,
             adjustedMargin: graded.adjustedMargin,
             finalScore: `${awayName} ${awayScore} - ${homeName} ${homeScore}`,
-            lineGradedAgainst: params.postedLine,
+            lineGradedAgainst: postedLine,
             signConvention: SPREAD_SIGN_CONVENTION,
             explanation: graded.explanation,
             eventID: event.eventID,
@@ -717,7 +720,7 @@ Error Handling:
         const side = (isYesNo ? (params.side === "yes" ? "over" : "under") : params.side) as
           | "over"
           | "under";
-        const lineUsed = isYesNo ? YES_NO_LINE : params.postedLine!;
+        const lineUsed = isYesNo ? YES_NO_LINE : postedLine!;
         const label = params.playerName
           ? isYesNo
             ? `${params.playerName} ${params.side.toUpperCase()} ${params.marketLabel ?? ""}`.trim()

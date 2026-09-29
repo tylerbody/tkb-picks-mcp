@@ -567,6 +567,7 @@ const callGrade = async (params: Record<string, unknown>) => {
         odds: {
           [`points-${PID}-game-yn-yes`]: { score: 1 },
           [`points-${PID}-game-yn-no`]: { score: 1 },
+          [`points-${PID}-game-ou-over`]: { score: 1 },
         },
       },
     ],
@@ -688,5 +689,73 @@ describe("v2.11.0 yes/no picks are gradeable", () => {
     });
     assert.equal(res.isError, true);
     assert.match(res.content[0].text, /requires both marketLabel and playerID/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. v2.11.1: a stale client schema sends "true" instead of true.
+//
+// Measured minutes after v2.11.0 deployed: includeYesNo was rejected on every live call
+// with "Expected boolean, received string", from a client that had just been told the
+// parameter existed. MCP clients cache tool definitions and a refresh diffs tool NAMES,
+// so a tool that gained a parameter looks unchanged. Every scheduled task holds its own
+// client session, so this is the general shape of "adding a parameter breaks a schedule
+// silently", not a one-off.
+// ---------------------------------------------------------------------------
+
+describe("v2.11.1 string-spelled booleans and numbers are accepted", () => {
+  test("includeYesNo as the string \"true\" works", async () => {
+    const res = await callNhlBoard({ includeYesNo: "true" });
+    assert.equal((res.structuredContent!.yesNoRows as unknown[]).length, 1);
+  });
+
+  test("and \"false\" is respected rather than read as truthy", async () => {
+    const res = await callNhlBoard({ includeYesNo: "false" });
+    assert.equal(res.structuredContent!.yesNoRows, undefined);
+    assert.equal(res.structuredContent!.yesNoRowsBuilt, 1);
+  });
+
+  test("a numeric string cap is honoured, not ignored", async () => {
+    const res = await callNhlBoard({ includeYesNo: "true", maxYesNoRows: "5" });
+    assert.equal(res.structuredContent!.maxRowsApplied !== undefined, true);
+    assert.equal((res.structuredContent!.yesNoRows as unknown[]).length, 1);
+  });
+
+  /* WIDENS THE SPELLING, DOES NOT WEAKEN VALIDATION. A parameter that guesses what the
+   * caller meant is how a board silently includes something nobody asked for. */
+  test("garbage is still rejected", async () => {
+    const { flexBoolean, flexIntOptional, flexNumberOptional } = await import(
+      "../src/services/flexibleInput.js"
+    );
+    const b = flexBoolean(false);
+    assert.equal(b.parse(undefined), false);
+    assert.equal(b.parse("TRUE "), true);
+    assert.equal(b.parse(" False"), false);
+    for (const bad of ["yes", "1", "on", "", "maybe", 1]) {
+      assert.throws(() => b.parse(bad), `accepted ${JSON.stringify(bad)}`);
+    }
+    const n = flexIntOptional(5, 600);
+    assert.equal(n.parse("42"), 42);
+    assert.equal(n.parse(undefined), undefined);
+    for (const bad of ["", "12abc", "4", "601", "7.5", "NaN"]) {
+      assert.throws(() => n.parse(bad), `accepted ${JSON.stringify(bad)}`);
+    }
+    // postedLine takes decimals, so this one must NOT reject 7.5.
+    assert.equal(flexNumberOptional().parse("7.5"), 7.5);
+    assert.equal(flexNumberOptional().parse("-6.5"), -6.5);
+  });
+
+  test("the grader accepts a string postedLine", async () => {
+    const res = await callGrade({
+      sport: "nhl",
+      eventID: "E",
+      marketType: "player_prop",
+      side: "over",
+      marketLabel: "Goals",
+      playerID: PID,
+      postedLine: "0.5",
+    });
+    assert.notEqual(res.isError, true);
+    assert.equal(res.structuredContent?.lineGradedAgainst, 0.5);
   });
 });
