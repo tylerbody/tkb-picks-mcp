@@ -36,11 +36,62 @@
  * Marte: a confident wrong answer is worse than no answer.
  */
 
-/** Every betTypeID this connector constructs or reads. Closed set, per SGO docs. */
-const BET_TYPES = new Set(["ou", "yn", "ml", "sp", "ml3way"]);
+/* ===========================================================================
+ * THE VOCABULARY WAS NOT ACTUALLY COMPLETE. Fixed v2.11.3.
+ *
+ * Both sets below carried the comment "Closed set, per SGO docs" and both were short.
+ * SGO's bet-types page documents SEVEN betTypeIDs and this parser knew five; it
+ * documents the ml3way combination sides and the even/odd and custom-prop sides, and
+ * this parser knew none of them.
+ *
+ * The cost was measurable and had been sitting in plain sight. `unparsableOddID` ran at
+ * 14 on every NHL board and 28 on every WNBA board, reported as a bare count since
+ * v2.10.7 and never explained. Naming them in v2.11.2 answered it in one call:
+ *
+ *   points-home-reg-ml3way-home+draw      <- double chance
+ *   points-away-reg-ml3way-away+draw      <- double chance
+ *   points-all-reg-ml3way-not_draw        <- draw no bet
+ *   points-all-game-eo-even               <- game total even/odd
+ *   points-all-game-eo-odd
+ *
+ * Not one of them was unparsable. They are documented markets this parser refused, and
+ * calling them unparsable made a vocabulary gap look like malformed provider data. That
+ * is the same mislabel as the prop board's old `notOverUnder` bucket: a number that
+ * reads as one thing and means another.
+ *
+ * NONE OF THESE CAN REACH THE PROP BOARD. That board requires betType ou or yn and a
+ * side of over/under or yes/no, so widening the vocabulary here routes these odds into
+ * the named `otherBetTypes` bucket instead of a mystery pile. They are team and
+ * game-level markets and belong to tkb_get_game_lines.
+ *
+ * `prop` with side1/side2 is included because SGO documents it, not because it has been
+ * seen live. A documented market that this parser refuses is exactly the failure being
+ * fixed; if one shows up it will now be counted and named rather than hidden.
+ */
 
-/** Every sideID SGO uses. Closed set, per SGO docs. */
-const SIDES = new Set(["over", "under", "yes", "no", "home", "away", "draw"]);
+/** Every betTypeID SGO documents. Verified against docs/data-types/bet-types 2026-09-29. */
+const BET_TYPES = new Set(["ou", "yn", "ml", "sp", "ml3way", "eo", "prop"]);
+
+/** Every sideID SGO documents, including the ml3way combinations. Same source and date. */
+const SIDES = new Set([
+  "over",
+  "under",
+  "yes",
+  "no",
+  "home",
+  "away",
+  "draw",
+  // ml3way combination outcomes: double chance and draw no bet.
+  "home+draw",
+  "away+draw",
+  "not_draw",
+  // eo
+  "even",
+  "odd",
+  // prop
+  "side1",
+  "side2",
+]);
 
 export interface ParsedOddID {
   statID: string;

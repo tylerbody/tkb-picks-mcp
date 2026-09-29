@@ -893,3 +893,148 @@ describe("v2.11.2 the 0.5 index is period-scoped", () => {
     assert.deepEqual(cov.unparsableOddIDsSeen, ["not-a-valid-oddid-at-all-x-y-z"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 9. v2.11.3: the oddID vocabulary matches SGO's docs.
+// ---------------------------------------------------------------------------
+
+describe("v2.11.3 documented betTypes and sides parse", () => {
+  /* THE ACTUAL oddIDs that were being counted as unparsable, taken verbatim from a live
+   * NHL board on 2026-09-29 once v2.11.2 started naming them. Every one is a documented
+   * market; none of them was malformed. */
+  const REAL = [
+    ["points-home-reg-ml3way-home+draw", "ml3way", "home+draw", "reg"],
+    ["points-away-reg-ml3way-away+draw", "ml3way", "away+draw", "reg"],
+    ["points-all-reg-ml3way-not_draw", "ml3way", "not_draw", "reg"],
+    ["points-all-game-eo-even", "eo", "even", "game"],
+    ["points-all-game-eo-odd", "eo", "odd", "game"],
+    ["points-all-1p-ml3way-not_draw", "ml3way", "not_draw", "1p"],
+  ] as const;
+
+  test("each one parses, with the right betType, side and period", async () => {
+    const { parseOddID } = await import("../src/services/oddIdParser.js");
+    for (const [oddID, betType, side, period] of REAL) {
+      const p = parseOddID(oddID);
+      assert.ok(p, `failed to parse ${oddID}`);
+      assert.equal(p!.betType, betType, oddID);
+      assert.equal(p!.side, side, oddID);
+      assert.equal(p!.period, period, oddID);
+      assert.equal(p!.statID, "points", oddID);
+    }
+  });
+
+  test("the documented prop betType parses too", async () => {
+    const { parseOddID } = await import("../src/services/oddIdParser.js");
+    for (const side of ["side1", "side2"]) {
+      const p = parseOddID(`someProp-all-game-prop-${side}`);
+      assert.ok(p, side);
+      assert.equal(p!.betType, "prop");
+      assert.equal(p!.side, side);
+    }
+  });
+
+  /* THE SAFETY PROPERTY. Widening the parser must not widen the BOARD. Nothing here has
+   * betType ou or yn, so none of it can become a row; it must land in otherBetTypes,
+   * named, and leave unparsableOddID at zero. */
+  test("they reach otherBetTypes, never the board, and unparsable drops to zero", async () => {
+    const P = "AUSTON_MATTHEWS_1_NHL";
+    const ev = {
+      eventID: "E",
+      type: "match",
+      status: { started: false, startsAt: "2026-09-30T23:00:00.000Z" },
+      teams: {
+        home: { teamID: "TOR", names: { long: "Toronto Maple Leafs" } },
+        away: { teamID: "MTL", names: { long: "Montreal Canadiens" } },
+      },
+      players: { [P]: { playerID: P, name: "Auston Matthews", teamID: "TOR" } },
+      odds: {
+        [`points-${P}-game-ou-over`]: bk("+120", "0.5"),
+        [`points-${P}-game-yn-yes`]: bk("+120"),
+        "points-home-reg-ml3way-home+draw": bk("-300"),
+        "points-all-game-eo-even": bk("-105"),
+        "points-all-game-eo-odd": bk("-115"),
+      },
+    };
+    const sgo = { leagueIDFor: () => "NHL", getAllEvents: async () => [ev] } as never;
+    const { registerPropBoardTool } = await import("../src/tools/propBoard.js");
+    const { server, handlers } = captureServer();
+    registerPropBoardTool(server as never, sgo);
+    const res = (await handlers["tkb_get_prop_board"]({
+      sport: "nhl",
+      eventID: "E",
+      preferredBookmakers: "draftkings",
+      includeUnpriced: false,
+      includeAllBooks: false,
+      includeAltLines: false,
+      includeYesNo: true,
+    } as never)) as { structuredContent?: Record<string, unknown> };
+    const cov = res.structuredContent!.coverage as {
+      unparsableOddID: number;
+      unaccounted: number;
+      otherBetTypes: { count: number; betTypesSeen: Record<string, number> };
+      overUnder: { rowsBuilt: number };
+      yesNo: { rowsBuilt: number };
+    };
+    assert.equal(cov.unparsableOddID, 0, "documented markets must no longer read as malformed");
+    assert.equal(cov.otherBetTypes.count, 3);
+    assert.deepEqual(cov.otherBetTypes.betTypesSeen, { eo: 2, ml3way: 1 });
+    // The board itself is unchanged: one over/under row, one yes/no row.
+    assert.equal(cov.overUnder.rowsBuilt, 1);
+    assert.equal(cov.yesNo.rowsBuilt, 1);
+    assert.equal(cov.unaccounted, 0);
+  });
+});
+
+describe("v2.11.3 an empty board still explains itself", () => {
+  /* Measured live on Lynx at Liberty: asking for one yes/no market no book prices there
+   * returned matchup, rows: [], pricedRowCount: 0, unpricedMarketCount: 0 and nothing
+   * else. "Zero props" with no denominator is indistinguishable from a broken connector. */
+  const P = "NAPHEESA_COLLIER_1_WNBA";
+  test("the coverage block is present on the empty path too", async () => {
+    const ev = {
+      eventID: "E",
+      type: "match",
+      status: { started: false, startsAt: "2026-09-30T23:00:00.000Z" },
+      teams: {
+        home: { teamID: "NYL", names: { long: "New York Liberty" } },
+        away: { teamID: "MIN", names: { long: "Minnesota Lynx" } },
+      },
+      players: { [P]: { playerID: P, name: "Napheesa Collier", teamID: "MIN" } },
+      // Real markets on the event, none of them the one asked for.
+      odds: {
+        [`points-${P}-game-ou-over`]: bk("-110", "18.5"),
+        [`doubleDouble-${P}-game-yn-yes`]: bk("+120"),
+        "points-all-game-eo-even": bk("-105"),
+      },
+    };
+    const sgo = { leagueIDFor: () => "WNBA", getAllEvents: async () => [ev] } as never;
+    const { registerPropBoardTool } = await import("../src/tools/propBoard.js");
+    const { server, handlers } = captureServer();
+    registerPropBoardTool(server as never, sgo);
+    const res = (await handlers["tkb_get_prop_board"]({
+      sport: "wnba",
+      eventID: "E",
+      preferredBookmakers: "draftkings",
+      markets: ["Any Rebounds"],
+      includeUnpriced: false,
+      includeAllBooks: false,
+      includeAltLines: false,
+      includeYesNo: true,
+    } as never)) as { structuredContent?: Record<string, unknown> };
+    const cov = res.structuredContent!.coverage as {
+      seenOdds: number;
+      unaccounted: number;
+      overUnder: { dropped: Record<string, number> };
+      yesNo: { dropped: Record<string, number> };
+      otherBetTypes: { count: number };
+    } | undefined;
+    assert.ok(cov, "empty board returned no coverage block");
+    // It saw three odds and can say what happened to each.
+    assert.equal(cov!.seenOdds, 3);
+    assert.equal(cov!.unaccounted, 0);
+    // Both real markets were filtered out by the markets narrowing, and it says so.
+    assert.equal(cov!.overUnder.dropped.notInCatalog, 1);
+    assert.equal(cov!.yesNo.dropped.notInCatalog, 1);
+    assert.equal(cov!.otherBetTypes.count, 1);
+  });
+});

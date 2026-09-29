@@ -1252,151 +1252,16 @@ Error Handling:
           : `Priced against ALL venues - book filter disabled. Diagnostic only; do NOT ` +
             `publish a price from this board without re-pulling at your books.`;
 
-        if (allRows.length === 0 && allYesNoRows.length === 0) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text:
-                  `NO PRICED PROPS on ${matchup}.\n\n` +
-                  `Walked every market on this event and none of them carries a real ` +
-                  `sportsbook price` +
-                  (bookFilter ? ` at ${bookFilter}` : "") +
-                  `. ${unpriced.size} market(s) exist in SGO's catalog with only a ` +
-                  `fair-odds model estimate attached, which is never publishable.\n\n` +
-                  (bookFilter
-                    ? `"Nothing priced" and "nothing priced at YOUR books" are different ` +
-                      `statements. Re-run with preferredBookmakers="all" to see which is ` +
-                      `true here, for diagnosis only.\n\n`
-                    : ``) +
-                  `Team-level markets usually post much earlier - try tkb_get_game_lines.`,
-              },
-            ],
-            structuredContent: {
-              eventID: input.eventID,
-              matchup,
-              rows: [],
-              pricedRowCount: 0,
-              unpricedMarketCount: unpriced.size,
-            },
-          };
-        }
-
-        const distinctPlayers = new Set(rows.map((r) => r.playerID)).size;
-        const splitLines = rows.filter((r) => r.splitLine).length;
-        const oneSided = rows.filter((r) => r.sidesPriced === 1).length;
-
-        const rosterLine = rosterClipped
-          ? ` ROSTER CLIPPED: ${roster.length} players attached, ${askedMaxPlayers} ` +
-            `included. The cut follows SGO's response order, not player quality. Drop ` +
-            `maxPlayers to see the whole board.`
-          : "";
-
-        const truncationLine = truncated
-          ? ` BOARD TRUNCATED: ${allRows.length} priced market(s) built, ${rows.length} ` +
-            `shown. Raise maxRows or narrow with the markets filter.`
-          : "";
-
-        const splitLineNote = splitLines
-          ? ` ${splitLines} market(s) carry a SPLIT LINE, meaning the two sides are ` +
-            `priced at different numbers. Those have no single publishable line.`
-          : "";
-
-        const oneSidedNote = oneSided
-          ? ` ${oneSided} market(s) have only one side priced.`
-          : "";
-
-        const unpricedNote = unpriced.size
-          ? ` ${unpriced.size} further market(s) exist in the catalog with no book price ` +
-            `yet` +
-            (wantUnpriced ? `, listed below` : `; pass includeUnpriced to name them`) +
-            `.`
-          : "";
-
-        const cancelledNote = cancelledCount
-          ? ` ${cancelledCount} cancelled market(s) skipped.`
-          : "";
-
-        /* v2.11.0. Said in the prose, not only in the coverage object, because the
-         * thing this release fixes is a caller believing the board was complete. */
-        const yesNoNote = !allYesNoRows.length
-          ? ` No yes/no milestone markets are priced on this event.`
-          : wantYesNo
-            ? ` ${yesNoRows.length} YES/NO milestone market(s) included below as ` +
-              `yesNoRows` +
-              (yesNoTruncated
-                ? ` (${allYesNoRows.length} built, raise maxYesNoRows)`
-                : "") +
-              `.` +
-              (yesNoUngradeable
-                ? ` ${yesNoUngradeable} of them CANNOT be graded by tkb_grade_pick ` +
-                  `(ordering and composite markets); each row says so and why.`
-                : "") +
-              (yesNoMismatches.length
-                ? ` WARNING: ${yesNoMismatches.length} failed the cross-check against ` +
-                  `their own book's over 0.5. Do not post those.`
-                : "")
-            : ` ${allYesNoRows.length} YES/NO milestone market(s) are priced on this ` +
-              `event and NOT shown. Pass includeYesNo for anytime scorer, any home run, ` +
-              `any touchdown, double-double and the rest.`;
-
-        const summary =
-          `${rows.length} priced market(s) across ${distinctPlayers} player(s) in ${matchup}.` +
-          `\n\n${bookLine}${rosterLine}${truncationLine}${splitLineNote}${oneSidedNote}` +
-          `${unpricedNote}${cancelledNote}${yesNoNote}` +
-          `\n\nNO HIT RATES ON THIS BOARD BY DESIGN. This tool reports what is priced, ` +
-          `not what is likely to win. Use tkb_screen_props for ranking where a rate ` +
-          `source exists, and remember that early-season CFB and any WNBA market have ` +
-          `no computable rate at all - preview language only.`;
-
-        const unpricedList = wantUnpriced
-          ? `\n\nUNPRICED (in catalog, no book has posted):\n` +
-            [...unpriced.entries()]
-              .sort((a, b) => a[0].localeCompare(b[0]))
-              .map(([k, reason]) => `- ${k} (${reason})`)
-              .join("\n")
-          : "";
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text:
-                `${summary}\n\n${JSON.stringify(rows, null, 2)}` +
-                (wantYesNo && yesNoRows.length
-                  ? `\n\nYES/NO MARKETS:\n${JSON.stringify(yesNoRows, null, 2)}`
-                  : "") +
-                unpricedList,
-            },
-          ],
-          structuredContent: {
-            eventID: event.eventID,
-            matchup,
-            pricedRowCount: rows.length,
-            totalRowsBuilt: allRows.length,
-            truncated,
-            distinctPlayers,
-            playersAttached: roster.length,
-            rosterClipped,
-            splitLineCount: splitLines,
-            oneSidedCount: oneSided,
-            unpricedMarketCount: unpriced.size,
-            cancelledCount,
-            yesNoRowsBuilt: allYesNoRows.length,
-            yesNoRowsReturned: yesNoRows.length,
-            yesNoCrossCheckMismatches: yesNoMismatches.length,
-            pricedAgainst: bookFilter ?? "all",
-            maxRowsApplied: effectiveMaxRows,
-            period: requestedPeriod,
-            periodCode,
-            altLinesIncluded: wantAltLines,
-            /* WHAT THIS BOARD IS NOT SHOWING YOU, v2.10.7.
-             *
-             * `seenOdds` is the denominator: every odd SGO returned for this event.
-             * Each dropped bucket names why those odds never became rows. This exists
-             * because a board that discards four fifths of an event used to read as
-             * "every prop in this game", and a thread built off that assumption is
-             * building off a slice. */
+        /* HOISTED ABOVE THE EMPTY-BOARD RETURN, v2.11.3.
+         *
+         * The empty-board path returned a four-field payload with no coverage at all:
+         * matchup, rows: [], pricedRowCount: 0, unpricedMarketCount: 0. Measured live on
+         * Lynx at Liberty asking for one yes/no market that no book prices there.
+         *
+         * An empty board is the case where a caller MOST needs to know why it is empty,
+         * and it was the one path that refused to say. "Zero props" with no denominator
+         * is indistinguishable from a broken connector, which is exactly how it reads.
+         * Built once here and spread into both returns so the two can never diverge. */
             /* COVERAGE, RESTRUCTURED v2.11.0.
              *
              * It used to be one flat set of buckets, which worked while the board had
@@ -1405,7 +1270,8 @@ Error Handling:
              * together. Each section owns its own denominator and its own drop reasons,
              * and `unaccounted` spans both. A number that mixes two populations is the
              * kind of thing that reads as precise and is not. */
-            coverage: {
+        const coverageBlock = {
+          coverage: {
               seenOdds,
               overUnder: {
                 sidesAccepted: sides.length,
@@ -1528,7 +1394,159 @@ Error Handling:
                   ? `Alt lines WERE requested.`
                   : `Alt lines were NOT requested, so only each market's main line is here; ` +
                     `pass includeAltLines to see the ladder.`),
+          },
+        };
+
+        if (allRows.length === 0 && allYesNoRows.length === 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `NO PRICED PROPS on ${matchup}.\n\n` +
+                  `Walked every market on this event and none of them carries a real ` +
+                  `sportsbook price` +
+                  (bookFilter ? ` at ${bookFilter}` : "") +
+                  `. ${unpriced.size} market(s) exist in SGO's catalog with only a ` +
+                  `fair-odds model estimate attached, which is never publishable.\n\n` +
+                  (bookFilter
+                    ? `"Nothing priced" and "nothing priced at YOUR books" are different ` +
+                      `statements. Re-run with preferredBookmakers="all" to see which is ` +
+                      `true here, for diagnosis only.\n\n`
+                    : ``) +
+                  `Team-level markets usually post much earlier - try tkb_get_game_lines.`,
+              },
+            ],
+            structuredContent: {
+              eventID: input.eventID,
+              matchup,
+              rows: [],
+              pricedRowCount: 0,
+              unpricedMarketCount: unpriced.size,
+              yesNoRowsBuilt: 0,
+              yesNoRowsReturned: 0,
+              // v2.11.3: an empty board now carries the same denominator a full one does.
+              ...coverageBlock,
             },
+          };
+        }
+
+        const distinctPlayers = new Set(rows.map((r) => r.playerID)).size;
+        const splitLines = rows.filter((r) => r.splitLine).length;
+        const oneSided = rows.filter((r) => r.sidesPriced === 1).length;
+
+        const rosterLine = rosterClipped
+          ? ` ROSTER CLIPPED: ${roster.length} players attached, ${askedMaxPlayers} ` +
+            `included. The cut follows SGO's response order, not player quality. Drop ` +
+            `maxPlayers to see the whole board.`
+          : "";
+
+        const truncationLine = truncated
+          ? ` BOARD TRUNCATED: ${allRows.length} priced market(s) built, ${rows.length} ` +
+            `shown. Raise maxRows or narrow with the markets filter.`
+          : "";
+
+        const splitLineNote = splitLines
+          ? ` ${splitLines} market(s) carry a SPLIT LINE, meaning the two sides are ` +
+            `priced at different numbers. Those have no single publishable line.`
+          : "";
+
+        const oneSidedNote = oneSided
+          ? ` ${oneSided} market(s) have only one side priced.`
+          : "";
+
+        const unpricedNote = unpriced.size
+          ? ` ${unpriced.size} further market(s) exist in the catalog with no book price ` +
+            `yet` +
+            (wantUnpriced ? `, listed below` : `; pass includeUnpriced to name them`) +
+            `.`
+          : "";
+
+        const cancelledNote = cancelledCount
+          ? ` ${cancelledCount} cancelled market(s) skipped.`
+          : "";
+
+        /* v2.11.0. Said in the prose, not only in the coverage object, because the
+         * thing this release fixes is a caller believing the board was complete. */
+        const yesNoNote = !allYesNoRows.length
+          ? ` No yes/no milestone markets are priced on this event.`
+          : wantYesNo
+            ? ` ${yesNoRows.length} YES/NO milestone market(s) included below as ` +
+              `yesNoRows` +
+              (yesNoTruncated
+                ? ` (${allYesNoRows.length} built, raise maxYesNoRows)`
+                : "") +
+              `.` +
+              (yesNoUngradeable
+                ? ` ${yesNoUngradeable} of them CANNOT be graded by tkb_grade_pick ` +
+                  `(ordering and composite markets); each row says so and why.`
+                : "") +
+              (yesNoMismatches.length
+                ? ` WARNING: ${yesNoMismatches.length} failed the cross-check against ` +
+                  `their own book's over 0.5. Do not post those.`
+                : "")
+            : ` ${allYesNoRows.length} YES/NO milestone market(s) are priced on this ` +
+              `event and NOT shown. Pass includeYesNo for anytime scorer, any home run, ` +
+              `any touchdown, double-double and the rest.`;
+
+        const summary =
+          `${rows.length} priced market(s) across ${distinctPlayers} player(s) in ${matchup}.` +
+          `\n\n${bookLine}${rosterLine}${truncationLine}${splitLineNote}${oneSidedNote}` +
+          `${unpricedNote}${cancelledNote}${yesNoNote}` +
+          `\n\nNO HIT RATES ON THIS BOARD BY DESIGN. This tool reports what is priced, ` +
+          `not what is likely to win. Use tkb_screen_props for ranking where a rate ` +
+          `source exists, and remember that early-season CFB and any WNBA market have ` +
+          `no computable rate at all - preview language only.`;
+
+        const unpricedList = wantUnpriced
+          ? `\n\nUNPRICED (in catalog, no book has posted):\n` +
+            [...unpriced.entries()]
+              .sort((a, b) => a[0].localeCompare(b[0]))
+              .map(([k, reason]) => `- ${k} (${reason})`)
+              .join("\n")
+          : "";
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `${summary}\n\n${JSON.stringify(rows, null, 2)}` +
+                (wantYesNo && yesNoRows.length
+                  ? `\n\nYES/NO MARKETS:\n${JSON.stringify(yesNoRows, null, 2)}`
+                  : "") +
+                unpricedList,
+            },
+          ],
+          structuredContent: {
+            eventID: event.eventID,
+            matchup,
+            pricedRowCount: rows.length,
+            totalRowsBuilt: allRows.length,
+            truncated,
+            distinctPlayers,
+            playersAttached: roster.length,
+            rosterClipped,
+            splitLineCount: splitLines,
+            oneSidedCount: oneSided,
+            unpricedMarketCount: unpriced.size,
+            cancelledCount,
+            yesNoRowsBuilt: allYesNoRows.length,
+            yesNoRowsReturned: yesNoRows.length,
+            yesNoCrossCheckMismatches: yesNoMismatches.length,
+            pricedAgainst: bookFilter ?? "all",
+            maxRowsApplied: effectiveMaxRows,
+            period: requestedPeriod,
+            periodCode,
+            altLinesIncluded: wantAltLines,
+            /* WHAT THIS BOARD IS NOT SHOWING YOU, v2.10.7.
+             *
+             * `seenOdds` is the denominator: every odd SGO returned for this event.
+             * Each dropped bucket names why those odds never became rows. This exists
+             * because a board that discards four fifths of an event used to read as
+             * "every prop in this game", and a thread built off that assumption is
+             * building off a slice. */
+            ...coverageBlock,
             rows,
             ...(wantYesNo ? { yesNoRows } : {}),
             ...(wantUnpriced
