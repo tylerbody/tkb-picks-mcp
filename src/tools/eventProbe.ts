@@ -453,7 +453,26 @@ Examples:
             eventID: input.eventID,
             topLevelKeys: keys,
             keyShapes: shapes,
-            oddsMarketCount: oddsCount,
+            /* NOT THE EVENT'S MARKET COUNT, AND IT NEVER WAS. Fixed v2.11.2.
+             *
+             * This tool deliberately fetches with a single narrowing oddID so the odds
+             * map is not serialised into the response - see the note on the fetch above.
+             * So this number is ALWAYS about 1, by construction, for every event in
+             * every sport. Reported as `oddsMarketCount` it read as "this WNBA game has
+             * one market", which is the opposite of true: the same event carried 422
+             * odds and 100 priced markets on the board the same minute.
+             *
+             * Same defect family as the prop board's old `notOverUnder` bucket and the
+             * cross-check's period bug: a number that is an artifact of the REQUEST,
+             * presented as a fact about the DATA. Renamed so it cannot be misread, and
+             * it now says where the real count lives. */
+            oddsMarketsReturned: oddsCount,
+            oddsRequestWasNarrowed: true,
+            oddsCountNote:
+              `This probe asks for ONE market on purpose, so oddsMarketsReturned is ` +
+              `always about 1 and says NOTHING about how many markets the event has. ` +
+              `For the real count use tkb_get_prop_board, which reports seenOdds and a ` +
+              `full coverage breakdown.`,
             playerCount,
             lineups: {
               keyPresent: hasLineups,

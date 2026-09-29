@@ -979,6 +979,12 @@ Error Handling:
          */
         let seenOdds = 0;
         let droppedUnparsable = 0;
+        /* NAMED, NOT JUST COUNTED, v2.11.2. Every other drop bucket names what it
+         * dropped; this one has reported a bare number since v2.10.7. It sits at 28 on
+         * every WNBA board and 14 on NHL, unexplained, and SGO's docs do not say how an
+         * alternate line is represented given the line is NOT part of the oddID - which
+         * makes these the most likely place to find out. Capped, verbatim, no parsing. */
+        const unparsableSamples: string[] = [];
         let droppedNonOverUnderSide = 0;
         let droppedNonGamePeriod = 0;
         const droppedPeriods = new Map<string, number>();
@@ -994,6 +1000,7 @@ Error Handling:
           const parsed = parseOddID(oddID);
           if (!parsed) {
             droppedUnparsable++;
+            if (unparsableSamples.length < 10) unparsableSamples.push(oddID);
             continue;
           }
 
@@ -1080,11 +1087,44 @@ Error Handling:
             continue;
           }
 
-          /* THE 0.5 INDEX FOR THE CROSS-CHECK. Recorded here, before the catalog and
-           * entity filters, so narrowing `markets` cannot quietly disable the
-           * verification. Filtered per book to exactly 0.5 because a single odd object
-           * can carry different numbers at different venues. */
-          if (parsed.side === "over") {
+          /* THE 0.5 INDEX FOR THE CROSS-CHECK. Recorded before the CATALOG and ENTITY
+           * filters, so narrowing `markets` cannot quietly disable the verification,
+           * but AFTER the period check below in spirit - which is why the period is
+           * tested right here rather than relying on position.
+           *
+           * ---- THE PERIOD BUG, FIXED v2.11.2 ----
+           *
+           * The first cut of this index tested only `side === "over"`, which put it
+           * ahead of the period filter and therefore indexed PERIOD markets. A hockey
+           * first-period "points over 0.5" then overwrote the full-game one, and the
+           * cross-check compared a full-game yes/no price against a one-period line.
+           *
+           * It produced 25 mismatches on Montreal at Toronto, 2026-09-29, every one of
+           * them false, and every one of them phrased as "do not post off it". Kreider
+           * any point read as +125 against an "over 0.5" of +500; DraftKings' real
+           * full-game over 0.5 on that market is +125, an exact match, and the +500 was
+           * his FIRST-PERIOD line. A verification tool that cries wolf is worse than no
+           * verification tool, because the next real mismatch gets ignored with the rest.
+           *
+           * Caught by pulling the over/under board for the same event and the same book
+           * and reading what DraftKings actually posts, rather than by believing my own
+           * instrument. That check is the only reason this is a bug report and not
+           * another retraction.
+           *
+           * A PLAIN `set` IS CORRECT, and I first shipped a merge branch here on the
+           * assumption that an alt-line ladder could produce several odds for one
+           * market. It cannot reach this key. `odds` is keyed BY oddID and an oddID is
+           * exactly {statID}-{statEntityID}-{periodID}-{betTypeID}-{sideID}, so there is
+           * at most ONE odd per key this index builds. A mutation run proved the merge
+           * branch unreachable: removing it broke no test, because no fixture could
+           * legally exercise it. Untestable code that looks defensive is worse than no
+           * code, so it is gone.
+           *
+           * WHAT THAT LEAVES OPEN. Alt lines therefore are NOT extra copies of the same
+           * oddID, and SGO's docs state the line is a separate field without saying how
+           * a ladder is represented. `unparsableOddIDsSeen` below is the instrument for
+           * finding out, rather than another assumption. */
+          if (parsed.side === "over" && parsed.period === periodCode) {
             const half = allBookPrices(odd).filter((b) => lineMatches(b.line, 0.5));
             if (half.length) {
               ouHalfBooks.set(`${parsed.entity}|${parsed.statID}`, half);
@@ -1441,6 +1481,7 @@ Error Handling:
                 ),
               },
               unparsableOddID: droppedUnparsable,
+              unparsableOddIDsSeen: unparsableSamples,
               /* RECONCILIATION, now spanning both sections. Every odd SGO returned is
                * either an accepted side in one of the two sections or counted under a
                * reason. If this is ever non-zero a drop path was added without a
@@ -1473,8 +1514,11 @@ Error Handling:
                 `each section. notInCatalog means the ` +
                 `books price a market the catalog does not list, which is drift, and the ` +
                 `statIDs are named. noBookPrice is a market carrying only a fair-odds model ` +
-                `number, which is never publishable. otherBetTypes is moneylines and ` +
-                `spreads, which belong to tkb_get_game_lines, not here. ` +
+                `number, which is never publishable. otherBetTypes is every betType this ` +
+                `board does not build: ml, sp and ml3way belong to tkb_get_game_lines, but ` +
+                `SGO also documents \`eo\` (even/odd) and \`prop\` (custom one-off), which are ` +
+                `PLAYER markets this connector has never handled anywhere. Read betTypesSeen ` +
+                `rather than assuming this bucket is only game lines. ` +
                 (wantYesNo
                   ? `Yes/no rows ARE included.`
                   : `Yes/no rows were NOT requested: ${allYesNoRows.length} are built and ` +

@@ -759,3 +759,137 @@ describe("v2.11.1 string-spelled booleans and numbers are accepted", () => {
     assert.equal(res.structuredContent?.lineGradedAgainst, 0.5);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 8. v2.11.2: the cross-check's own false-positive bug.
+// ---------------------------------------------------------------------------
+
+describe("v2.11.2 the 0.5 index is period-scoped", () => {
+  /* THE BUG. The index tested only `side === "over"`, which put it ahead of the period
+   * filter, so a hockey FIRST-PERIOD "points over 0.5" overwrote the full-game one and
+   * the cross-check compared a full-game yes/no price against a one-period line. It
+   * produced 25 mismatches on Montreal at Toronto, 2026-09-29, all false, each phrased
+   * "do not post off it". A verification tool that cries wolf is worse than none.
+   *
+   * The fixture is that event in miniature: DraftKings' real full-game goals+assists
+   * over 0.5 on Kreider is +125 and its yes/no is +125, while his FIRST-PERIOD 0.5 line
+   * is +500. Agreement is the correct verdict. */
+  const KR = "CHRIS_KREIDER_1_NHL";
+  const EV = {
+    eventID: "E",
+    type: "match",
+    status: { started: false, startsAt: "2026-09-30T23:00:00.000Z" },
+    teams: {
+      home: { teamID: "TOR", names: { long: "Toronto Maple Leafs" } },
+      away: { teamID: "MTL", names: { long: "Montreal Canadiens" } },
+    },
+    players: { [KR]: { playerID: KR, name: "Chris Kreider", teamID: "MTL" } },
+    odds: {
+      /* THE PERIOD ODD IS LISTED FIRST, DELIBERATELY. An earlier version of this test
+       * put the full-game odd first and passed even with the period scope removed,
+       * because the same fix also made the index first-write-wins and the good entry
+       * happened to arrive first. A mutation run caught that the test was not isolating
+       * the bug it claimed to. Object key order is insertion order, so putting the
+       * one-period line first is what reproduces the real failure. */
+      [`goals+assists-${KR}-1p-ou-over`]: bk("+500", "0.5"),
+      [`goals+assists-${KR}-game-ou-over`]: bk("+125", "0.5"),
+      [`goals+assists-${KR}-game-yn-yes`]: bk("+125"),
+    },
+  };
+  const call = async () => {
+    const sgo = { leagueIDFor: () => "NHL", getAllEvents: async () => [EV] } as never;
+    const { registerPropBoardTool } = await import("../src/tools/propBoard.js");
+    const { server, handlers } = captureServer();
+    registerPropBoardTool(server as never, sgo);
+    return (await handlers["tkb_get_prop_board"]({
+      sport: "nhl",
+      eventID: "E",
+      preferredBookmakers: "draftkings",
+      includeUnpriced: false,
+      includeAllBooks: false,
+      includeAltLines: false,
+      includeYesNo: true,
+    } as never)) as { structuredContent?: Record<string, unknown> };
+  };
+
+  test("a period 0.5 line does NOT become the full-game comparison", async () => {
+    const res = await call();
+    const yn = res.structuredContent!.yesNoRows as {
+      crossCheck: { status: string; overPrice: string };
+    }[];
+    assert.equal(yn[0].crossCheck.status, "agrees");
+    assert.equal(yn[0].crossCheck.overPrice, "+125");
+  });
+
+  test("and the board reports zero mismatches, not one", async () => {
+    const res = await call();
+    assert.equal(res.structuredContent!.yesNoCrossCheckMismatches, 0);
+  });
+
+  /* THE OTHER HALF OF THE FIX, isolated. Two full-game odds on the same market, which
+   * is what an alt-line ladder produces. Last-write-wins would let the second one
+   * replace a book's price; first-write-wins keeps it and adds only new books. */
+  test("a second full-game odd cannot replace a book's price in the index", async () => {
+    const withLadder = {
+      ...EV,
+      odds: {
+        [`goals+assists-${KR}-game-ou-over`]: bk("+125", "0.5"),
+        [`goals+assists-${KR}-game-yn-yes`]: bk("+125"),
+      },
+    };
+    // Two books on one odd, one of them at another line, plus a duplicate rung.
+    (withLadder.odds as Record<string, unknown>)[`goals+assists-${KR}-game-ou-over`] = {
+      byBookmaker: {
+        draftkings: { odds: "+125", overUnder: "0.5", available: true },
+        fanduel: { odds: "+900", overUnder: "2.5", available: true },
+      },
+    };
+    const sgo = { leagueIDFor: () => "NHL", getAllEvents: async () => [withLadder] } as never;
+    const { registerPropBoardTool } = await import("../src/tools/propBoard.js");
+    const { server, handlers } = captureServer();
+    registerPropBoardTool(server as never, sgo);
+    const res = (await handlers["tkb_get_prop_board"]({
+      sport: "nhl",
+      eventID: "E",
+      preferredBookmakers: "draftkings,fanduel",
+      includeUnpriced: false,
+      includeAllBooks: false,
+      includeAltLines: true,
+      includeYesNo: true,
+    } as never)) as { structuredContent?: Record<string, unknown> };
+    const yn = res.structuredContent!.yesNoRows as {
+      crossCheck: { status: string; book: string; overPrice: string };
+    }[];
+    // The 2.5 book must not be treated as a 0.5 comparison.
+    assert.equal(yn[0].crossCheck.status, "agrees");
+    assert.equal(yn[0].crossCheck.book, "draftkings");
+    assert.equal(yn[0].crossCheck.overPrice, "+125");
+  });
+
+  test("unparsable oddIDs are NAMED now, not just counted", async () => {
+    const sgo = {
+      leagueIDFor: () => "NHL",
+      getAllEvents: async () => [
+        { ...EV, odds: { ...EV.odds, "not-a-valid-oddid-at-all-x-y-z": bk("-110", "1.5") } },
+      ],
+    } as never;
+    const { registerPropBoardTool } = await import("../src/tools/propBoard.js");
+    const { server, handlers } = captureServer();
+    registerPropBoardTool(server as never, sgo);
+    const res = (await handlers["tkb_get_prop_board"]({
+      sport: "nhl",
+      eventID: "E",
+      preferredBookmakers: "draftkings",
+      includeUnpriced: false,
+      includeAllBooks: false,
+      includeAltLines: false,
+      includeYesNo: true,
+    } as never)) as { structuredContent?: Record<string, unknown> };
+    const cov = res.structuredContent!.coverage as {
+      unparsableOddID: number;
+      unparsableOddIDsSeen: string[];
+    };
+    assert.equal(cov.unparsableOddID, 1);
+    assert.deepEqual(cov.unparsableOddIDsSeen, ["not-a-valid-oddid-at-all-x-y-z"]);
+  });
+});
