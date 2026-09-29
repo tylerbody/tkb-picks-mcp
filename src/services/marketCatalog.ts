@@ -79,14 +79,28 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
     { statID: "pitching_basesOnBalls", label: "Walks (pitcher)" },
     { statID: "batting_basesOnBalls", label: "Walks (batter)" },
   ],
+  // WNBA. SEE THE ONE-BASKETBALL-NAMESPACE NOTE ON `cbb` BELOW. Four statIDs that the
+  // cbb block has carried since it was written were missing here, which is backwards:
+  // the namespace is shared, so a spelling documented for one basketball league is
+  // documented for all of them. The drift detector in tkb_get_prop_board could not
+  // surface this, because none of the four were priced on the playoff boards measured
+  // on 2026-09-29 (statIDsNotInCatalog was empty on a 422-odd Aces/Fever event). The
+  // gap was found by diffing the two blocks, not by measurement, and a market that is
+  // not posted still returns no odds, so the cost of listing it is zero and the cost
+  // of omitting it is an invisible hole on the first regular-season board that does
+  // post it. ADDED v2.10.9: fieldGoalsAttempted, minutesPlayed, offensiveRebounds,
+  // threePointersAttempted.
   wnba: [
     { statID: "assists", label: "Assists" },
     { statID: "blocks", label: "Blocks" },
     { statID: "blocks+steals", label: "Blocks + Steals" },
     { statID: "fantasyScore", label: "Fantasy Score" },
+    { statID: "fieldGoalsAttempted", label: "Field Goals Attempted" },
     { statID: "fieldGoalsMade", label: "Field Goals Made" },
     { statID: "freeThrowsAttempted", label: "Free Throws Attempted" },
     { statID: "freeThrowsMade", label: "Free Throws Made" },
+    { statID: "minutesPlayed", label: "Minutes Played" },
+    { statID: "offensiveRebounds", label: "Offensive Rebounds" },
     { statID: "points+assists", label: "Points + Assists" },
     { statID: "points+rebounds", label: "Points + Rebounds" },
     { statID: "points+rebounds+assists", label: "Points + Rebounds + Assists" },
@@ -94,6 +108,7 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
     { statID: "rebounds+assists", label: "Rebounds + Assists" },
     { statID: "points", label: "Score" },
     { statID: "steals", label: "Steals" },
+    { statID: "threePointersAttempted", label: "Three Pointers Attempted" },
     { statID: "threePointersMade", label: "Three Pointers Made" },
     { statID: "turnovers", label: "Turnovers" },
   ],
@@ -187,8 +202,10 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
   //
   // SGO HAS ONE BASKETBALL STAT NAMESPACE. Its stats page lists basketball statIDs
   // once, not per league, so NBA, WNBA and NCAAB share identical spellings. These
-  // are therefore the WNBA entries verbatim, minus nothing and plus the two-pointer
-  // splits, rather than a parallel guess at college-specific names.
+  // are therefore the WNBA entries verbatim, rather than a parallel guess at
+  // college-specific names. The two blocks are kept identical on purpose and a test
+  // asserts it, because the four-market drift fixed in v2.10.9 happened precisely
+  // because nothing was checking that they matched.
   //
   // WHICH of these actually carry posted odds on a given college board is a separate
   // COVERAGE question, and an early-season mid-major game will post far fewer than a

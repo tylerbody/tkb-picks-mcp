@@ -647,11 +647,15 @@ Error Handling:
         let seenOdds = 0;
         let droppedUnparsable = 0;
         let droppedNotOverUnder = 0;
+        let droppedNonOverUnderSide = 0;
         let droppedNonGamePeriod = 0;
         const droppedPeriods = new Map<string, number>();
+        const droppedSides = new Map<string, number>();
         let droppedNotInCatalog = 0;
         const droppedStatIDs = new Map<string, number>();
         let droppedTeamOrUnknownEntity = 0;
+        let droppedNoBookPrice = 0;
+        let droppedUnparsableLine = 0;
 
         for (const [oddID, odd] of Object.entries(event.odds ?? {})) {
           seenOdds++;
@@ -679,7 +683,18 @@ Error Handling:
             continue;
           }
 
-          if (parsed.side !== "over" && parsed.side !== "under") continue;
+          /* SIDE VOCABULARY. betType `ou` is an over/under market, but SGO still emits
+           * sides this board cannot use on it: `yes`, `no`, and the `home`/`away`
+           * team-sided spellings. This filter has always been here and until v2.10.9
+           * it was the ONE drop path with no counter, which meant `seenOdds` did not
+           * reconcile: on a 422-odd WNBA board roughly 32 odds vanished into a bucket
+           * that was not reported. A denominator that does not add up is worse than
+           * no denominator, because it reads as complete. */
+          if (parsed.side !== "over" && parsed.side !== "under") {
+            droppedNonOverUnderSide++;
+            droppedSides.set(parsed.side, (droppedSides.get(parsed.side) ?? 0) + 1);
+            continue;
+          }
 
           // NOT IN THE HARDCODED CATALOG. This is the one that can hide a market the
           // books do offer, because OU_PROP_MARKETS is maintained by hand. Recording
@@ -707,6 +722,7 @@ Error Handling:
             if (odd.cancelled) {
               cancelledCount++;
             } else {
+              droppedNoBookPrice++;
               // One entry per player/market rather than per side, since both
               // sides of an unpriced market fail for the same reason.
               const key = `${playerName} | ${label}`;
@@ -721,7 +737,12 @@ Error Handling:
           }
 
           const line = parseFloat(priced.value.line ?? "");
-          if (Number.isNaN(line)) continue;
+          if (Number.isNaN(line)) {
+            // A priced side whose line is missing or non-numeric. Rare, and previously
+            // silent, which is the same reconciliation defect as the side filter above.
+            droppedUnparsableLine++;
+            continue;
+          }
 
           sides.push({
             playerID: parsed.entity,
@@ -871,12 +892,35 @@ Error Handling:
               rowsReturned: rows.length,
               dropped: {
                 notOverUnder: droppedNotOverUnder,
+                nonOverUnderSide: droppedNonOverUnderSide,
                 nonGamePeriod: droppedNonGamePeriod,
                 notInCatalog: droppedNotInCatalog,
                 teamOrUnknownEntity: droppedTeamOrUnknownEntity,
                 unparsableOddID: droppedUnparsable,
+                noBookPrice: droppedNoBookPrice,
+                cancelled: cancelledCount,
+                unparsableLine: droppedUnparsableLine,
               },
+              /* RECONCILIATION. sidesAccepted plus every dropped bucket must equal
+               * seenOdds. If `unaccounted` is ever non-zero, a drop path was added
+               * without a counter and this board is hiding markets again. */
+              sidesAccepted: sides.length,
+              unaccounted:
+                seenOdds -
+                sides.length -
+                droppedUnparsable -
+                droppedNotOverUnder -
+                droppedNonOverUnderSide -
+                droppedNonGamePeriod -
+                droppedNotInCatalog -
+                droppedTeamOrUnknownEntity -
+                droppedNoBookPrice -
+                cancelledCount -
+                droppedUnparsableLine,
               // Named so a real gap is identifiable rather than just counted.
+              sidesNotOverUnder: Object.fromEntries(
+                [...droppedSides.entries()].sort((a, b) => b[1] - a[1])
+              ),
               nonGamePeriodsSeen: Object.fromEntries(
                 [...droppedPeriods.entries()].sort((a, b) => b[1] - a[1])
               ),
@@ -886,7 +930,9 @@ Error Handling:
               note:
                 `Over/under, catalog markets only, period ${requestedPeriod} (${periodCode}). ` +
                 `notOverUnder is mostly yes/no milestone markets (anytime scorer, first scorer, ` +
-                `double-double), reachable only via tkb_get_yes_no_prop. nonGamePeriod is halves, ` +
+                `double-double), reachable only via tkb_get_yes_no_prop. nonOverUnderSide is an `+
+                `ou market carrying a side this board cannot use (yes/no, home/away); the sides `+
+                `are named above. nonGamePeriod is halves, ` +
                 `quarters, hockey periods and first-N-innings props. notInCatalog means the books ` +
                 `price a market that OU_PROP_MARKETS does not list, which is catalog drift and ` +
                 `the statIDs are named above. ` +

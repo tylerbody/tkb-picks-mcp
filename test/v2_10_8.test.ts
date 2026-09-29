@@ -8,8 +8,14 @@ import { PERIOD_CODES } from "../src/services/oddIdBuilder.js";
  * blind spot on the empty-board path.
  *
  * Everything added here came from MEASUREMENT, not from reading a docs page. The sweep
- * across 13 boards on 2026-09-28 and 2026-09-29 found MLB and WNBA perfectly aligned
- * with zero missing statIDs, and concentrated the drift in football.
+ * across 13 boards on 2026-09-28 and 2026-09-29 concentrated the drift in football.
+ *
+ * CORRECTED IN v2.10.9. This comment used to say the sweep found MLB and WNBA "perfectly
+ * aligned with zero missing statIDs". That overstated what the sweep can prove. An empty
+ * `statIDsNotInCatalog` means no UNCATALOGUED market was PRICED on the events measured,
+ * not that the catalog is complete. WNBA was in fact four markets short of the shared
+ * basketball namespace the whole time; see test/v2_10_9.test.ts, which checks the two
+ * basketball blocks structurally instead of waiting for a book to post the market.
  */
 
 const captureServer = () => {
@@ -94,10 +100,13 @@ describe("v2.10.8 catalog additions", () => {
     }
   });
 
-  test("REGRESSION: MLB and WNBA were already aligned and are untouched", () => {
+  test("REGRESSION: MLB is untouched by the football work", () => {
     assert.equal(OU_PROP_MARKETS.mlb.length, 20);
-    assert.equal(OU_PROP_MARKETS.wnba.length, 16);
   });
+
+  /* WNBA MOVED 16 -> 20 IN v2.10.9, and the count now lives in that release's test
+   * alongside the parity check that justifies it. The assertion is not restated here,
+   * because a count pinned in two files drifts in one of them. */
 });
 
 describe("v2.10.8 period access", () => {
