@@ -169,6 +169,53 @@ export class EspnClient {
   fetchRoster(path: EspnLeaguePath, teamEspnId: string) {
     return this.get<unknown>(this.rosterUrl(path, teamEspnId));
   }
+
+  /**
+   * FETCH AN ARBITRARY ESPN URL, for host testing only. Added v2.12.1.
+   *
+   * WHY. The first live probe found that Render reaches `site.web.api.espn.com` with a
+   * 200 and gets a **403** from `site.api.espn.com`, which is where teams and rosters
+   * live. The same two hosts both return 200 from a browser. So the player-id mapping
+   * path is blocked at the host level from this server, and finding a reachable
+   * alternative means testing candidate hosts FROM RENDER - a browser cannot answer it.
+   *
+   * Hard-restricted to https and a hostname inside espn.com. This exists to test one
+   * vendor's hosts, not to become a general fetcher, and a tool that will retrieve any
+   * URL on request is a liability regardless of intent.
+   */
+  fetchRawEspn(rawUrl: string) {
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      return Promise.resolve<EspnFetchResult<unknown>>({
+        ok: false,
+        elapsedMs: 0,
+        url: rawUrl,
+        reason: `Not a valid URL.`,
+      });
+    }
+    if (parsed.protocol !== "https:") {
+      return Promise.resolve<EspnFetchResult<unknown>>({
+        ok: false,
+        elapsedMs: 0,
+        url: rawUrl,
+        reason: `Refused: only https is allowed, got "${parsed.protocol}".`,
+      });
+    }
+    if (parsed.hostname !== "espn.com" && !parsed.hostname.endsWith(".espn.com")) {
+      return Promise.resolve<EspnFetchResult<unknown>>({
+        ok: false,
+        elapsedMs: 0,
+        url: rawUrl,
+        reason:
+          `Refused: this probe only fetches espn.com hosts, got "${parsed.hostname}". ` +
+          `It exists to test which ESPN hosts this server can reach, not to fetch ` +
+          `arbitrary URLs.`,
+      });
+    }
+    return this.get<unknown>(parsed.toString());
+  }
 }
 
 /* ===========================================================================
@@ -272,11 +319,44 @@ export function parseStatValue(raw: string | undefined): {
   value: number | null;
   made?: number;
   attempted?: number;
-  form: "number" | "made-attempted" | "unparsable" | "absent";
+  /** Whole minutes on a duration, e.g. 20 for "20:14". */
+  minutes?: number;
+  /** Total seconds on a duration, e.g. 1214 for "20:14". */
+  seconds?: number;
+  form: "number" | "made-attempted" | "duration" | "unparsable" | "absent";
 } {
   if (raw === undefined || raw === null || raw === "") return { value: null, form: "absent" };
   const s = String(raw).trim();
   if (s === "" || s === "--") return { value: null, form: "absent" };
+
+  /* ---- mm:ss DURATIONS, ADDED v2.12.1 FROM A LIVE PROBE ----
+   *
+   * Hockey TOI/G came back as "20:14" and PROD as "0:00". Both were correctly refused as
+   * unparsable by the first cut, which is the guard working: a time string read as a
+   * number is NaN, and read as 20 it silently loses the seconds.
+   *
+   * This confirms the UNIT CAUTION written on the NHL "Time On Ice" market in v2.10.8.
+   * The unit is minutes and seconds, so a Time On Ice prop line of 19.5 means 19:30, and
+   * anything comparing 19.5 against a raw "20:14" would be comparing a number to a
+   * string. Value is returned in MINUTES as a decimal, which is the unit the prop is
+   * quoted in, with seconds alongside for anyone who needs the exact figure.
+   *
+   * Checked BEFORE the dash pair on purpose: a colon and a dash are different separators
+   * and "20:14" must never be mistaken for a made-attempted pair. */
+  const dur = /^(\d+):([0-5]\d)$/.exec(s);
+  if (dur) {
+    const mins = Number(dur[1]);
+    const secs = Number(dur[2]);
+    if (!Number.isFinite(mins) || !Number.isFinite(secs)) {
+      return { value: null, form: "unparsable" };
+    }
+    return {
+      value: mins + secs / 60,
+      minutes: mins,
+      seconds: mins * 60 + secs,
+      form: "duration",
+    };
+  }
 
   const pair = /^(-?\d+(?:\.\d+)?)-(-?\d+(?:\.\d+)?)$/.exec(s);
   if (pair) {
@@ -295,15 +375,34 @@ export function parseStatValue(raw: string | undefined): {
   return { value: null, form: "unparsable" };
 }
 
-/** Which label indexes carry the made-attempted form, measured from real rows. */
-export function detectPairedColumns(labels: string[], rows: FlattenedGame[]): number[] {
-  const paired = new Set<number>();
+/** Which label indexes carry a given non-plain form, measured from real rows. */
+function detectColumnsOfForm(
+  labels: string[],
+  rows: FlattenedGame[],
+  form: string
+): number[] {
+  const found = new Set<number>();
   for (const row of rows) {
     row.stats.forEach((raw, i) => {
-      if (parseStatValue(raw).form === "made-attempted") paired.add(i);
+      if (parseStatValue(raw).form === form) found.add(i);
     });
   }
-  return [...paired].sort((a, b) => a - b).filter((i) => i < labels.length);
+  return [...found].sort((a, b) => a - b).filter((i) => i < labels.length);
+}
+
+/** Which label indexes carry the made-attempted form, measured from real rows. */
+export function detectPairedColumns(labels: string[], rows: FlattenedGame[]): number[] {
+  return detectColumnsOfForm(labels, rows, "made-attempted");
+}
+
+/** Which label indexes carry an mm:ss duration. v2.12.1, found on hockey TOI/G. */
+export function detectDurationColumns(labels: string[], rows: FlattenedGame[]): number[] {
+  return detectColumnsOfForm(labels, rows, "duration");
+}
+
+/** Which label indexes could not be parsed at all. Named so a new form is never silent. */
+export function detectUnparsableColumns(labels: string[], rows: FlattenedGame[]): number[] {
+  return detectColumnsOfForm(labels, rows, "unparsable");
 }
 
 /** Pull id + displayName pairs out of a roster response without assuming its nesting. */

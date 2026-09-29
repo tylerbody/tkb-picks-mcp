@@ -379,3 +379,118 @@ describe("v2.12.0 the probe reports the shape it found", () => {
     assert.equal(res.structuredContent!.reconciles, true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// v2.12.1: what the FIRST LIVE PROBE found.
+//
+// 1. Render gets 200 from site.web.api.espn.com and 403 from site.api.espn.com, which is
+//    where teams and rosters live. A browser gets 200 from both. The id-mapping path is
+//    blocked at the host level from the server, which is exactly what the probe was for.
+// 2. Hockey TOI/G is "20:14" and PROD is "0:00". Correctly refused by the first cut, and
+//    now parsed, because a Time On Ice prop is quoted in minutes.
+// ---------------------------------------------------------------------------
+
+describe("v2.12.1 mm:ss durations", () => {
+  test("hockey TOI parses to minutes as a decimal, keeping the seconds", async () => {
+    const { parseStatValue } = await import("../src/services/espnClient.js");
+    const p = parseStatValue("20:14");
+    assert.equal(p.form, "duration");
+    assert.equal(p.minutes, 20);
+    assert.equal(p.seconds, 1214);
+    assert.ok(Math.abs(p.value! - 20.2333) < 0.001, `got ${p.value}`);
+  });
+
+  /* THE UNIT MATTERS. A Time On Ice line of 19.5 means 19:30, so 19:45 is OVER and 19:20
+   * is UNDER. Truncating to whole minutes would grade both as 19. */
+  test("a line of 19.5 separates 19:45 from 19:20, which whole minutes would not", async () => {
+    const { parseStatValue } = await import("../src/services/espnClient.js");
+    assert.ok(parseStatValue("19:45").value! > 19.5);
+    assert.ok(parseStatValue("19:20").value! < 19.5);
+    assert.equal(parseStatValue("19:45").minutes, parseStatValue("19:20").minutes);
+  });
+
+  test("zero duration is a real zero, not an absence", async () => {
+    const { parseStatValue } = await import("../src/services/espnClient.js");
+    const p = parseStatValue("0:00");
+    assert.equal(p.form, "duration");
+    assert.equal(p.value, 0);
+    assert.equal(p.seconds, 0);
+  });
+
+  /* A COLON IS NOT A DASH. "20:14" must never be read as made-attempted, and a dash pair
+   * must never be read as a duration. */
+  test("durations and made-attempted pairs do not collide", async () => {
+    const { parseStatValue } = await import("../src/services/espnClient.js");
+    assert.equal(parseStatValue("20:14").form, "duration");
+    assert.equal(parseStatValue("7-21").form, "made-attempted");
+    // Nonsense minute/second values are refused rather than coerced.
+    assert.equal(parseStatValue("20:99").form, "unparsable");
+    assert.equal(parseStatValue("20:1").form, "unparsable");
+  });
+
+  test("duration columns are detected and reported apart from paired ones", async () => {
+    const { detectDurationColumns, detectPairedColumns, detectUnparsableColumns } =
+      await import("../src/services/espnClient.js");
+    const NHL_LABELS = ["G","A","PTS","+/-","PIM","S","SPCT","PPG","PPA","SHG","SHA","GWG","TOI/G","PROD"];
+    // Verbatim from the live NHL probe, eventId 401874176.
+    const rows = [{ eventId: "401874176", seasonType: "r", category: "c",
+      stats: ["0","0","0","1","0","1","0.0","0","0","0","0","0","20:14","0:00"] }];
+    assert.deepEqual(detectDurationColumns(NHL_LABELS, rows), [12, 13]);
+    assert.deepEqual(detectPairedColumns(NHL_LABELS, rows), []);
+    assert.deepEqual(detectUnparsableColumns(NHL_LABELS, rows), []);
+  });
+});
+
+describe("v2.12.1 the raw host probe is restricted", () => {
+  const client = new EspnClient();
+
+  test("a non-espn host is refused, and says why", async () => {
+    const r = await client.fetchRawEspn("https://example.com/whatever");
+    assert.equal(r.ok, false);
+    assert.match(r.reason!, /only fetches espn\.com hosts/);
+  });
+
+  /* A hostname that merely ENDS in the string is not a subdomain. notespn.com and
+   * espn.com.evil.test must both be refused. */
+  test("a lookalike hostname does not pass", async () => {
+    for (const url of [
+      "https://notespn.com/x",
+      "https://espn.com.evil.test/x",
+      "https://myespn.com/x",
+    ]) {
+      const r = await client.fetchRawEspn(url);
+      assert.equal(r.ok, false, url);
+      assert.match(r.reason!, /only fetches espn\.com hosts/, url);
+    }
+  });
+
+  test("http is refused even on an espn host", async () => {
+    const r = await client.fetchRawEspn("http://site.api.espn.com/x");
+    assert.equal(r.ok, false);
+    assert.match(r.reason!, /only https/);
+  });
+
+  test("garbage is refused without throwing", async () => {
+    const r = await client.fetchRawEspn("not a url");
+    assert.equal(r.ok, false);
+    assert.match(r.reason!, /Not a valid URL/);
+  });
+
+  test("the raw mode is reported as its own mode through the handler", async () => {
+    const res = await callProbe({ league: "wnba", rawUrl: "https://site.api.espn.com/x" }, stubClient({
+      fetchRawEspn: async () => ({ ok: false, status: 403, elapsedMs: 40, url: "https://site.api.espn.com/x", reason: "ESPN returned HTTP 403." }),
+    }));
+    assert.equal(res.structuredContent!.mode, "rawUrl");
+    assert.equal(res.structuredContent!.status, 403);
+    assert.equal(res.structuredContent!.reachable, false);
+    assert.match(res.content[0].text, /NOT REACHABLE/);
+  });
+
+  test("rawUrl takes precedence over the other modes, so it is unambiguous", async () => {
+    const res = await callProbe({ league: "wnba", espnId: "3149391", rawUrl: "https://site.web.api.espn.com/ok" }, stubClient({
+      fetchRawEspn: async () => ({ ok: true, status: 200, elapsedMs: 12, url: "https://site.web.api.espn.com/ok", data: { a: 1, b: 2 } }),
+    }));
+    assert.equal(res.structuredContent!.mode, "rawUrl");
+    assert.deepEqual(res.structuredContent!.topLevelKeys, ["a", "b"]);
+  });
+});

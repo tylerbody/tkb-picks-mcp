@@ -7,6 +7,8 @@ import {
   flattenGamelog,
   parseStatValue,
   detectPairedColumns,
+  detectDurationColumns,
+  detectUnparsableColumns,
   extractRoster,
   type EspnGamelog,
 } from "../services/espnClient.js";
@@ -37,6 +39,12 @@ const ProbeInputSchema = z
     includePreseason: flexBoolean(false).describe(
       "Include preseason games in the flattened count. Off by default: a preseason game is not evidence for a regular-season prop."
     ),
+    rawUrl: z
+      .string()
+      .optional()
+      .describe(
+        "HOST TEST ONLY. Fetch one espn.com URL and report status, elapsed ms and top-level keys. Added v2.12.1 because the first live probe found this server gets 200 from site.web.api.espn.com and 403 from site.api.espn.com, which is where teams and rosters live, while a browser gets 200 from both. Only a call FROM THIS SERVER can tell which hosts are reachable. Restricted to https and hostnames inside espn.com."
+      ),
     sampleRows: flexIntOptional(1, 10).describe(
       "How many real stat rows to return, label-mapped, so the shape can be eyeballed. Default 2."
     ),
@@ -103,6 +111,39 @@ Examples:
               },
             ],
             isError: true,
+          };
+        }
+
+        // ---- Mode 0: raw host test. Checked first so it is never ambiguous. ----
+        if (input.rawUrl) {
+          const res = await espn.fetchRawEspn(input.rawUrl);
+          const keys =
+            res.ok && res.data && typeof res.data === "object"
+              ? Object.keys(res.data as Record<string, unknown>).slice(0, 40).sort()
+              : [];
+          const athletes = res.ok ? extractRoster(res.data).slice(0, 40) : [];
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: res.ok
+                  ? `REACHABLE: HTTP ${res.status} in ${res.elapsedMs}ms.\n\n` +
+                    `${res.url}\n\nTop-level keys: ${keys.join(", ") || "(none)"}\n\n` +
+                    (athletes.length
+                      ? `Athlete-shaped entries found (${athletes.length}):\n` +
+                        `${JSON.stringify(athletes, null, 2)}`
+                      : `No athlete-shaped entries found by the extractor.`)
+                  : `NOT REACHABLE.\n\n${res.reason}\n\n${res.url}`,
+              },
+            ],
+            structuredContent: {
+              mode: "rawUrl",
+              reachable: res.ok,
+              status: res.status,
+              elapsedMs: res.elapsedMs,
+              url: res.url,
+              ...(res.ok ? { topLevelKeys: keys, athletes } : { reason: res.reason }),
+            },
           };
         }
 
@@ -235,6 +276,11 @@ Examples:
         const allGames = flattenGamelog(log, { includePreseason: true }).games.length;
 
         const paired = detectPairedColumns(labels, flat.games);
+        /* NAMED SEPARATELY, v2.12.1. Hockey TOI/G is "20:14" and PROD is "0:00", neither
+         * a number nor a made-attempted pair. Reporting them as a third and fourth kind
+         * keeps a new column form from reading as a parse failure, or worse, as a zero. */
+        const durations = detectDurationColumns(labels, flat.games);
+        const unparsable = detectUnparsableColumns(labels, flat.games);
 
         const samples = flat.games.slice(0, sampleRows).map((g) => ({
           eventId: g.eventId,
@@ -273,7 +319,11 @@ Examples:
                 `reading categories[0] gets one month, not a season):\n` +
                 `${JSON.stringify(flat.structure, null, 2)}\n\n` +
                 `PAIRED COLUMNS (made-attempted, e.g. "7-21" - these are NOT numbers): ` +
-                `${paired.length ? paired.map((i) => `${i}:${labels[i]}`).join(", ") : "none"}\n\n` +
+                `${paired.length ? paired.map((i) => `${i}:${labels[i]}`).join(", ") : "none"}\n` +
+                `DURATION COLUMNS (mm:ss, value returned in minutes): ` +
+                `${durations.length ? durations.map((i) => `${i}:${labels[i]}`).join(", ") : "none"}\n` +
+                `STILL UNPARSABLE (a form nothing handles yet - do NOT use these): ` +
+                `${unparsable.length ? unparsable.map((i) => `${i}:${labels[i]}`).join(", ") : "none"}\n\n` +
                 (flat.lengthMismatches.length
                   ? `LENGTH MISMATCHES (${flat.lengthMismatches.length}), dropped and named: ` +
                     `${JSON.stringify(flat.lengthMismatches.slice(0, 5))}\n\n`
@@ -301,6 +351,10 @@ Examples:
             seasonStructure: flat.structure,
             pairedColumnIndexes: paired,
             pairedColumnLabels: paired.map((i) => labels[i]),
+            durationColumnIndexes: durations,
+            durationColumnLabels: durations.map((i) => labels[i]),
+            unparsableColumnIndexes: unparsable,
+            unparsableColumnLabels: unparsable.map((i) => labels[i]),
             lengthMismatches: flat.lengthMismatches.slice(0, 10),
             sampleRows: samples,
             preseasonIncluded: includePreseason,
