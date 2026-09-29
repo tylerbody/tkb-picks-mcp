@@ -4,7 +4,11 @@ import type { SGOClient } from "../services/sgoClient.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import type { NHLStatsClient } from "../services/nhlStatsClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
-import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
+import {
+  OU_PROP_MARKETS,
+  YES_NO_MARKETS,
+  yesNoGradingFor,
+} from "../services/marketCatalog.js";
 import { gameTotalStatFor, SUPPORTED_SPORTS, hasDrawOutcome, matchLinePeriodFor, type SportKey } from "../constants.js";
 import {
   gradeSpread,
@@ -52,26 +56,42 @@ const GradeInputSchema = z
     sport: z.enum(SUPPORTED_SPORTS as [SportKey, ...SportKey[]]).describe("Which sport"),
     eventID: z.string().describe("SGO eventID for the finished game."),
     marketType: z
-      .enum(["moneyline", "moneyline_3way", "spread", "total", "player_prop"])
+      .enum([
+        "moneyline",
+        "moneyline_3way",
+        "spread",
+        "total",
+        "player_prop",
+        "player_yes_no",
+      ])
       .describe(
         "Which kind of pick is being graded. moneyline_3way is the SOCCER 1X2 price, " +
           "where the draw is its own selectable outcome and a draw is a LOSS for a team " +
-          "pick. Use plain moneyline for a two-way price."
+          "pick. Use plain moneyline for a two-way price. player_yes_no is the MILESTONE " +
+          "market added in v2.11.0 - anytime goalscorer, any home run, any touchdown - " +
+          "which takes side='yes' or 'no' and NO postedLine, because the market has no " +
+          "line. Not every yes/no market can be settled; the tool refuses the ones that " +
+          "cannot by name."
       ),
     side: z
-      .enum(["over", "under", "home", "away", "draw"])
+      .enum(["over", "under", "home", "away", "draw", "yes", "no"])
       .describe(
         "The side that was picked. home/away for moneyline, moneyline_3way and spread; " +
-          "over/under for total and player_prop; draw ONLY on moneyline_3way."
+          "over/under for total and player_prop; draw ONLY on moneyline_3way; " +
+          "yes/no ONLY on player_yes_no."
       ),
     marketLabel: z
       .string()
       .optional()
-      .describe("Required for player_prop. Exact stat name, e.g. 'Passing Yards', 'Hits'."),
+      .describe(
+        "Required for player_prop and player_yes_no. Exact market name, e.g. 'Passing Yards', " +
+          "'Hits', 'Anytime Goalscorer'. Resolved against OU_PROP_MARKETS for player_prop and " +
+          "YES_NO_MARKETS for player_yes_no."
+      ),
     playerID: z
       .string()
       .optional()
-      .describe("Required for player_prop. SGO playerID."),
+      .describe("Required for player_prop and player_yes_no. SGO playerID."),
     playerName: z.string().optional().describe("Player display name, for output labeling."),
     postedLine: z
       .number()
@@ -89,13 +109,36 @@ const GradeInputSchema = z
 
 type GradeInput = z.infer<typeof GradeInputSchema>;
 
-const MARKET_TYPE_CODE: Record<string, "ml" | "sp" | "ou" | "ml3way"> = {
+const MARKET_TYPE_CODE: Record<string, "ml" | "sp" | "ou" | "ml3way" | "yn"> = {
   moneyline: "ml",
   moneyline_3way: "ml3way",
   spread: "sp",
   total: "ou",
   player_prop: "ou",
+  player_yes_no: "yn",
 };
+
+/* ===========================================================================
+ * GRADING A YES/NO PICK, v2.11.0
+ *
+ * A yes/no market is an over/under at 0.5 wearing different clothes: `yes` is `over`,
+ * `no` is `under`, the line is 0.5, and 0.5 cannot push. So this path does NOT get its
+ * own grading logic. It converts the side, fixes the line, and runs the same
+ * gradePlayerProp the over/under path runs.
+ *
+ * THAT REUSE IS THE POINT, not a shortcut. gradePlayerProp carries the DNP
+ * discriminator: a zero in the settlement feed is both a real zero and a player who
+ * never appeared, and it asks the box score which one it is. A yes/no market is where
+ * that distinction bites hardest. "Any Hits" graded naively off a zero posts a LOSS on
+ * a batter who was scratched, and a bespoke yes/no grader would have had to rediscover
+ * that. Writing a second settlement path would mean two places for the same bug.
+ *
+ * NO postedLine IS REQUIRED OR ACCEPTED as meaningful here, because the market has no
+ * line to post. That is the one refusal in this tool that yes/no picks are exempt from,
+ * and the exemption is narrow: everything else, including the finalized-event check and
+ * the participation resolution, applies unchanged.
+ */
+const YES_NO_LINE = 0.5;
 
 export function registerGradePicksTool(
   server: McpServer,
@@ -155,12 +198,15 @@ Error Handling:
     },
     async (params: GradeInput) => {
       try {
-        if (params.marketType === "player_prop" && (!params.marketLabel || !params.playerID)) {
+        const isPlayerMarket =
+          params.marketType === "player_prop" || params.marketType === "player_yes_no";
+
+        if (isPlayerMarket && (!params.marketLabel || !params.playerID)) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: "Error: marketType='player_prop' requires both marketLabel and playerID.",
+                text: `Error: marketType='${params.marketType}' requires both marketLabel and playerID.`,
               },
             ],
             isError: true,
@@ -177,7 +223,12 @@ Error Handling:
         // Listed explicitly rather than as "not a moneyline variant" so that adding
         // a market type later cannot silently inherit the wrong side of it.
         const marketHasNoLine =
-          params.marketType === "moneyline" || params.marketType === "moneyline_3way";
+          params.marketType === "moneyline" ||
+          params.marketType === "moneyline_3way" ||
+          // v2.11.0. A milestone market has no line to post, so refusing it for a
+          // missing postedLine would be the same category error the moneyline_3way
+          // case was: correct machinery pointed at the wrong market type.
+          params.marketType === "player_yes_no";
 
         // A three-way price on a sport that cannot draw is a mis-logged pick, and
         // saying so beats grading it as though the market existed.
@@ -222,6 +273,26 @@ Error Handling:
           };
         }
 
+        /* CHECKED BEFORE THE PER-MARKET SIDE RULES, v2.11.0. Placed here for the same
+         * reason the draw guard is: a yes/no side on any other market type means the
+         * pick was logged wrong, and the generic "requires over or under" message
+         * would describe the symptom instead of naming the mistake. */
+        const sideIsYesNo = params.side === "yes" || params.side === "no";
+        if (params.marketType !== "player_yes_no" && sideIsYesNo) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `Error: side='${params.side}' is only valid with ` +
+                  `marketType='player_yes_no'. A yes/no side does not exist on a ` +
+                  `${params.marketType} market.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
         if (
           (params.marketType === "moneyline" ||
             params.marketType === "moneyline_3way" ||
@@ -257,6 +328,26 @@ Error Handling:
           };
         }
 
+        /* YES/NO SIDE VOCABULARY, GUARDED BOTH WAYS, v2.11.0. Same shape of guard as
+         * the one lineMovement got in v2.10.3, and for the same reason: a side that
+         * belongs to another market type means the pick was logged wrong, and grading
+         * it anyway would settle a bet nobody placed. A yes on an over/under market
+         * would build an oddID that matches nothing and read as missing data. */
+        if (params.marketType === "player_yes_no" && !sideIsYesNo) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `Error: marketType='player_yes_no' is sided by YES/NO, so side must be ` +
+                  `'yes' or 'no'. Got '${params.side}'. If this was an over/under prop, ` +
+                  `use marketType='player_prop' and pass the postedLine.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
         // A TOTAL IS NOT ALWAYS COUNTING POINTS. A fight total counts ROUNDS and a
         // tennis total counts GAMES; `points` is the winner stat, not the total
         // stat. See GAME_TOTAL_STAT in constants.ts for the measurement.
@@ -280,12 +371,54 @@ Error Handling:
           statID = market.statID;
         }
 
+        if (params.marketType === "player_yes_no") {
+          const catalog = YES_NO_MARKETS[params.sport];
+          const market = catalog.find(
+            (m) => m.label.toLowerCase() === params.marketLabel!.toLowerCase()
+          );
+          if (!market) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `"${params.marketLabel}" is not a recognized yes/no market for ` +
+                    `${params.sport.toUpperCase()}. Valid options: ` +
+                    `${catalog.map((m) => m.label).join(", ") || "none - this sport has no yes/no catalog"}`,
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          /* REFUSED BY NAME, NOT GRADED BADLY. First basket, double-double, first and
+           * last touchdown, pitching win, method of victory: none of these can be
+           * settled from a stat total, and inferring one would be exactly the
+           * plausible-looking wrong answer this tool exists not to give. See
+           * yesNoGradingFor in marketCatalog.ts for how the set is derived. */
+          const grading = yesNoGradingFor(params.sport, market.statID);
+          if (!grading.gradeable) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `CANNOT GRADE "${market.label}" automatically.\n\n${grading.reason}\n\n` +
+                    `The odds for this market are still pullable and postable; only the ` +
+                    `settlement is manual. Nothing is being guessed here.`,
+                },
+              ],
+            };
+          }
+          statID = market.statID;
+        }
+
         // ENTITY FOR A THREE-WAY DRAW IS `all`, NOT A TEAM. SGO's own market rows
         // read points-away-1ix5-ml3way-away / points-all-1ix5-ml3way-draw /
         // points-home-1ix5-ml3way-home: the two team sides carry their own slot and
         // the draw carries the game-wide slot, because a draw belongs to neither team.
         const entity =
-          params.marketType === "player_prop"
+          isPlayerMarket
             ? params.playerID!
             : params.marketType === "total"
               ? "all"
@@ -297,10 +430,9 @@ Error Handling:
           statID,
           entity,
           // Soccer match lines settle on `reg`; player props stay on `game`.
-          period:
-            params.marketType === "player_prop"
-              ? "full_game"
-              : matchLinePeriodFor(params.sport),
+          // Player markets, over/under and yes/no alike, sit on `game`. Soccer match
+          // lines settle on `reg`; player props stay on `game`.
+          period: isPlayerMarket ? "full_game" : matchLinePeriodFor(params.sport),
           betType: MARKET_TYPE_CODE[params.marketType],
           side: params.side,
         });
@@ -578,18 +710,26 @@ Error Handling:
           };
         }
 
-        const side = params.side as "over" | "under";
-        const lineUsed = params.postedLine!;
+        /* YES/NO BECOMES OVER/UNDER AT 0.5 HERE, and nowhere else. One conversion, at
+         * the single point where a side and a line enter the settlement path, so every
+         * refusal and every participation check downstream sees an ordinary prop. */
+        const isYesNo = params.marketType === "player_yes_no";
+        const side = (isYesNo ? (params.side === "yes" ? "over" : "under") : params.side) as
+          | "over"
+          | "under";
+        const lineUsed = isYesNo ? YES_NO_LINE : params.postedLine!;
         const label = params.playerName
-          ? `${params.playerName} ${side.toUpperCase()} ${lineUsed} ${params.marketLabel ?? ""}`.trim()
-          : `${params.marketType} ${side} ${lineUsed}`;
+          ? isYesNo
+            ? `${params.playerName} ${params.side.toUpperCase()} ${params.marketLabel ?? ""}`.trim()
+            : `${params.playerName} ${side.toUpperCase()} ${lineUsed} ${params.marketLabel ?? ""}`.trim()
+          : `${params.marketType} ${params.side}${isYesNo ? "" : ` ${lineUsed}`}`;
 
         // ---- Player prop: participation is RESOLVED, not flagged ----
         //
         // A zero in odd.score is a DNP and a real zero at the same time. Rather
         // than warn on every one of them, ask the box score, using the same
         // three-way discriminator the hit-rate path already relies on.
-        if (params.marketType === "player_prop") {
+        if (isPlayerMarket) {
           const outcome = gradePlayerProp({
             lookup: lookupPlayerStat(event, params.playerID!, statID),
             fallbackScore: actual,
@@ -607,7 +747,21 @@ Error Handling:
             market: params.marketLabel,
             actualValue: outcome.value,
             lineGradedAgainst: lineUsed,
-            gradedAgainstPostedLine: true,
+            /* NOT TRUE FOR A YES/NO PICK, and saying so matters. Everywhere else this
+             * flag means "graded against the number YOU posted, not the feed's
+             * converged line". A milestone market has no posted line; 0.5 is the
+             * market's own definition. Reporting `true` here would claim a guarantee
+             * that was never made. */
+            gradedAgainstPostedLine: !isYesNo,
+            ...(isYesNo
+              ? {
+                  yesNoThreshold: YES_NO_LINE,
+                  yesNoNote:
+                    `Milestone market graded as ${params.side} -> ${side} at ${YES_NO_LINE}. ` +
+                    `The threshold is the market's definition, not a posted line, and ` +
+                    `${YES_NO_LINE} cannot push.`,
+                }
+              : {}),
             participationResolved: outcome.kind !== "unresolved",
             note: outcome.note,
             eventID: event.eventID,

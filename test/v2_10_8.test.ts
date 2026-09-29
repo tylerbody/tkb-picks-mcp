@@ -191,14 +191,17 @@ describe("v2.10.8 period access", () => {
 
   test("odds on other periods are counted, not silently discarded", async () => {
     const res = await call({ period: "1st_half" });
+    // Nested under `overUnder` as of v2.11.0; the assertion is unchanged.
     const cov = res.structuredContent!.coverage as {
-      dropped: Record<string, number>;
-      nonGamePeriodsSeen: Record<string, number>;
+      overUnder: {
+        dropped: Record<string, number>;
+        nonGamePeriodsSeen: Record<string, number>;
+      };
     };
     // game and 1q are both "other" when 1h is requested.
-    assert.equal(cov.dropped.nonGamePeriod, 2);
-    assert.equal(cov.nonGamePeriodsSeen["game"], 1);
-    assert.equal(cov.nonGamePeriodsSeen["1q"], 1);
+    assert.equal(cov.overUnder.dropped.nonGamePeriod, 2);
+    assert.equal(cov.overUnder.nonGamePeriodsSeen["game"], 1);
+    assert.equal(cov.overUnder.nonGamePeriodsSeen["1q"], 1);
   });
 });
 

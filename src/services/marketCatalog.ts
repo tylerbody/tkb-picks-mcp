@@ -596,3 +596,77 @@ export const SUPPORTED_PERIODS: Record<SportKey, string[]> = {
   // need `reg` and a draw outcome, exactly as soccer does.
   nhl: ["1st_period", "2nd_period", "3rd_period"],
 };
+
+/* ===========================================================================
+ * YES/NO GRADEABILITY, v2.11.0
+ *
+ * A yes/no market is a single question: did this happen at all. That makes it an
+ * over/under at 0.5 wearing different clothes, and that is exactly how the grader
+ * settles one - `yes` becomes `over`, `no` becomes `under`, the line is 0.5, and the
+ * whole proven player-prop path runs unchanged, DNP discriminator included. Grading
+ * "Any Hits" off a raw zero would post a LOSS on a player who never came to the
+ * plate, which is the failure that path already exists to prevent.
+ *
+ * WHICH markets can be settled that way is DERIVED, not hand-listed:
+ *
+ *     gradeable  <=>  the same statID also appears in this sport's OU_PROP_MARKETS
+ *
+ * The justification is narrow and checkable. The over/under set is the set the
+ * grader is already proven to resolve on live settled events; nothing else has been
+ * demonstrated. A hand-maintained second list of "gradeable yes/no markets" would be
+ * one more thing to drift out of sync, which is precisely the defect v2.10.9 fixed in
+ * this same file. Deriving it means the two can never disagree.
+ *
+ * The rule UNDER-approximates on purpose. Every ordering, composite and outcome
+ * market falls out of it automatically because none of them has an over/under
+ * counterpart: first basket, double-double, triple-double, first and last touchdown,
+ * first home run, pitching win, both teams to score, first and last to score, and the
+ * three UFC method-of-victory markets. Those genuinely cannot be settled from a stat
+ * total and must be refused by name.
+ *
+ * TWO MARKETS ARE COUNTABLE AND STILL REFUSED, and they are worth naming because they
+ * look like rule failures and are not. Soccer `yellowCards` and NFL `defense_safeties`
+ * are perfectly countable numbers, but neither statID appears in ANY stat map in this
+ * repo, so there is nothing to grade them against. They are candidates for promotion
+ * once a stat map carries them, which is a deliberate step someone takes, not
+ * something that happens quietly.
+ */
+
+/** Markets whose refusal reason is a stat-map gap rather than the market's nature. */
+const YES_NO_COUNTABLE_BUT_UNMAPPED = new Set(["yellowCards", "defense_safeties"]);
+
+export type YesNoGrading =
+  | { gradeable: true; asSide: { yes: "over"; no: "under" }; line: 0.5 }
+  | { gradeable: false; reason: string };
+
+export function yesNoGradingFor(sport: SportKey, statID: string): YesNoGrading {
+  const hasOverUnder = OU_PROP_MARKETS[sport].some((m) => m.statID === statID);
+  if (hasOverUnder) {
+    return { gradeable: true, asSide: { yes: "over", no: "under" }, line: 0.5 };
+  }
+  if (YES_NO_COUNTABLE_BUT_UNMAPPED.has(statID)) {
+    return {
+      gradeable: false,
+      reason:
+        `"${statID}" is a countable stat but appears in no stat map in this connector, ` +
+        `so there is no settled value to grade it against. Grade this one from an ` +
+        `outside box score. It can be promoted once a stat map carries the stat.`,
+    };
+  }
+  return {
+    gradeable: false,
+    reason:
+      `"${statID}" has no over/under counterpart in ${sport.toUpperCase()}, which means ` +
+      `it is an ordering, composite or outcome market (first/last to do something, a ` +
+      `double-double, a pitching win, a method of victory). None of those can be settled ` +
+      `from a single stat total. Grade this one manually from the result.`,
+  };
+}
+
+/** Every yes/no market for a sport, with its gradeability resolved. */
+export function yesNoCatalogWithGrading(sport: SportKey) {
+  return YES_NO_MARKETS[sport].map((m) => ({
+    ...m,
+    grading: yesNoGradingFor(sport, m.statID),
+  }));
+}

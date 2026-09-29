@@ -136,11 +136,16 @@ const callBoard = async (extra: Record<string, unknown> = {}) => {
   } as never)) as { structuredContent?: Record<string, unknown> };
   return res.structuredContent!.coverage as {
     seenOdds: number;
-    sidesAccepted: number;
     unaccounted: number;
-    dropped: Record<string, number>;
-    sidesNotOverUnder: Record<string, number>;
+    unparsableOddID: number;
     note: string;
+    otherBetTypes: { count: number; betTypesSeen: Record<string, number> };
+    overUnder: {
+      sidesAccepted: number;
+      dropped: Record<string, number>;
+      sidesNotOverUnder: Record<string, number>;
+    };
+    yesNo: { sidesAccepted: number; rowsBuilt: number; dropped: Record<string, number> };
   };
 };
 
@@ -153,7 +158,12 @@ describe("v2.10.9 every dropped odd is counted", () => {
   test("the terms sum to seenOdds independently of the unaccounted field", async () => {
     const cov = await callBoard();
     const summed =
-      cov.sidesAccepted + Object.values(cov.dropped).reduce((a, b) => a + b, 0);
+      cov.overUnder.sidesAccepted +
+      cov.yesNo.sidesAccepted +
+      cov.unparsableOddID +
+      cov.otherBetTypes.count +
+      Object.values(cov.overUnder.dropped).reduce((a, b) => a + b, 0) +
+      Object.values(cov.yesNo.dropped).reduce((a, b) => a + b, 0);
     assert.equal(summed, cov.seenOdds);
   });
 
@@ -162,20 +172,26 @@ describe("v2.10.9 every dropped odd is counted", () => {
    * reconciliation above breaks by exactly 1. */
   test("an ou market carrying a yes side lands in nonOverUnderSide, not nowhere", async () => {
     const cov = await callBoard();
-    assert.equal(cov.dropped.nonOverUnderSide, 1);
-    assert.deepEqual(cov.sidesNotOverUnder, { yes: 1 });
+    assert.equal(cov.overUnder.dropped.nonOverUnderSide, 1);
+    assert.deepEqual(cov.overUnder.sidesNotOverUnder, { yes: 1 });
   });
 
-  test("it is a distinct bucket from notOverUnder, which counts the betType", async () => {
+  /* RESHAPED FOR v2.11.0. The fixture's doubleDouble yes/no odd used to land in
+   * `dropped.notOverUnder`. It is now COLLECTED into the yes/no section, so the point
+   * of the test survives: the ou-market-with-a-yes-side is still a distinct thing from
+   * a genuine yes/no market, and the two must not be confused. */
+  test("a real yes/no market is collected, distinct from the ou-with-a-yes-side", async () => {
     const cov = await callBoard();
-    assert.equal(cov.dropped.notOverUnder, 1);
+    assert.equal(cov.yesNo.sidesAccepted, 1);
+    assert.equal(cov.yesNo.rowsBuilt, 1);
+    assert.equal(cov.overUnder.dropped.nonOverUnderSide, 1);
   });
 
   test("the other new buckets are populated too", async () => {
     const cov = await callBoard();
-    assert.equal(cov.dropped.noBookPrice, 1);
-    assert.equal(cov.dropped.unparsableLine, 0);
-    assert.equal(cov.dropped.cancelled, 0);
+    assert.equal(cov.overUnder.dropped.noBookPrice, 1);
+    assert.equal(cov.overUnder.dropped.unparsableLine, 0);
+    assert.equal(cov.overUnder.dropped.cancelled, 0);
   });
 
   test("the note explains the new bucket rather than leaving a bare number", async () => {
@@ -185,6 +201,6 @@ describe("v2.10.9 every dropped odd is counted", () => {
 
   test("the accepted sides still became a row", async () => {
     const cov = await callBoard();
-    assert.equal(cov.sidesAccepted, 2);
+    assert.equal(cov.overUnder.sidesAccepted, 2);
   });
 });

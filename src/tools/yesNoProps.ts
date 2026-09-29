@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
-import { YES_NO_MARKETS } from "../services/marketCatalog.js";
+import { YES_NO_MARKETS, yesNoGradingFor } from "../services/marketCatalog.js";
 import { extractPricedLine } from "../services/oddsPricing.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
 
@@ -26,6 +26,12 @@ const YesNoInputSchema = z
       .optional()
       .describe(
         "For team/game-wide markets instead of a player: 'home', 'away', or 'all'. Omit if using playerID."
+      ),
+    side: z
+      .enum(["yes", "no"])
+      .default("yes")
+      .describe(
+        "ADDED v2.11.0. Which side of the milestone to price. This tool only ever built the YES oddID before, so the no side was unreachable through it even where a book posted one - and the no side is where the value sits on a long-shot milestone. The opposite side is reported alongside whichever you ask for."
       ),
     preferredBookmakers: z
       .string()
@@ -115,13 +121,18 @@ Error Handling:
           };
         }
 
-        const yesOddID = buildOddID({
-          statID: market.statID,
-          entity,
-          period: "full_game",
-          betType: "yn",
-          side: "yes",
-        });
+        const requestedSide = params.side ?? "yes";
+        const oppositeSide = requestedSide === "yes" ? "no" : "yes";
+        const oddIDFor = (side: "yes" | "no") =>
+          buildOddID({
+            statID: market.statID,
+            entity,
+            period: "full_game",
+            betType: "yn",
+            side,
+          });
+        const yesOddID = oddIDFor(requestedSide);
+        const otherOddID = oddIDFor(oppositeSide);
 
         const leagueID = sgo.leagueIDFor(params.sport);
         // PRICE AGAINST THE BOOKS THIS AUDIENCE CAN BET (v2.8.6). This tool sent
@@ -141,7 +152,10 @@ Error Handling:
           oddsAvailable: true,
           // Request only this exact market instead of the event's full 1000+
           // markets - same fix applied to tkb_get_odds.
-          oddIDs: yesOddID,
+          // Both sides in ONE request. SGO bills per event object, not per market, so
+          // asking for the opposite side costs nothing and makes the two-way price
+          // visible instead of half of it.
+          oddIDs: `${yesOddID},${otherOddID}`,
           bookmakerID: bookFilter,
         });
 
@@ -176,18 +190,45 @@ Error Handling:
           };
         }
 
+        const otherPricing = extractPricedLine(event.odds?.[otherOddID], {
+          requireLine: false,
+          marketDescription: `"${market.label}" (${oppositeSide})`,
+        });
+
+        /* THE SAME GRADEABILITY WARNING THE BOARD GIVES, v2.11.0. Without this you
+         * could pull First Basket or Double-Double here, post it, and only discover at
+         * settlement time that nothing can grade it. Derived in marketCatalog.ts. */
+        const grading = yesNoGradingFor(params.sport, market.statID);
+
         const output = {
           market: market.label,
           eventID: event.eventID,
+          side: requestedSide,
           americanOdds: pricing.value!.americanOdds,
           bookmaker: pricing.value!.bookmaker,
+          oppositeSide: otherPricing.priced
+            ? {
+                side: oppositeSide,
+                americanOdds: otherPricing.value!.americanOdds,
+                bookmaker: otherPricing.value!.bookmaker,
+              }
+            : null,
+          gradeable: grading.gradeable,
+          gradingNote: grading.gradeable
+            ? null
+            : `NOT AUTO-GRADEABLE. ${(grading as { reason: string }).reason}`,
         };
 
         return {
           content: [
             {
               type: "text" as const,
-              text: `${market.label}: ${output.americanOdds}\n\n${JSON.stringify(output, null, 2)}`,
+              text:
+                `${market.label} (${requestedSide}): ${output.americanOdds}` +
+                (output.gradeable
+                  ? ""
+                  : `\n\n${output.gradingNote}`) +
+                `\n\n${JSON.stringify(output, null, 2)}`,
             },
           ],
           structuredContent: output,

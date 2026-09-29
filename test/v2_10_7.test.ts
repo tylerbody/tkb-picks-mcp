@@ -155,37 +155,55 @@ describe("v2.10.7 every dropped odd is counted and attributed", () => {
     assert.equal(cov.seenOdds as unknown as number, 8);
   });
 
-  test("yes/no markets are counted, which is where anytime scorer went", async () => {
+  /* RESHAPED FOR v2.11.0, and the assertion got STRONGER rather than being relaxed.
+   * In v2.10.7 this fixture's yes/no odd was counted under `dropped.notOverUnder` and
+   * discarded. It is now COLLECTED into the yes/no section, so the check is that it
+   * reached that section rather than that it was thrown away. The old bucket is gone
+   * on purpose: it mixed yes/no markets with moneylines and spreads. */
+  test("the yes/no odd is now collected, not dropped as notOverUnder", async () => {
     const { res } = await callBoard();
-    const d = (res.structuredContent!.coverage as { dropped: Record<string, number> }).dropped;
-    assert.equal(d.notOverUnder, 1);
+    const cov = res.structuredContent!.coverage as {
+      yesNo: { seenOdds: number; sidesAccepted: number; rowsBuilt: number };
+      otherBetTypes: { count: number };
+    };
+    assert.equal(cov.yesNo.seenOdds, 1);
+    assert.equal(cov.yesNo.sidesAccepted, 1);
+    assert.equal(cov.yesNo.rowsBuilt, 1);
+    // And it is NOT lumped in with moneylines and spreads any more.
+    assert.equal(cov.otherBetTypes.count, 0);
   });
 
   test("period props are counted AND the periods are named", async () => {
     const { res } = await callBoard();
     const cov = res.structuredContent!.coverage as {
-      dropped: Record<string, number>;
-      nonGamePeriodsSeen: Record<string, number>;
+      overUnder: {
+        dropped: Record<string, number>;
+        nonGamePeriodsSeen: Record<string, number>;
+      };
     };
-    assert.equal(cov.dropped.nonGamePeriod, 2);
-    assert.equal(cov.nonGamePeriodsSeen["1h"], 1);
-    assert.equal(cov.nonGamePeriodsSeen["2h"], 1);
+    assert.equal(cov.overUnder.dropped.nonGamePeriod, 2);
+    assert.equal(cov.overUnder.nonGamePeriodsSeen["1h"], 1);
+    assert.equal(cov.overUnder.nonGamePeriodsSeen["2h"], 1);
   });
 
   test("CATALOG DRIFT is visible: an unlisted statID is named, not just tallied", async () => {
     const { res } = await callBoard();
     const cov = res.structuredContent!.coverage as {
-      dropped: Record<string, number>;
-      statIDsNotInCatalog: Record<string, number>;
+      overUnder: {
+        dropped: Record<string, number>;
+        statIDsNotInCatalog: Record<string, number>;
+      };
     };
-    assert.equal(cov.dropped.notInCatalog, 1);
-    assert.equal(cov.statIDsNotInCatalog["passing_interceptions_thrown"], 1);
+    assert.equal(cov.overUnder.dropped.notInCatalog, 1);
+    assert.equal(cov.overUnder.statIDsNotInCatalog["passing_interceptions_thrown"], 1);
   });
 
   test("team-level entities are separated from player props", async () => {
     const { res } = await callBoard();
-    const d = (res.structuredContent!.coverage as { dropped: Record<string, number> }).dropped;
-    assert.equal(d.teamOrUnknownEntity, 1);
+    const cov = res.structuredContent!.coverage as {
+      overUnder: { dropped: Record<string, number> };
+    };
+    assert.equal(cov.overUnder.dropped.teamOrUnknownEntity, 1);
   });
 
   test("the eligible markets still become rows, so nothing was over-filtered", async () => {
@@ -195,14 +213,24 @@ describe("v2.10.7 every dropped odd is counted and attributed", () => {
     assert.deepEqual(rows.map((r) => r.market).sort(), ["Passing Attempts", "Passing Yards"]);
   });
 
-  test("the buckets plus the rows account for every odd seen", async () => {
+  test("the buckets plus the accepted sides account for every odd seen", async () => {
     const { res } = await callBoard();
     const cov = res.structuredContent!.coverage as {
       seenOdds: number;
-      dropped: Record<string, number>;
+      unparsableOddID: number;
+      unaccounted: number;
+      otherBetTypes: { count: number };
+      overUnder: { sidesAccepted: number; dropped: Record<string, number> };
+      yesNo: { sidesAccepted: number; dropped: Record<string, number> };
     };
-    const droppedTotal = Object.values(cov.dropped).reduce((a, b) => a + b, 0);
-    // 3 eligible SIDES became 2 rows (the yards market has two sides).
-    assert.equal(droppedTotal + 3, cov.seenOdds);
+    const sum =
+      cov.overUnder.sidesAccepted +
+      cov.yesNo.sidesAccepted +
+      cov.unparsableOddID +
+      cov.otherBetTypes.count +
+      Object.values(cov.overUnder.dropped).reduce((a, b) => a + b, 0) +
+      Object.values(cov.yesNo.dropped).reduce((a, b) => a + b, 0);
+    assert.equal(sum, cov.seenOdds);
+    assert.equal(cov.unaccounted, 0);
   });
 });

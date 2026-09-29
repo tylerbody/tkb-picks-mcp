@@ -1,7 +1,11 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
-import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
+import {
+  OU_PROP_MARKETS,
+  YES_NO_MARKETS,
+  yesNoGradingFor,
+} from "../services/marketCatalog.js";
 import { allBookPrices, extractPricedLine, roundToNearestTen, type BookPrice } from "../services/oddsPricing.js";
 import { PERIOD_CODES } from "../services/oddIdBuilder.js";
 import { parseOddID, type ParsedOddID } from "../services/oddIdParser.js";
@@ -124,6 +128,23 @@ export interface SidePrice {
   bestPrice?: { bookmaker: string; americanOdds: string; line?: string } | null;
   betterPriceAvailable?: boolean;
   bookCount?: number;
+  /**
+   * v2.11.0. How many of those books are quoting THIS row's line. `bookCount` counts
+   * every real book with a price on the side; this counts the ones offering the same
+   * bet. When they differ, the rest of the field is priced at other numbers.
+   */
+  bookCountAtLine?: number;
+  /**
+   * v2.11.0. A longer price that exists at a DIFFERENT line, reported separately
+   * because it is a different bet and must never be published as this row's number.
+   * Null when the best price in the field is already at this line.
+   */
+  betterPriceAtDifferentLine?: {
+    bookmaker: string;
+    americanOdds: string;
+    line?: string;
+    note: string;
+  } | null;
   /** Populated only when includeAllBooks is set, to keep the default payload small. */
   allBooks?: BookPrice[];
   bookmaker: string;
@@ -181,6 +202,28 @@ export function defaultMaxRowsFor(sport: SportKey): number {
 }
 
 /**
+ * Is this book's line the same number as the row's line? v2.11.0.
+ *
+ * `undefined` is NOT a match. A book entry with no line attached cannot be confirmed
+ * to be quoting the same bet, and assuming it does is how a price from another number
+ * gets published as this one.
+ */
+export function lineMatches(bookLine: string | undefined, rowLine: number): boolean {
+  if (bookLine === undefined) return false;
+  const n = parseFloat(bookLine);
+  return !Number.isNaN(n) && n === rowLine;
+}
+
+/** Is American odds `a` a longer price than `b`? Longer is better on either side. */
+export function americanIsLonger(a: string, b: string): boolean {
+  const v = (x: string) => {
+    const n = parseFloat(String(x).replace(/[+\s]/g, ""));
+    return Number.isNaN(n) ? Number.NEGATIVE_INFINITY : n;
+  };
+  return v(a) > v(b);
+}
+
+/**
  * Collapse priced sides into one row per player/market.
  *
  * PURE AND EXPORTED, for the reason given on parseOddID. Both real split-line
@@ -221,11 +264,31 @@ export function buildBoardRows(
 
     const toSidePrice = (s: PricedSide | undefined): SidePrice | null => {
       if (!s) return null;
-      // v2.10.5: surface the best available price alongside the selected one. The
-      // selected book comes from firstAvailableBook, which is arbitrary, so these
-      // differ often enough that hiding the difference costs real money.
+      /* v2.10.5: surface the best available price alongside the selected one. The
+       * selected book comes from firstAvailableBook, which is arbitrary, so these
+       * differ often enough that hiding the difference costs real money.
+       *
+       * ---- THE LINE BUG, FIXED v2.11.0 ----
+       *
+       * `books[0]` is the longest price in the field REGARDLESS OF LINE, because
+       * allBookPrices sorts on price alone. So a row could say: under 4.5 is -164 at
+       * DraftKings, better price +120 at Caesars. Measured live on 2026-09-29,
+       * Courtney Williams rebounds. Those are not the same bet. Caesars was quoting
+       * 3.5. Anyone shopping off that field would have moved to a different market
+       * believing they had found 284 cents of value that does not exist.
+       *
+       * The comparison is now confined to books quoting THIS row's line. A longer
+       * price at another number is still reported, in its own field, labelled as a
+       * different bet. An entry with no line at all cannot be confirmed as the same
+       * bet, so it is excluded from the comparison rather than assumed to match. */
       const books = s.allBooks ?? [];
-      const best = books[0];
+      const atThisLine = books.filter((b) => lineMatches(b.line, s.line));
+      const best = atThisLine[0];
+      const offLine = books.find((b) => !lineMatches(b.line, s.line));
+      const offLineIsBetter =
+        offLine !== undefined &&
+        (best === undefined ||
+          americanIsLonger(offLine.americanOdds, best.americanOdds));
       return {
         line: s.line,
         americanOdds: s.americanOdds,
@@ -236,6 +299,17 @@ export function buildBoardRows(
           : null,
         betterPriceAvailable: Boolean(best && best.bookmaker !== s.bookmaker),
         bookCount: books.length,
+        bookCountAtLine: atThisLine.length,
+        betterPriceAtDifferentLine: offLineIsBetter
+          ? {
+              bookmaker: offLine!.bookmaker,
+              americanOdds: offLine!.americanOdds,
+              line: offLine!.line,
+              note:
+                `DIFFERENT BET: this price is on ${offLine!.line ?? "an unstated line"}, ` +
+                `not ${s.line}. Do not publish it as this row's number.`,
+            }
+          : null,
         ...(opts.includeAllBooks ? { allBooks: books } : {}),
       };
     };
@@ -269,6 +343,216 @@ export function buildBoardRows(
       a.market.localeCompare(b.market)
   );
 
+  return rows;
+}
+
+/* ===========================================================================
+ * YES/NO MARKETS ON THE BOARD, v2.11.0
+ *
+ * Until now this board discarded every yes/no odd and counted it under
+ * `notOverUnder`. That bucket was the largest measured hole anywhere in the
+ * connector: 686 of 1104 odds on an NHL board, 757 of 1814 on an NFL board, 98 to 108
+ * per WNBA board. A board that drops three fifths of an event's markets and calls
+ * itself the prop board is misnamed.
+ *
+ * THEY COST NOTHING TO ADD. The yes/no odds are already in the same event payload the
+ * board fetches; `seenOdds` has been counting them the whole time. This release stops
+ * throwing them away. No extra request, no extra entity billed.
+ *
+ * WHY THEY ARE A SEPARATE SECTION rather than extra rows in `rows`. A yes/no market
+ * has no line and no over/under, so forcing it into BoardRow would mean a null line
+ * and two sides named the wrong thing. Every existing consumer reading `rows` would
+ * have to learn to skip them. A second array with its own shape breaks nothing and
+ * reads honestly.
+ *
+ * WHY THEY ARE OPT-IN. An NHL board carries roughly 340 yes/no rows on top of its 112
+ * over/under rows, and the full response already runs against the tool-result size
+ * ceiling. Returning both by default would push every NHL and NFL call over it, which
+ * would be a worse failure than the one being fixed. `includeYesNo` turns them on and
+ * the coverage block always reports how many are waiting, so nothing is hidden.
+ */
+
+export interface YesNoPricedSide {
+  playerID: string;
+  statID: string;
+  side: "yes" | "no";
+  americanOdds: string;
+  bookmaker: string;
+  allBooks?: BookPrice[];
+}
+
+export interface YesNoSidePrice {
+  americanOdds: string;
+  roundedOdds: string;
+  bookmaker: string;
+  /** No line filtering here: a yes/no market has one question, so every book on it
+   * is quoting the same bet. This is the one place the v2.11.0 line guard does not
+   * apply, and it does not apply because there is no line to disagree about. */
+  bestPrice?: { bookmaker: string; americanOdds: string } | null;
+  betterPriceAvailable?: boolean;
+  bookCount?: number;
+  allBooks?: BookPrice[];
+}
+
+export type YesNoCrossCheck = {
+  status: "agrees" | "mismatch" | "no_comparable_line";
+  book: string | null;
+  yesPrice: string | null;
+  overPrice: string | null;
+  detail: string;
+};
+
+export interface YesNoBoardRow {
+  playerID: string;
+  playerName: string;
+  team: string;
+  market: string;
+  statID: string;
+  yes: YesNoSidePrice | null;
+  no: YesNoSidePrice | null;
+  sidesPriced: number;
+  /** Can tkb_grade_pick settle this market. Derived in marketCatalog.ts. */
+  gradeable: boolean;
+  /** Why not, when it cannot. Null when it can. */
+  gradingNote: string | null;
+  crossCheck: YesNoCrossCheck | null;
+}
+
+export interface YesNoResolvers {
+  playerName: (playerID: string) => string;
+  team: (playerID: string) => string;
+  marketLabel: (statID: string) => string | undefined;
+  grading: (statID: string) => { gradeable: boolean; reason?: string };
+  /** Books quoting this player/market's over/under at the 0.5 line, best first. */
+  overAtHalf: (playerID: string, statID: string) => BookPrice[];
+}
+
+/**
+ * THE CONSISTENCY CHECK, and the mistake it exists to prevent.
+ *
+ * "Anytime Goalscorer" and "Goals over 0.5" are the same bet, so one book must price
+ * them the same. Comparing them is therefore a real correctness check on the whole
+ * yes/no mapping, and it is the check that settled whether the NHL hockey label
+ * crossover (`points` is goals, `goals+assists` is points) was wired correctly.
+ *
+ * IT MUST BE BOOK-PINNED ON BOTH SIDES. Run unpinned it produced a false alarm that
+ * I repeated for several turns as fact: Carrier anytime goalscorer read +1800 against
+ * a board showing +750, which looks exactly like a broken mapping. It was FanDuel
+ * against ESPN Bet. FanDuel posts no 0.5 goals line for him, so the board never showed
+ * its number. Pinned to one book the two agree to the cent. This function compares
+ * only prices from the same bookmaker, and reports `no_comparable_line` rather than
+ * reaching across venues for something to compare.
+ */
+export function crossCheckYesNo(
+  yes: YesNoSidePrice | null,
+  overBooks: BookPrice[]
+): YesNoCrossCheck {
+  if (!yes) {
+    return {
+      status: "no_comparable_line",
+      book: null,
+      yesPrice: null,
+      overPrice: null,
+      detail: "No yes price on this market, so there is nothing to cross-check.",
+    };
+  }
+
+  const candidates = [yes.bookmaker, ...(yes.allBooks ?? []).map((b) => b.bookmaker)];
+  for (const book of candidates) {
+    const over = overBooks.find((b) => b.bookmaker === book);
+    if (!over) continue;
+    const yesAtBook =
+      book === yes.bookmaker
+        ? yes.americanOdds
+        : (yes.allBooks ?? []).find((b) => b.bookmaker === book)!.americanOdds;
+    const agrees = yesAtBook === over.americanOdds;
+    return {
+      status: agrees ? "agrees" : "mismatch",
+      book,
+      yesPrice: yesAtBook,
+      overPrice: over.americanOdds,
+      detail: agrees
+        ? `${book} prices the yes side and its own over 0.5 identically at ${yesAtBook}, ` +
+          `which is what the same bet must do. Mapping confirmed on this market.`
+        : `MISMATCH at ${book}: yes is ${yesAtBook} but the same book's over 0.5 is ` +
+          `${over.americanOdds}. These are the same bet and must agree. Treat the ` +
+          `statID mapping for this market as unverified and do not post off it.`,
+    };
+  }
+
+  return {
+    status: "no_comparable_line",
+    book: null,
+    yesPrice: yes.americanOdds,
+    overPrice: null,
+    detail:
+      `No book quotes BOTH this yes/no market and an over/under at 0.5 for this ` +
+      `player, so there is nothing to compare within a single venue. Comparing across ` +
+      `books is what produced a false mapping alarm on 2026-09-29 and is not done ` +
+      `here. Pass includeAltLines to pull the 0.5 rung when it is an alternate line.`,
+  };
+}
+
+/** Collapse yes/no sides into one row per player/market. Same shape of job as
+ * buildBoardRows, kept separate because the row shape is genuinely different. */
+export function buildYesNoRows(
+  sides: YesNoPricedSide[],
+  resolve: YesNoResolvers
+): YesNoBoardRow[] {
+  const byKey = new Map<string, { yes?: YesNoPricedSide; no?: YesNoPricedSide }>();
+  for (const s of sides) {
+    const key = `${s.playerID}|${s.statID}`;
+    const entry = byKey.get(key) ?? {};
+    if (s.side === "yes" && !entry.yes) entry.yes = s;
+    if (s.side === "no" && !entry.no) entry.no = s;
+    byKey.set(key, entry);
+  }
+
+  const toSide = (s: YesNoPricedSide | undefined): YesNoSidePrice | null => {
+    if (!s) return null;
+    const books = s.allBooks ?? [];
+    const best = books[0];
+    return {
+      americanOdds: s.americanOdds,
+      roundedOdds: roundToNearestTen(s.americanOdds),
+      bookmaker: s.bookmaker,
+      bestPrice: best
+        ? { bookmaker: best.bookmaker, americanOdds: best.americanOdds }
+        : null,
+      betterPriceAvailable: Boolean(best && best.bookmaker !== s.bookmaker),
+      bookCount: books.length,
+      allBooks: books,
+    };
+  };
+
+  const rows: YesNoBoardRow[] = [];
+  for (const [key, entry] of byKey) {
+    const playerID = key.slice(0, key.lastIndexOf("|"));
+    const statID = key.slice(key.lastIndexOf("|") + 1);
+    if (!entry.yes && !entry.no) continue;
+    const grading = resolve.grading(statID);
+    const yes = toSide(entry.yes);
+    rows.push({
+      playerID,
+      playerName: resolve.playerName(playerID),
+      team: resolve.team(playerID),
+      market: resolve.marketLabel(statID) ?? statID,
+      statID,
+      yes,
+      no: toSide(entry.no),
+      sidesPriced: (entry.yes ? 1 : 0) + (entry.no ? 1 : 0),
+      gradeable: grading.gradeable,
+      gradingNote: grading.gradeable ? null : (grading.reason ?? "Not gradeable."),
+      crossCheck: crossCheckYesNo(yes, resolve.overAtHalf(playerID, statID)),
+    });
+  }
+
+  rows.sort(
+    (a, b) =>
+      a.team.localeCompare(b.team) ||
+      a.playerName.localeCompare(b.playerName) ||
+      a.market.localeCompare(b.market)
+  );
   return rows;
 }
 
@@ -317,6 +601,21 @@ const PropBoardInputSchema = z
       .default(false)
       .describe(
         "ADDED v2.10.7. Ask SGO for ALTERNATE lines as well as the main one. A book posts a main receiving-yards number plus a ladder of alts, and with this OFF, which it has always been, the board shows only the main line and every alt is invisible. Turn it on when the question is 'what is available on this player', because the main line alone is not the whole market. It materially increases response size, which is the OOM risk this connector has been bitten by once, so it stays off by default and the row cap still applies."
+      ),
+    includeYesNo: z
+      .boolean()
+      .default(false)
+      .describe(
+        "ADDED v2.11.0. Also return the YES/NO milestone markets on this event - anytime goalscorer, any home run, any touchdown, double-double, first basket - as a separate `yesNoRows` array. These have always been in the payload this board fetches and were silently discarded: measured 686 of 1104 odds on an NHL board, 757 of 1814 on NFL, about 100 per WNBA game. They cost no extra request. OFF BY DEFAULT ONLY FOR SIZE: an NHL board carries roughly 340 of these on top of its over/under rows and returning both by default pushes the response past the tool-result ceiling. The coverage block always reports how many are waiting, so turning this on is never a guess. Each row carries `gradeable` plus a `crossCheck` that verifies the yes price against the SAME book's over/under at 0.5."
+      ),
+    maxYesNoRows: z
+      .number()
+      .int()
+      .min(5)
+      .max(600)
+      .optional()
+      .describe(
+        "Backstop on yes/no rows returned, independent of maxRows so one section cannot starve the other. Omit and it follows the same sport-aware default as maxRows. Truncation is always reported."
       ),
     includeUnpriced: z
       .boolean()
@@ -429,20 +728,33 @@ Error Handling:
           ? catalog.filter((m) => input.markets!.includes(m.label))
           : catalog;
 
-        if (wanted.length === 0) {
+        /* The `markets` filter names LABELS, and as of v2.11.0 a label can belong to
+         * either catalog. Filtering both means `markets: ["Anytime Goalscorer"]` works
+         * the way a caller would expect instead of matching nothing. */
+        const ynCatalog = YES_NO_MARKETS[sport] ?? [];
+        const ynWanted = input.markets
+          ? ynCatalog.filter((m) => input.markets!.includes(m.label))
+          : ynCatalog;
+
+        if (wanted.length === 0 && ynWanted.length === 0) {
           return {
             content: [
               {
                 type: "text" as const,
                 text:
                   `No markets matched${input.markets ? ` ${input.markets.join(", ")}` : ""} for ` +
-                  `${sport.toUpperCase()}.\n\nValid labels: ${catalog.map((m) => m.label).join(", ")}`,
+                  `${sport.toUpperCase()}.\n\nValid over/under labels: ${catalog.map((m) => m.label).join(", ")}` +
+                  (ynCatalog.length
+                    ? `\n\nValid yes/no labels (pass includeYesNo to see them on the board): ` +
+                      `${ynCatalog.map((m) => m.label).join(", ")}`
+                    : ""),
               },
             ],
           };
         }
 
         const statIDToLabel = new Map(wanted.map((m) => [m.statID, m.label]));
+        const ynStatIDToLabel = new Map(ynWanted.map((m) => [m.statID, m.label]));
 
         const bookFilter =
           input.preferredBookmakers.trim().toLowerCase() === "all"
@@ -501,6 +813,10 @@ Error Handling:
         // v2.10.7: an omitted maxRows resolves per sport rather than to a flat 80.
         const effectiveMaxRows =
           input.maxRows ?? defaultMaxRowsFor(input.sport as SportKey);
+        // Its own cap, so a wide yes/no set cannot crowd out over/under rows or the
+        // reverse. Same sport-aware default.
+        const effectiveMaxYesNoRows =
+          input.maxYesNoRows ?? defaultMaxRowsFor(input.sport as SportKey);
         // Refuse a non-match event readably rather than throwing a bare TypeError.
         // See services/eventShape.ts.
         const shape = readMatchTeams(event);
@@ -633,6 +949,28 @@ Error Handling:
         const unpriced = new Map<string, string>(); // "player | market" -> reason bucket
         let cancelledCount = 0;
 
+        // ---- v2.11.0 yes/no collectors ----
+        const ynSides: YesNoPricedSide[] = [];
+        const unpricedYesNo = new Map<string, string>();
+        /* Books quoting an over/under at EXACTLY 0.5, keyed player|statID, for the
+         * cross-check. Filtered per book rather than per oddID on purpose: one odd
+         * object can carry different numbers at different books, which is how a 0.5
+         * rung shows up on a market whose displayed line is 1.5. Recorded before the
+         * catalog and entity filters so the check survives a `markets` narrowing. */
+        const ouHalfBooks = new Map<string, BookPrice[]>();
+        let ynSeen = 0;
+        let ynDroppedNonGamePeriod = 0;
+        const ynDroppedPeriods = new Map<string, number>();
+        let ynDroppedNotYesNoSide = 0;
+        const ynDroppedSides = new Map<string, number>();
+        let ynDroppedNotInCatalog = 0;
+        const ynDroppedStatIDs = new Map<string, number>();
+        let ynDroppedTeamOrUnknownEntity = 0;
+        let ynDroppedNoBookPrice = 0;
+        let ynCancelled = 0;
+        let droppedOtherBetType = 0;
+        const otherBetTypesSeen = new Map<string, number>();
+
         /* ---- COMPLETENESS ACCOUNTING, ADDED v2.10.7 ----
          *
          * This loop DISCARDS most of what SGO sends and, until now, said nothing about
@@ -646,7 +984,6 @@ Error Handling:
          */
         let seenOdds = 0;
         let droppedUnparsable = 0;
-        let droppedNotOverUnder = 0;
         let droppedNonOverUnderSide = 0;
         let droppedNonGamePeriod = 0;
         const droppedPeriods = new Map<string, number>();
@@ -665,13 +1002,98 @@ Error Handling:
             continue;
           }
 
-          // YES/NO AND OTHER BET TYPES. Anytime-scorer, first-scorer, double-double
-          // and every other milestone market lives on betType `yn` and has never
-          // appeared on this board in any sport. It is reachable only one player at a
-          // time through tkb_get_yes_no_prop.
-          if (parsed.betType !== "ou") {
-            droppedNotOverUnder++;
+          /* ---- YES/NO MARKETS, ON THE BOARD AS OF v2.11.0 ----
+           *
+           * Anytime scorer, first scorer, double-double and every other milestone
+           * market lives on betType `yn`. Until this release all of them were counted
+           * under one `notOverUnder` bucket and thrown away, and that bucket was the
+           * biggest hole in the connector. They are collected here now, through the
+           * same filter discipline the over/under branch uses, with their own counters
+           * so neither section's denominator borrows from the other. */
+          if (parsed.betType === "yn") {
+            ynSeen++;
+            if (parsed.period !== periodCode) {
+              ynDroppedNonGamePeriod++;
+              ynDroppedPeriods.set(
+                parsed.period,
+                (ynDroppedPeriods.get(parsed.period) ?? 0) + 1
+              );
+              continue;
+            }
+            if (parsed.side !== "yes" && parsed.side !== "no") {
+              ynDroppedNotYesNoSide++;
+              ynDroppedSides.set(parsed.side, (ynDroppedSides.get(parsed.side) ?? 0) + 1);
+              continue;
+            }
+            if (!ynStatIDToLabel.has(parsed.statID)) {
+              ynDroppedNotInCatalog++;
+              ynDroppedStatIDs.set(
+                parsed.statID,
+                (ynDroppedStatIDs.get(parsed.statID) ?? 0) + 1
+              );
+              continue;
+            }
+            if (!allowedPlayerIDs.has(parsed.entity)) {
+              ynDroppedTeamOrUnknownEntity++;
+              continue;
+            }
+            const ynLabel = ynStatIDToLabel.get(parsed.statID)!;
+            const ynPlayerName = playerByID.get(parsed.entity)?.name ?? parsed.entity;
+            /* requireLine FALSE, and that is the whole difference from the branch
+             * below. A yes/no market has no line by nature, so demanding one would
+             * reject every market in this section. It still needs a real book price;
+             * a fair-odds model number is as unpublishable here as anywhere. */
+            const ynPriced = extractPricedLine(odd, {
+              requireLine: false,
+              marketDescription: `${ynLabel} for ${ynPlayerName}`,
+            });
+            if (!ynPriced.priced || !ynPriced.value) {
+              if (odd.cancelled) {
+                ynCancelled++;
+              } else {
+                ynDroppedNoBookPrice++;
+                const key = `${ynPlayerName} | ${ynLabel}`;
+                if (!unpricedYesNo.has(key)) {
+                  unpricedYesNo.set(
+                    key,
+                    odd.fairOdds ? "catalog only, no book has posted" : "no book price"
+                  );
+                }
+              }
+              continue;
+            }
+            ynSides.push({
+              playerID: parsed.entity,
+              statID: parsed.statID,
+              side: parsed.side,
+              americanOdds: ynPriced.value.americanOdds,
+              bookmaker: ynPriced.value.bookmaker ?? "unknown",
+              allBooks: allBookPrices(odd),
+            });
             continue;
+          }
+
+          /* Everything that is neither an over/under nor a yes/no: moneylines,
+           * spreads, three-way prices. Named rather than lumped, because "757 odds
+           * were not over/under" told the caller nothing about what they were. */
+          if (parsed.betType !== "ou") {
+            droppedOtherBetType++;
+            otherBetTypesSeen.set(
+              parsed.betType,
+              (otherBetTypesSeen.get(parsed.betType) ?? 0) + 1
+            );
+            continue;
+          }
+
+          /* THE 0.5 INDEX FOR THE CROSS-CHECK. Recorded here, before the catalog and
+           * entity filters, so narrowing `markets` cannot quietly disable the
+           * verification. Filtered per book to exactly 0.5 because a single odd object
+           * can carry different numbers at different venues. */
+          if (parsed.side === "over") {
+            const half = allBookPrices(odd).filter((b) => lineMatches(b.line, 0.5));
+            if (half.length) {
+              ouHalfBooks.set(`${parsed.entity}|${parsed.statID}`, half);
+            }
           }
 
           // PERIOD PROPS. Halves, quarters, hockey periods and first-N-innings props
@@ -767,12 +1189,35 @@ Error Handling:
         const truncated = allRows.length > effectiveMaxRows;
         const rows = allRows.slice(0, effectiveMaxRows);
 
+        /* BUILT WHETHER OR NOT THEY ARE RETURNED. Building is cheap; serialising is
+         * what costs payload. Always building means the coverage block can state
+         * exactly how many yes/no markets are sitting there, so `includeYesNo` is an
+         * informed choice rather than a shot in the dark. */
+        const allYesNoRows = buildYesNoRows(ynSides, {
+          playerName: (id) => playerByID.get(id)?.name ?? id,
+          team: (id) => {
+            const t = playerByID.get(id)?.teamID;
+            return t ? (teamNames[t] ?? t) : "unknown";
+          },
+          marketLabel: (statID) => ynStatIDToLabel.get(statID),
+          grading: (statID) => yesNoGradingFor(sport, statID),
+          overAtHalf: (playerID, statID) => ouHalfBooks.get(`${playerID}|${statID}`) ?? [],
+        });
+        const yesNoTruncated = allYesNoRows.length > effectiveMaxYesNoRows;
+        const yesNoRows = input.includeYesNo
+          ? allYesNoRows.slice(0, effectiveMaxYesNoRows)
+          : [];
+        const yesNoMismatches = allYesNoRows.filter(
+          (r) => r.crossCheck?.status === "mismatch"
+        );
+        const yesNoUngradeable = allYesNoRows.filter((r) => !r.gradeable).length;
+
         const bookLine = bookFilter
           ? `Priced against: ${bookFilter}.`
           : `Priced against ALL venues - book filter disabled. Diagnostic only; do NOT ` +
             `publish a price from this board without re-pulling at your books.`;
 
-        if (allRows.length === 0) {
+        if (allRows.length === 0 && allYesNoRows.length === 0) {
           return {
             content: [
               {
@@ -837,10 +1282,33 @@ Error Handling:
           ? ` ${cancelledCount} cancelled market(s) skipped.`
           : "";
 
+        /* v2.11.0. Said in the prose, not only in the coverage object, because the
+         * thing this release fixes is a caller believing the board was complete. */
+        const yesNoNote = !allYesNoRows.length
+          ? ` No yes/no milestone markets are priced on this event.`
+          : input.includeYesNo
+            ? ` ${yesNoRows.length} YES/NO milestone market(s) included below as ` +
+              `yesNoRows` +
+              (yesNoTruncated
+                ? ` (${allYesNoRows.length} built, raise maxYesNoRows)`
+                : "") +
+              `.` +
+              (yesNoUngradeable
+                ? ` ${yesNoUngradeable} of them CANNOT be graded by tkb_grade_pick ` +
+                  `(ordering and composite markets); each row says so and why.`
+                : "") +
+              (yesNoMismatches.length
+                ? ` WARNING: ${yesNoMismatches.length} failed the cross-check against ` +
+                  `their own book's over 0.5. Do not post those.`
+                : "")
+            : ` ${allYesNoRows.length} YES/NO milestone market(s) are priced on this ` +
+              `event and NOT shown. Pass includeYesNo for anytime scorer, any home run, ` +
+              `any touchdown, double-double and the rest.`;
+
         const summary =
           `${rows.length} priced market(s) across ${distinctPlayers} player(s) in ${matchup}.` +
           `\n\n${bookLine}${rosterLine}${truncationLine}${splitLineNote}${oneSidedNote}` +
-          `${unpricedNote}${cancelledNote}` +
+          `${unpricedNote}${cancelledNote}${yesNoNote}` +
           `\n\nNO HIT RATES ON THIS BOARD BY DESIGN. This tool reports what is priced, ` +
           `not what is likely to win. Use tkb_screen_props for ranking where a rate ` +
           `source exists, and remember that early-season CFB and any WNBA market have ` +
@@ -858,7 +1326,12 @@ Error Handling:
           content: [
             {
               type: "text" as const,
-              text: `${summary}\n\n${JSON.stringify(rows, null, 2)}${unpricedList}`,
+              text:
+                `${summary}\n\n${JSON.stringify(rows, null, 2)}` +
+                (input.includeYesNo && yesNoRows.length
+                  ? `\n\nYES/NO MARKETS:\n${JSON.stringify(yesNoRows, null, 2)}`
+                  : "") +
+                unpricedList,
             },
           ],
           structuredContent: {
@@ -874,6 +1347,9 @@ Error Handling:
             oneSidedCount: oneSided,
             unpricedMarketCount: unpriced.size,
             cancelledCount,
+            yesNoRowsBuilt: allYesNoRows.length,
+            yesNoRowsReturned: yesNoRows.length,
+            yesNoCrossCheckMismatches: yesNoMismatches.length,
             pricedAgainst: bookFilter ?? "all",
             maxRowsApplied: effectiveMaxRows,
             period: requestedPeriod,
@@ -886,64 +1362,141 @@ Error Handling:
              * because a board that discards four fifths of an event used to read as
              * "every prop in this game", and a thread built off that assumption is
              * building off a slice. */
+            /* COVERAGE, RESTRUCTURED v2.11.0.
+             *
+             * It used to be one flat set of buckets, which worked while the board had
+             * one section. Now that yes/no markets are collected too, a single
+             * `notInCatalog` or `noBookPrice` figure would be two different facts added
+             * together. Each section owns its own denominator and its own drop reasons,
+             * and `unaccounted` spans both. A number that mixes two populations is the
+             * kind of thing that reads as precise and is not. */
             coverage: {
               seenOdds,
-              rowsBuilt: allRows.length,
-              rowsReturned: rows.length,
-              dropped: {
-                notOverUnder: droppedNotOverUnder,
-                nonOverUnderSide: droppedNonOverUnderSide,
-                nonGamePeriod: droppedNonGamePeriod,
-                notInCatalog: droppedNotInCatalog,
-                teamOrUnknownEntity: droppedTeamOrUnknownEntity,
-                unparsableOddID: droppedUnparsable,
-                noBookPrice: droppedNoBookPrice,
-                cancelled: cancelledCount,
-                unparsableLine: droppedUnparsableLine,
+              overUnder: {
+                sidesAccepted: sides.length,
+                rowsBuilt: allRows.length,
+                rowsReturned: rows.length,
+                dropped: {
+                  nonOverUnderSide: droppedNonOverUnderSide,
+                  nonGamePeriod: droppedNonGamePeriod,
+                  notInCatalog: droppedNotInCatalog,
+                  teamOrUnknownEntity: droppedTeamOrUnknownEntity,
+                  noBookPrice: droppedNoBookPrice,
+                  cancelled: cancelledCount,
+                  unparsableLine: droppedUnparsableLine,
+                },
+                sidesNotOverUnder: Object.fromEntries(
+                  [...droppedSides.entries()].sort((a, b) => b[1] - a[1])
+                ),
+                nonGamePeriodsSeen: Object.fromEntries(
+                  [...droppedPeriods.entries()].sort((a, b) => b[1] - a[1])
+                ),
+                statIDsNotInCatalog: Object.fromEntries(
+                  [...droppedStatIDs.entries()].sort((a, b) => b[1] - a[1])
+                ),
               },
-              /* RECONCILIATION. sidesAccepted plus every dropped bucket must equal
-               * seenOdds. If `unaccounted` is ever non-zero, a drop path was added
-               * without a counter and this board is hiding markets again. */
-              sidesAccepted: sides.length,
+              yesNo: {
+                included: input.includeYesNo,
+                seenOdds: ynSeen,
+                sidesAccepted: ynSides.length,
+                rowsBuilt: allYesNoRows.length,
+                rowsReturned: yesNoRows.length,
+                truncated: yesNoTruncated,
+                dropped: {
+                  notYesNoSide: ynDroppedNotYesNoSide,
+                  nonGamePeriod: ynDroppedNonGamePeriod,
+                  notInCatalog: ynDroppedNotInCatalog,
+                  teamOrUnknownEntity: ynDroppedTeamOrUnknownEntity,
+                  noBookPrice: ynDroppedNoBookPrice,
+                  cancelled: ynCancelled,
+                },
+                sidesNotYesNo: Object.fromEntries(
+                  [...ynDroppedSides.entries()].sort((a, b) => b[1] - a[1])
+                ),
+                nonGamePeriodsSeen: Object.fromEntries(
+                  [...ynDroppedPeriods.entries()].sort((a, b) => b[1] - a[1])
+                ),
+                statIDsNotInCatalog: Object.fromEntries(
+                  [...ynDroppedStatIDs.entries()].sort((a, b) => b[1] - a[1])
+                ),
+                /* THE MAPPING CHECK, reported whether or not the rows are returned.
+                 * A mismatch here means a yes/no market and its own book's over 0.5
+                 * disagree, which is the same bet at two prices and therefore a
+                 * mapping defect. Zero mismatches is the claim this release makes. */
+                crossCheck: {
+                  agrees: allYesNoRows.filter((r) => r.crossCheck?.status === "agrees")
+                    .length,
+                  mismatch: yesNoMismatches.length,
+                  noComparableLine: allYesNoRows.filter(
+                    (r) => r.crossCheck?.status === "no_comparable_line"
+                  ).length,
+                  mismatchDetail: yesNoMismatches
+                    .slice(0, 10)
+                    .map((r) => `${r.playerName} ${r.market}: ${r.crossCheck!.detail}`),
+                },
+                ungradeableRowCount: yesNoUngradeable,
+              },
+              /* Moneylines, spreads and three-way prices. Counted and NAMED, because
+               * the old single `notOverUnder` figure of 757 told the caller nothing
+               * about what those odds actually were. */
+              otherBetTypes: {
+                count: droppedOtherBetType,
+                betTypesSeen: Object.fromEntries(
+                  [...otherBetTypesSeen.entries()].sort((a, b) => b[1] - a[1])
+                ),
+              },
+              unparsableOddID: droppedUnparsable,
+              /* RECONCILIATION, now spanning both sections. Every odd SGO returned is
+               * either an accepted side in one of the two sections or counted under a
+               * reason. If this is ever non-zero a drop path was added without a
+               * counter and the board is hiding markets again. */
               unaccounted:
                 seenOdds -
                 sides.length -
+                ynSides.length -
                 droppedUnparsable -
-                droppedNotOverUnder -
+                droppedOtherBetType -
                 droppedNonOverUnderSide -
                 droppedNonGamePeriod -
                 droppedNotInCatalog -
                 droppedTeamOrUnknownEntity -
                 droppedNoBookPrice -
                 cancelledCount -
-                droppedUnparsableLine,
-              // Named so a real gap is identifiable rather than just counted.
-              sidesNotOverUnder: Object.fromEntries(
-                [...droppedSides.entries()].sort((a, b) => b[1] - a[1])
-              ),
-              nonGamePeriodsSeen: Object.fromEntries(
-                [...droppedPeriods.entries()].sort((a, b) => b[1] - a[1])
-              ),
-              statIDsNotInCatalog: Object.fromEntries(
-                [...droppedStatIDs.entries()].sort((a, b) => b[1] - a[1])
-              ),
+                droppedUnparsableLine -
+                ynDroppedNotYesNoSide -
+                ynDroppedNonGamePeriod -
+                ynDroppedNotInCatalog -
+                ynDroppedTeamOrUnknownEntity -
+                ynDroppedNoBookPrice -
+                ynCancelled,
               note:
-                `Over/under, catalog markets only, period ${requestedPeriod} (${periodCode}). ` +
-                `notOverUnder is mostly yes/no milestone markets (anytime scorer, first scorer, ` +
-                `double-double), reachable only via tkb_get_yes_no_prop. nonOverUnderSide is an `+
-                `ou market carrying a side this board cannot use (yes/no, home/away); the sides `+
-                `are named above. nonGamePeriod is halves, ` +
-                `quarters, hockey periods and first-N-innings props. notInCatalog means the books ` +
-                `price a market that OU_PROP_MARKETS does not list, which is catalog drift and ` +
-                `the statIDs are named above. ` +
+                `Period ${requestedPeriod} (${periodCode}). Two sections: over/under and ` +
+                `yes/no. nonGamePeriod is halves, quarters, hockey periods and ` +
+                `first-N-innings props, reachable by passing period. nonOverUnderSide is an ` +
+                `ou market carrying a side this board cannot use (yes/no, home/away) and ` +
+                `notYesNoSide is its mirror in the yes/no section; the sides are named in ` +
+                `each section. notInCatalog means the ` +
+                `books price a market the catalog does not list, which is drift, and the ` +
+                `statIDs are named. noBookPrice is a market carrying only a fair-odds model ` +
+                `number, which is never publishable. otherBetTypes is moneylines and ` +
+                `spreads, which belong to tkb_get_game_lines, not here. ` +
+                (input.includeYesNo
+                  ? `Yes/no rows ARE included.`
+                  : `Yes/no rows were NOT requested: ${allYesNoRows.length} are built and ` +
+                    `waiting, pass includeYesNo to see them.`) +
+                ` ` +
                 (input.includeAltLines
                   ? `Alt lines WERE requested.`
                   : `Alt lines were NOT requested, so only each market's main line is here; ` +
                     `pass includeAltLines to see the ladder.`),
             },
             rows,
+            ...(input.includeYesNo ? { yesNoRows } : {}),
             ...(input.includeUnpriced
-              ? { unpricedMarkets: [...unpriced.keys()].sort() }
+              ? {
+                  unpricedMarkets: [...unpriced.keys()].sort(),
+                  unpricedYesNoMarkets: [...unpricedYesNo.keys()].sort(),
+                }
               : {}),
           },
         };
