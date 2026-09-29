@@ -6,6 +6,56 @@ import type { SportKey } from "../constants.js";
  * player-level Over/Under rows only). Used by tkb_get_odds to construct exact
  * oddIDs instead of loose text matching.
  */
+  /* ---- CATALOG DRIFT REPAIR, v2.10.8 ----
+   *
+   * DISCOVERED BY MEASUREMENT, NOT BY READING. v2.10.7 added a `coverage` block to
+   * tkb_get_prop_board reporting `statIDsNotInCatalog`: statIDs the books HAVE priced
+   * that this catalog did not list, so the board silently discarded them. A sweep of 13
+   * boards across every sport on 2026-09-28 and 2026-09-29 found far less drift than
+   * feared (MLB and WNBA were perfectly aligned, zero missing) and concentrated it
+   * almost entirely in football.
+   *
+   * MEASURED ON Philadelphia at Chicago, eventID iVXqTw1LGEj0TGVxDgTs, 1,718 odds:
+   *   receiving_targets        20 odds
+   *   passing_interceptions     6
+   *   punting_numPunts          6
+   *   rushing_yardsPerAttempt   4   NOT ADDED, see below
+   *   yards                     4   NOT ADDED, see below
+   *   fieldGoals_longestMade    2
+   *   punting_puntsInside20     2
+   *   largestLead               2   NOT ADDED, see below
+   *
+   * DELIBERATELY NOT ADDED, and the reasons matter more than the additions:
+   *   `yards`                  bare, unprefixed, 4 odds, and it appears identically on
+   *                            CFB. Could be a team total or an untyped player yardage
+   *                            market. Cataloguing it would be guessing at a meaning,
+   *                            which is how the label crisis started. Probe the raw
+   *                            oddID first.
+   *   `largestLead`            a TEAM or GAME market, not a player prop. This catalog is
+   *                            player props only.
+   *   `rushing_yardsPerAttempt` a RATE, not a count. Grading it needs a denominator
+   *                            (attempts) rather than a stat lookup, and every consumer
+   *                            here assumes a countable value. Real work, not a one-line
+   *                            add.
+   *   `cornerKicks` (EPL, 2)   entity unresolved. Corners are usually a team or match
+   *                            total; some books price player corners taken. Bucket
+   *                            ordering weakly suggests a player entity resolved, which
+   *                            is an inference, not evidence.
+   *
+   * VISIBILITY IS NOT THE SAME AS SCREENABILITY. Adding a statID here puts the market on
+   * the prop board, which is what it was missing. It does NOT guarantee a hit rate or a
+   * grade: NFL rates run through the generic SGO results path, which is statID-agnostic
+   * but unverified for each of these specific fields, and BDL's stat map covers only mlb
+   * and wnba. So each of these needs a hit-rate spot check before it goes on any pick
+   * whitelist. On the board they are strictly better visible than invisible.
+   *
+   * CFB GETS THE SAME FOOTBALL ENTRIES ON SHARED-NAMESPACE GROUNDS, following the
+   * precedent already set in this file for basketball: SGO has one football stat
+   * namespace and the CFB block is otherwise the NFL block. The CFB boards measured in
+   * the sweep were FanDuel-only and carried 18 to 21 rows, so their drift is almost
+   * certainly understated rather than genuinely absent. A market no book posts simply
+   * returns nothing, which is the correct outcome and costs nothing.
+   */
 export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }[]> = {
   mlb: [
     { statID: "batting_doubles", label: "Doubles" },
@@ -75,6 +125,14 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
     { statID: "defense_soloTackles", label: "Solo Tackles" },
     { statID: "touchdowns", label: "Touchdowns" },
     { statID: "turnovers", label: "Turnovers" },
+    // ---- ADDED v2.10.8 from measured drift. See the block comment above. ----
+    { statID: "receiving_targets", label: "Receiving Targets" },
+    // NOT "Interceptions". That label is already taken by defense_interceptions in this
+    // same block, and a collision here is the exact failure that cost four NFL nights.
+    { statID: "passing_interceptions", label: "Interceptions Thrown" },
+    { statID: "punting_numPunts", label: "Punts" },
+    { statID: "punting_puntsInside20", label: "Punts Inside 20" },
+    { statID: "fieldGoals_longestMade", label: "Longest Field Goal Made" },
   ],
   cfb: [
     { statID: "extraPoints_kicksMade", label: "Extra Points Made" },
@@ -100,6 +158,12 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
     { statID: "defense_sacks", label: "Sacks" },
     { statID: "points", label: "Score" },
     { statID: "touchdowns", label: "Touchdowns" },
+    // ---- ADDED v2.10.8, shared football namespace. See the block comment above. ----
+    { statID: "receiving_targets", label: "Receiving Targets" },
+    { statID: "passing_interceptions", label: "Interceptions Thrown" },
+    { statID: "punting_numPunts", label: "Punts" },
+    { statID: "punting_puntsInside20", label: "Punts Inside 20" },
+    { statID: "fieldGoals_longestMade", label: "Longest Field Goal Made" },
   ],
 
   // ---- TENNIS ----
@@ -282,6 +346,10 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
     { statID: "powerPlay_goals+assists", label: "Power Play Points" },
     { statID: "goalie_saves", label: "Saves" },
     { statID: "shots_onGoal", label: "Shots On Goal" },
+    // ADDED v2.10.8. Time on ice, measured as 4 odds on the only NHL board available.
+    // UNIT CAUTION: hockey TOI is conventionally minutes and seconds, so confirm the
+    // line format on a live board before any pick is written off this market.
+    { statID: "minutesPlayed", label: "Time On Ice" },
     { statID: "shots", label: "Shots Taken (incl. missed and blocked)" },
     { statID: "shots_blocked", label: "Own Shots Blocked" },
   ],

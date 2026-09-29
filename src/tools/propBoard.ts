@@ -3,6 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
 import { allBookPrices, extractPricedLine, roundToNearestTen, type BookPrice } from "../services/oddsPricing.js";
+import { PERIOD_CODES } from "../services/oddIdBuilder.js";
 import { parseOddID, type ParsedOddID } from "../services/oddIdParser.js";
 import {
   participantModel,
@@ -305,6 +306,12 @@ const PropBoardInputSchema = z
       .describe(
         "Backstop on rows returned. OMIT IT and the cap comes from the sport (v2.10.7): NFL and MLB 400, CFB and NHL 300, everything else 150. The old flat default of 80 was measured returning 70 of 142 rows on one NFL game, and because the cut follows SGO's response order that was ONE TEAM's board presented as the game's. Ceiling raised from 250 to 600. Truncation is always reported, never silent."
       ),
+    period: z
+      .string()
+      .default("full_game")
+      .describe(
+        "ADDED v2.10.8. Which period's props to return. Defaults to `full_game`, which is what this board has always returned and the only thing it could return before now. Pass a PERIOD_CODES key from src/services/oddIdBuilder.ts to reach period props instead: football and basketball use 1st_half, 2nd_half, 1st_quarter through 4th_quarter; hockey uses 1st_period, 2nd_period, 3rd_period and regulation; baseball uses 1st_inning through 9th_inning plus 1st_3_innings, 1st_5_innings and 1st_7_innings; soccer uses 1st_half, 2nd_half and regulation. MEASURED which codes actually carry odds, 2026-09-28: NFL 1h/2h/1q/2q/3q/4q, CFB and WNBA 1h/1q/2q/3q/4q, MLB 1i to 9i plus 1h plus 1ix3/1ix5/1ix7, NHL 1p/2p/3p/reg, EPL 1h/2h/reg. A period with no posted markets returns an empty board and says so, which is the correct outcome."
+      ),
     includeAltLines: z
       .boolean()
       .default(false)
@@ -466,6 +473,31 @@ Error Handling:
         }
 
         const event = events[0]!;
+
+        /* v2.10.8: the board is no longer hardwired to the full game. `period` maps
+         * through the same PERIOD_CODES table every oddID builder uses, so there is one
+         * period vocabulary in the connector rather than two that can drift. An unknown
+         * key is refused by name rather than silently returning an empty board, which
+         * would be indistinguishable from "this period has no markets". */
+        // Defaulted IN CODE, not only in the schema. A direct handler call bypasses
+        // zod's default, which is the same fragility toolWiring.test.ts records for
+        // preferredBookmakers and .trim().
+        const requestedPeriod = input.period ?? "full_game";
+        const periodCode = PERIOD_CODES[requestedPeriod];
+        if (!periodCode) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `"${requestedPeriod}" is not a recognized period. Valid keys: ` +
+                  `${Object.keys(PERIOD_CODES).join(", ")}.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
         // v2.10.7: an omitted maxRows resolves per sport rather than to a flat 80.
         const effectiveMaxRows =
           input.maxRows ?? defaultMaxRowsFor(input.sport as SportKey);
@@ -522,12 +554,64 @@ Error Handling:
             };
           }
 
+          /* ---- THE EMPTY PATH USED TO REPORT NOTHING, FIXED v2.10.8 ----
+           *
+           * This early return fired before any coverage was computed, so a board with
+           * no attached players produced a response with no diagnostics at all.
+           *
+           * MEASURED 2026-09-28 on two UCL fixtures including Paris Saint-Germain at
+           * Manchester City: `pricedRowCount: 0, unpricedMarketCount: 0` and NO coverage
+           * block, while EPL fixtures the same week returned `seenOdds` in the 600s. So a
+           * UCL league-mapping gap was INDISTINGUISHABLE from "books have not posted
+           * yet", which are opposite problems needing opposite responses.
+           *
+           * The two numbers below separate them. `oddsOnEvent` is how many odds SGO
+           * returned at all: zero means the event carries no markets, which is a mapping
+           * or coverage question. Non-zero with no attached players means markets exist
+           * but none are addressable by playerID, which is the tennis and UFC shape.
+           */
+          const oddsOnEvent = Object.keys(event.odds ?? {}).length;
+          const playerKeyedOdds = Object.keys(event.odds ?? {}).filter((k) => {
+            const pp = parseOddID(k);
+            return pp ? pp.entity !== "home" && pp.entity !== "away" && pp.entity !== "all" : false;
+          }).length;
+
           return {
+            structuredContent: {
+              eventID: event.eventID,
+              matchup,
+              pricedRowCount: 0,
+              playersAttached: 0,
+              coverage: {
+                oddsOnEvent,
+                playerKeyedOdds,
+                diagnosis:
+                  oddsOnEvent === 0
+                    ? `SGO returned NO odds of any kind for this event. That is not "props ` +
+                      `have not posted": a priced event carries team markets long before ` +
+                      `player props. Treat this as a league coverage or mapping question ` +
+                      `and check a second fixture in the same league before planning content.`
+                    : playerKeyedOdds === 0
+                      ? `This event carries ${oddsOnEvent} odds but NONE are keyed to a ` +
+                        `playerID, so there is no player board to build and there may never ` +
+                        `be. That is the documented shape for tennis and UFC, where ` +
+                        `competitors occupy the home and away participant slots.`
+                      : `This event carries ${oddsOnEvent} odds, ${playerKeyedOdds} of them ` +
+                        `player-keyed, but SGO's players object is empty so they cannot be ` +
+                        `resolved to names. Retry closer to game time.`,
+              },
+            },
             content: [
               {
                 type: "text" as const,
                 text:
                   `No players attached to ${matchup} yet.\n\n` +
+                  `DIAGNOSTIC (v2.10.8): SGO returned ${oddsOnEvent} odds for this event, ` +
+                  `${playerKeyedOdds} of them player-keyed. ` +
+                  (oddsOnEvent === 0
+                    ? `ZERO odds means this is a league coverage or mapping question, NOT a ` +
+                      `timing one, because team markets post long before player props.\n\n`
+                    : `\n\n`) +
                   `SGO builds the player list from posted markets, so an empty roster means ` +
                   `"not priced yet" rather than "no players". Player props typically post ` +
                   `within a few days of kickoff, and for MLB often only on the morning of.\n\n` +
@@ -589,7 +673,7 @@ Error Handling:
           // PERIOD PROPS. Halves, quarters, hockey periods and first-N-innings props
           // are real markets and are all discarded here, because the board is
           // full-game only.
-          if (parsed.period !== "game") {
+          if (parsed.period !== periodCode) {
             droppedNonGamePeriod++;
             droppedPeriods.set(parsed.period, (droppedPeriods.get(parsed.period) ?? 0) + 1);
             continue;
@@ -771,6 +855,8 @@ Error Handling:
             cancelledCount,
             pricedAgainst: bookFilter ?? "all",
             maxRowsApplied: effectiveMaxRows,
+            period: requestedPeriod,
+            periodCode,
             altLinesIncluded: input.includeAltLines,
             /* WHAT THIS BOARD IS NOT SHOWING YOU, v2.10.7.
              *
@@ -798,7 +884,7 @@ Error Handling:
                 [...droppedStatIDs.entries()].sort((a, b) => b[1] - a[1])
               ),
               note:
-                `Over/under, full-game, catalog markets only. ` +
+                `Over/under, catalog markets only, period ${requestedPeriod} (${periodCode}). ` +
                 `notOverUnder is mostly yes/no milestone markets (anytime scorer, first scorer, ` +
                 `double-double), reachable only via tkb_get_yes_no_prop. nonGamePeriod is halves, ` +
                 `quarters, hockey periods and first-N-innings props. notInCatalog means the books ` +
