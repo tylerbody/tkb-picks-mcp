@@ -52,6 +52,8 @@ interface RoleProfile {
 const DAYS_PER_TEAM_GAME: Record<SportKey, number> = {
   mlb: 1.25,
   wnba: 2.6,
+  // An 82-game season over roughly 165 days, and back-to-backs are common.
+  nba: 2.1,
   nfl: 7.5,
   cfb: 7.5,
   // Tennis never reaches this aggregator - the capability guard in tools/hitRate.ts

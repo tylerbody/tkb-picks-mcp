@@ -62,7 +62,7 @@ const HitRateInputSchema = z
       .enum(["auto", "bdl", "sgo", "cfbd"])
       .default("auto")
       .describe(
-        "Which provider computes the rate. 'auto' (default) tries BALLDONTLIE first and falls back to SportsGameOdds - BDL has no monthly object cap, so it is roughly 20x cheaper. For CFB, 'auto' uses CollegeFootballData, because SGO carries CFB games but NOT CFB player box scores outside the playoff (measured 2026-08-31: Dante Moore had 3 box scores across 15 started games) and BDL gates NCAAF stats behind GOAT. 'sgo' forces the original path. 'cfbd' forces CollegeFootballData."
+        "Which provider computes the rate. CHANGED IN v2.14.0: 'auto' (default) now uses SPORTSGAMEODDS, not BALLDONTLIE. The old BDL-first default existed because the Rookie key capped objects at 100,000/month; the Pro key allows 3,000,000/DAY (1,552 used on 2026-10-01), so that cost argument no longer applies, and SGO's box scores were verified against ESPN's independent game log on 2026-10-01 (NFL passing yards matched exactly across three games). Per-sport exceptions in 'auto' are unchanged and are all measurements: CFB uses CollegeFootballData because SGO carries CFB games but NOT CFB player box scores outside the playoff (2026-08-31: Dante Moore had 3 box scores across 15 started games) and BDL gates NCAAF behind GOAT; NHL uses the free NHL API; CBB uses CollegeBasketballData. 'bdl' forces BALLDONTLIE and is now REFUSED BY NAME where it has no resolvers rather than silently returning SGO data, which is what it used to do: resolvers exist for MLB and WNBA only, nine sports have none, and WNBA is 401-gated behind GOAT on this account. BDL is fully preserved for a swap back to a Rookie key. Every answer reports statSourceUsed."
       ),
     includePriorSeason: z
       .boolean()
@@ -465,14 +465,78 @@ Error Handling:
           };
         }
 
-        // ---- BDL-FIRST ROUTING ----
-        // SGO bills per event object and a hit rate needs a whole team history,
-        // so one thread measured at 211 entities and daily builds projected over
-        // the 100,000 monthly cap. BDL has no object cap and returns per-player
-        // rows directly. Try it first, fall back silently on any failure so a BDL
-        // outage degrades cost rather than correctness.
-        const canUseBdl =
-          params.dataSource !== "sgo" && isStatSupported(params.sport, params.statID);
+        /* ================= SGO-FIRST ROUTING, v2.14.0 =================
+         *
+         * THIS USED TO BE BDL-FIRST, for a reason that has stopped applying. The old
+         * note read: SGO bills per event object, a hit rate needs a whole team history,
+         * one thread measured at 211 entities, and daily builds projected over the
+         * 100,000 monthly cap. Every word of that was true on the ROOKIE key.
+         *
+         * On the Pro key the cap is 3,000,000 entities a day and unlimited monthly.
+         * Measured 2026-10-01: 1,552 of 3,000,000 used on the day, 186 of 250,000 on
+         * the hour. The cost argument that made BDL the default is now two orders of
+         * magnitude away from mattering.
+         *
+         * AND SGO'S BOX SCORES WERE VERIFIED, not assumed. On 2026-10-01 SGO's NFL
+         * passing yards matched ESPN's independent game log exactly on three games
+         * (153 / 264 / 203). That check is the whole basis for this inversion.
+         *
+         * WHAT BDL ACTUALLY COVERS, measured the same day: stat resolvers exist for
+         * MLB (18) and WNBA (15) and NOTHING ELSE. Nine sports have zero. WNBA's are
+         * 401-gated behind GOAT on this account. So BDL-first was, in practice, MLB
+         * first and a silent no-op everywhere else.
+         *
+         * ---- THE SILENT NO-OP, WHICH IS THE REAL BUG FIXED HERE ----
+         *
+         * `canUseBdl` was `dataSource !== "sgo" && isStatSupported(...)`. Pass
+         * `dataSource: "bdl"` on NFL and isStatSupported is false, so it fell straight
+         * through to SGO and returned SGO data with no provenance and no warning.
+         * Measured: two calls, one with dataSource "sgo" and one with "bdl", came back
+         * BYTE-IDENTICAL including SGO event IDs inside the supposed BDL log. A
+         * parameter that silently does nothing is worse than one that errors.
+         *
+         * So now: an EXPLICIT provider that cannot serve is REFUSED BY NAME, and every
+         * answer says which provider produced it.
+         *
+         * BDL IS PRESERVED IN FULL, deliberately. Nothing below is deleted, the client
+         * still ships, and `dataSource: "bdl"` still routes to it wherever resolvers
+         * exist. If this account swaps back to a Rookie key the entity cap returns and
+         * BDL-first becomes correct again; flipping SGO_FIRST_SPORTS back is then a
+         * one-line change rather than a rebuild. */
+        const bdlCanServe = isStatSupported(params.sport, params.statID);
+
+        /* REFUSE AN IMPOSSIBLE EXPLICIT CHOICE rather than quietly substituting. */
+        if (params.dataSource === "bdl" && !bdlCanServe) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `dataSource="bdl" CANNOT SERVE ${params.sport.toUpperCase()} ` +
+                  `"${params.statID}".\n\n` +
+                  `This connector has BALLDONTLIE stat resolvers for MLB and WNBA only; ` +
+                  `nine sports have none, and WNBA's are gated behind GOAT on this ` +
+                  `account (a live 401, confirmed 2026-10-01).\n\n` +
+                  `Until v2.14.0 this request silently returned SportsGameOdds data ` +
+                  `labelled as nothing in particular. It now refuses instead. Drop ` +
+                  `dataSource to use the default source for this sport, or pass ` +
+                  `dataSource="sgo" explicitly.`,
+              },
+            ],
+            structuredContent: {
+              ok: false,
+              reason: "bdl_cannot_serve",
+              sport: params.sport,
+              statID: params.statID,
+              bdlSupportedSports: ["mlb", "wnba"],
+            },
+            isError: true,
+          };
+        }
+
+        /* Only an EXPLICIT bdl request reaches BDL now. `auto` prefers SGO, whose box
+         * scores are verified and whose quota is no longer a constraint. */
+        const canUseBdl = params.dataSource === "bdl" && bdlCanServe;
 
         if (canUseBdl) {
           try {
@@ -515,7 +579,7 @@ Error Handling:
                       JSON.stringify(bdlResult, null, 2),
                   },
                 ],
-                structuredContent: bdlResult,
+                structuredContent: { ...bdlResult, statSourceUsed: "bdl" },
               };
             }
 
@@ -534,7 +598,7 @@ Error Handling:
                     `${provenance}\n\n${JSON.stringify(bdlResult, null, 2)}`,
                 },
               ],
-              structuredContent: bdlResult,
+              structuredContent: { ...bdlResult, statSourceUsed: "bdl" },
             };
           } catch (bdlErr) {
             // Fall through to SGO. The reason is surfaced so a persistent BDL
@@ -560,10 +624,21 @@ Error Handling:
                     JSON.stringify(sgoFallback, null, 2),
                 },
               ],
-              structuredContent: sgoFallback,
+              structuredContent: { ...sgoFallback, statSourceUsed: "sgo", statSourceRequested: "bdl" },
             };
           }
         }
+
+        /* PROVENANCE ON EVERY ANSWER, v2.14.0. Until now the BDL path announced itself
+         * and the SGO path said nothing, so a caller could not tell which provider
+         * produced a number - and when dataSource was silently ignored, could not tell
+         * that it had been ignored. Every return below carries this. */
+        const SGO_PROVENANCE =
+          `\n\nSource: SPORTSGAMEODDS player box scores (consumes object quota). ` +
+          `SGO-first is the default as of v2.14.0: the Pro key's entity cap is ` +
+          `3,000,000/day rather than the Rookie 100,000/month that made BDL the ` +
+          `default, and SGO's box scores were verified against ESPN on 2026-10-01. ` +
+          `Pass dataSource="bdl" to force BALLDONTLIE where it has resolvers (MLB, WNBA).`;
 
         const result = await getPlayerHitRate(sgo, {
           ...params,
@@ -578,11 +653,12 @@ Error Handling:
                 text:
                   `${result.sampleWarning}\n\n` +
                   `${params.playerName} | ${params.statID} ${params.direction} ${params.line}\n` +
-                  `Appearances found: ${result.gamesConsidered} across ${result.teamGamesScanned} team games scanned.\n\n` +
+                  `Appearances found: ${result.gamesConsidered} across ${result.teamGamesScanned} team games scanned.` +
+                  `${SGO_PROVENANCE}\n\n` +
                   JSON.stringify(result, null, 2),
               },
             ],
-            structuredContent: result,
+            structuredContent: { ...result, statSourceUsed: "sgo" },
           };
         }
 
@@ -608,10 +684,10 @@ Error Handling:
           content: [
             {
               type: "text" as const,
-              text: `${summary}${seasonLine}\n\n${JSON.stringify(result, null, 2)}`,
+              text: `${summary}${seasonLine}${SGO_PROVENANCE}\n\n${JSON.stringify(result, null, 2)}`,
             },
           ],
-          structuredContent: result,
+          structuredContent: { ...result, statSourceUsed: "sgo" },
         };
       } catch (err) {
         return {

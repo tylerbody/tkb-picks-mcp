@@ -131,6 +131,10 @@ const HIT_RATE_CONCURRENCY = 3;
 const DEFAULT_MAX_PLAYERS: Record<SportKey, number> = {
   mlb: 24,   // rosters observed at 20-22
   wnba: 20,  // rosters observed at 14, ample headroom
+  // NBA actives are 17 with 15 on the standard roster. Set at the WNBA figure plus
+  // headroom rather than guessed low: the v2.9.x lesson from CFB is that clipping a
+  // board on SGO's response order discards players at random, not by quality.
+  nba: 24,
   nfl: 24,   // 22 observed on a Week 1 game
   cfb: 80,   // 49 observed; measured to cost nothing extra, so do not clip
   atp: 0,    // no roster - refused by the capability guard before reaching here

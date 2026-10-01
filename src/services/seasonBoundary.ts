@@ -37,6 +37,7 @@ export interface SeasonInfo {
 const SEASON_START_MONTH: Record<SportKey, number> = {
   mlb: 2, // March
   wnba: 4, // May
+  nba: 9, // October (preseason early Oct, regular season late Oct)
   nfl: 7, // August (preseason); regular season September
   cfb: 7, // August
   // TENNIS RUNS ON THE CALENDAR YEAR. The tours open with the Australian swing in

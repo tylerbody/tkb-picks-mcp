@@ -76,6 +76,7 @@ interface LeagueTierInfo {
 const LEAGUE_TIERS: Record<SportKey, LeagueTierInfo> = {
   mlb: { documentedFrom: "amateur" },
   nfl: { documentedFrom: "amateur" },
+  nba: { documentedFrom: "amateur" },
   cfb: { documentedFrom: "amateur", note: "Named as College Football on the pricing page." },
   cbb: {
     documentedFrom: "amateur",

@@ -213,6 +213,46 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
   // threes explicitly. The rest are listed here because the statID is documented; a
   // market that is not posted returns no odds and says so, which is the correct
   // outcome and not a catalog error.
+  /* ---- NBA, ADDED v2.14.0 ----
+   *
+   * BYTE-IDENTICAL TO `cbb` AND `wnba`, and that is enforced rather than hoped: the
+   * v2.10.9 parity test asserts the basketball blocks hold the same statIDs and the
+   * same labels in both directions, and NBA joins that check. SGO's own NBA page
+   * documents points, assists, rebounds, threePointersMade, steals, blocks, turnovers,
+   * free throws, field goals, the PRA combinations, double-double, triple-double and
+   * first basket, which is this list.
+   *
+   * `points` IS LABELLED "Score" here, exactly as in the other two basketball blocks,
+   * so one label means one thing across the connector and tkb_grade_pick cannot be
+   * handed an ambiguous "Points".
+   *
+   * NOT ADDED: the "two pointers" market SGO's NBA page mentions in prose. Its statID
+   * spelling is not given anywhere measured, and a guessed statID matches nothing
+   * silently. It will show up in the prop board's `statIDsNotInCatalog` the first time
+   * a book prices it, named, which is how the last four catalog gaps were found.
+   */
+  nba: [
+    { statID: "assists", label: "Assists" },
+    { statID: "blocks", label: "Blocks" },
+    { statID: "blocks+steals", label: "Blocks + Steals" },
+    { statID: "fantasyScore", label: "Fantasy Score" },
+    { statID: "fieldGoalsAttempted", label: "Field Goals Attempted" },
+    { statID: "fieldGoalsMade", label: "Field Goals Made" },
+    { statID: "freeThrowsAttempted", label: "Free Throws Attempted" },
+    { statID: "freeThrowsMade", label: "Free Throws Made" },
+    { statID: "minutesPlayed", label: "Minutes Played" },
+    { statID: "offensiveRebounds", label: "Offensive Rebounds" },
+    { statID: "points+assists", label: "Points + Assists" },
+    { statID: "points+rebounds", label: "Points + Rebounds" },
+    { statID: "points+rebounds+assists", label: "Points + Rebounds + Assists" },
+    { statID: "rebounds", label: "Rebounds" },
+    { statID: "rebounds+assists", label: "Rebounds + Assists" },
+    { statID: "points", label: "Score" },
+    { statID: "steals", label: "Steals" },
+    { statID: "threePointersAttempted", label: "Three Pointers Attempted" },
+    { statID: "threePointersMade", label: "Three Pointers Made" },
+    { statID: "turnovers", label: "Turnovers" },
+  ],
   cbb: [
     { statID: "assists", label: "Assists" },
     { statID: "blocks", label: "Blocks" },
@@ -441,6 +481,20 @@ export const YES_NO_MARKETS: Record<SportKey, { statID: string; label: string }[
   atp: [],
   wta: [],
 
+  // NBA, v2.14.0. Same one-namespace argument as the over/under block above.
+  nba: [
+    { statID: "assists", label: "Any Assists" },
+    { statID: "blocks", label: "Any Blocks" },
+    { statID: "blocks+steals", label: "Any Blocks + Steals" },
+    { statID: "doubleDouble", label: "Double-Double" },
+    { statID: "firstBasket", label: "First Basket" },
+    { statID: "freeThrowsMade", label: "Any Free Throws Made" },
+    { statID: "rebounds", label: "Any Rebounds" },
+    { statID: "points", label: "Any Score" },
+    { statID: "steals", label: "Any Steals" },
+    { statID: "threePointersMade", label: "Any Threes Made" },
+    { statID: "tripleDouble", label: "Triple-Double" },
+  ],
   cbb: [
     { statID: "assists", label: "Any Assists" },
     { statID: "blocks", label: "Any Blocks" },
@@ -463,9 +517,21 @@ export const YES_NO_MARKETS: Record<SportKey, { statID: string; label: string }[
   // `bothTeamsScored` is a TEAM/GAME-level yes-no, not a player one. It is listed
   // because tkb_get_yes_no_prop can address the `all` entity, but it must never be
   // paired with a playerID.
+  /* `goals+assists` ADDED v2.14.0 FROM A MEASUREMENT. On Liverpool v Manchester City,
+   * 2026-10-01, the prop board dropped **72 odds** under
+   * `yesNo.statIDsNotInCatalog: { "goals+assists": 72 }`. That is the largest single
+   * catalog gap measured anywhere in this connector, and it is soccer's headline
+   * milestone market: did this player score OR assist.
+   *
+   * LABELLED "Any Goal Or Assist", deliberately not "Any Point". Hockey uses "Any
+   * Point" for the same statID because that is what hockey calls it, and soccer does
+   * not use the word point at all. Three labels now sit on three different statIDs and
+   * none of them can be confused: "Anytime Goalscorer" is `points` (goals),
+   * "Any Assist" is `assists`, "Any Goal Or Assist" is `goals+assists`. */
   epl: [
     { statID: "points", label: "Anytime Goalscorer" },
     { statID: "assists", label: "Any Assist" },
+    { statID: "goals+assists", label: "Any Goal Or Assist" },
     { statID: "bothTeamsScored", label: "Both Teams To Score" },
     { statID: "firstToScore", label: "First To Score" },
     { statID: "lastToScore", label: "Last To Score" },
@@ -475,6 +541,7 @@ export const YES_NO_MARKETS: Record<SportKey, { statID: string; label: string }[
   ucl: [
     { statID: "points", label: "Anytime Goalscorer" },
     { statID: "assists", label: "Any Assist" },
+    { statID: "goals+assists", label: "Any Goal Or Assist" },
     { statID: "bothTeamsScored", label: "Both Teams To Score" },
     { statID: "firstToScore", label: "First To Score" },
     { statID: "lastToScore", label: "Last To Score" },
@@ -544,6 +611,8 @@ export const SUPPORTED_PERIODS: Record<SportKey, string[]> = {
     "1st_7_innings",
   ],
   wnba: ["1st_half", "2nd_half", "1st_quarter", "2nd_quarter", "3rd_quarter", "4th_quarter"],
+  // NBA, v2.14.0. SGO's NBA page states period markets exist for quarters and halves.
+  nba: ["1st_half", "2nd_half", "1st_quarter", "2nd_quarter", "3rd_quarter", "4th_quarter"],
   nfl: ["1st_half", "2nd_half", "1st_quarter", "2nd_quarter", "3rd_quarter", "4th_quarter"],
   cfb: ["1st_half", "2nd_half", "1st_quarter", "2nd_quarter", "3rd_quarter", "4th_quarter"],
   // TENNIS: sets, not halves or quarters. Period codes 1s through 5s, added to
@@ -565,8 +634,17 @@ export const SUPPORTED_PERIODS: Record<SportKey, string[]> = {
   // binds them to specific markets and league play never reaches them, so they are
   // left out rather than guessed at. They matter for knockout-round UCL ties and are
   // worth confirming against GET /markets before a knockout stage is covered.
-  epl: ["1st_half", "2nd_half"],
-  ucl: ["1st_half", "2nd_half"],
+  /* REGULATION ADDED v2.14.0, FROM A MEASUREMENT RATHER THAN THE DOC.
+   *
+   * A live EPL board on Liverpool v Manchester City, 2026-10-01, reported `reg` in
+   * nonGamePeriodsSeen on BOTH sections: 6 over/under odds and 16 yes/no. Those were
+   * real, priced, full-match-equivalent markets that no caller could reach, because
+   * `regulation` was absent from this list and tkb_get_period_odds validates against
+   * it. Soccer settles its match lines on `reg` already (REGULATION_MATCH_LINE_SPORTS
+   * in constants.ts), so the period was known to the connector in one place and
+   * unreachable in another. */
+  epl: ["1st_half", "2nd_half", "regulation"],
+  ucl: ["1st_half", "2nd_half", "regulation"],
 
   // UFC ROUNDS. 1r through 5r are documented periodIDs ("1st Round" ... "5th Round")
   // and five is the ceiling: championship and main-event fights are five rounds,

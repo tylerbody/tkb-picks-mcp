@@ -254,6 +254,45 @@ export class EspnClient {
  */
 export const ESPN_STATS_PATH = "seasonTypes[].categories[].events[].stats";
 
+/* ===========================================================================
+ * `labels` IS NOT UNIQUE ON EVERY LEAGUE. Measured 2026-10-01, v2.14.0.
+ *
+ * WNBA and NHL both return 14 distinct labels, which made label-keyed mapping look
+ * safe. NFL returns 16 WITH DUPLICATES:
+ *
+ *   index  2  YDS   passingYards
+ *   index 12  YDS   rushingYards        <- same label, different stat
+ *   index  5  TD    passingTouchdowns
+ *   index 14  TD    rushingTouchdowns
+ *   index  4  AVG   yardsPerPassAttempt
+ *   index 13  AVG   yardsPerRushAttempt
+ *   index  7  LNG   longPassing
+ *   index 15  LNG   longRushing
+ *
+ * So a mapping keyed on "YDS" for an NFL quarterback picks up whichever of passing or
+ * rushing yards it happens to find first. Jalen Hurts went 153 passing and 25 rushing
+ * in one game; a label-keyed read could return either and both are plausible numbers,
+ * which is the worst kind of wrong.
+ *
+ * MAP ON `names` OR ON INDEX, NEVER ON `labels`. `names` is unique on every league
+ * measured so far (passingYards vs rushingYards). This constant exists so the next
+ * person adding a league checks rather than assumes, and so a league whose `names`
+ * also collide fails a test instead of shipping.
+ *
+ * NFL also returns ONE category ("Regular Season Stats") where WNBA and NHL split the
+ * regular season by month, so the flattener must not assume months either.
+ */
+export function duplicateLabelIndexes(labels: string[]): Record<string, number[]> {
+  const seen = new Map<string, number[]>();
+  labels.forEach((l, i) => seen.set(l, [...(seen.get(l) ?? []), i]));
+  return Object.fromEntries([...seen.entries()].filter(([, idx]) => idx.length > 1));
+}
+
+/** True when `names` can safely key a mapping for this league. */
+export function namesAreUnique(names: string[]): boolean {
+  return new Set(names).size === names.length;
+}
+
 export interface FlattenedGame {
   eventId: string;
   seasonType: string;

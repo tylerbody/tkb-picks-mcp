@@ -290,19 +290,29 @@ export const SPORT_CONFIG = {
   //
   // GOALS ARE `points`. There is no `goals` statID in SGO's soccer stat list.
   //
-  // HIT RATES FALSE, and this is a subscription fact rather than a missing product:
-  // BALLDONTLIE publishes /epl/v2/player_match_stats and /ucl/v1/player_match_stats,
-  // both gated behind GOAT for that specific sport, which this account does not hold.
-  // The free Fantasy Premier League API would serve EPL (not UCL) per-gameweek player
-  // stats, and is the obvious next step, but it is a new client rather than a config
-  // row and is deliberately NOT half-built here.
+  // HIT RATES TRUE AS OF v2.14.0, VIA SGO RATHER THAN BDL.
+  //
+  // This was false for a real reason that has stopped applying. BALLDONTLIE publishes
+  // /epl/v2/player_match_stats and /ucl/v1/player_match_stats, both gated behind GOAT
+  // for that sport, which this account does not hold - so BDL genuinely cannot serve
+  // soccer rates and still cannot.
+  //
+  // WHAT CHANGED is that SGO carries player box scores on its own events, and they were
+  // verified rather than assumed: on 2026-10-01 SGO's NFL passing yards matched ESPN's
+  // independent game log exactly across three games (153/264/203). A live EPL board the
+  // same day returned 54 over/under and 106 yes/no rows with 39 cross-check agreements
+  // and zero mismatches, so the soccer market mapping is sound too.
+  //
+  // The Fantasy Premier League API remains the obvious free EPL-only backfill if SGO's
+  // soccer box scores turn out thinner than its odds, and is still deliberately not
+  // half-built here.
   epl: {
     label: "EPL",
     sgoLeagueID: "EPL",
     bdlPath: "epl",
     supports: {
       playerProps: true,
-      hitRates: false,
+      hitRates: true,
       injuries: false,
       weather: false,
       teamSplits: false,
@@ -314,7 +324,7 @@ export const SPORT_CONFIG = {
     bdlPath: "ucl",
     supports: {
       playerProps: true,
-      hitRates: false,
+      hitRates: true,
       injuries: false,
       weather: false,
       teamSplits: false,
@@ -435,8 +445,37 @@ export const SPORT_CONFIG = {
     },
   },
 
-  // Add when NBA season starts:
-  // nba: { label: "NBA", sgoLeagueID: "NBA", bdlPath: "nba", supports: TEAM_SPORT_CAPABILITIES },
+  /* ---- NBA, ENABLED v2.14.0 ----
+   *
+   * This sat commented out as a one-liner for months while the enum rejected every NBA
+   * call at the MCP input layer, before any HTTP request. SGO Pro entitles NBA, and the
+   * catalogs cost nothing to write because SGO HAS ONE BASKETBALL STAT NAMESPACE: its
+   * NBA page documents points, assists, rebounds, threePointersMade, steals, blocks,
+   * turnovers, free throws, field goals, the PRA combos, double-double, triple-double
+   * and first basket, which is the `cbb` block exactly. That block and `wnba` are
+   * already pinned byte-identical by the v2.10.9 parity test, so NBA joins the same
+   * three-way check rather than being a fourth hand-written guess.
+   *
+   * hitRates TRUE and routed through SGO. BDL has a documented /nba path and this
+   * connector has NO nba stat resolvers in bdlStatMap, so a BDL-first default would
+   * have silently returned SGO data and said nothing - the exact defect v2.14.0 fixes
+   * in hitRate.ts. SGO's own box scores were verified against ESPN on 2026-10-01 and
+   * matched to the yard on three NFL games, which is the evidence for trusting them.
+   *
+   * injuries FALSE: BDL's injury feed is the only one wired up and it has no nba path
+   * here. weather FALSE: indoor. */
+  nba: {
+    label: "NBA",
+    sgoLeagueID: "NBA",
+    bdlPath: "nba",
+    supports: {
+      playerProps: true,
+      hitRates: true,
+      injuries: false,
+      weather: false,
+      teamSplits: true,
+    },
+  },
 } as const;
 
 export type SportKey = keyof typeof SPORT_CONFIG;
@@ -468,6 +507,7 @@ export type ParticipantModel = "roster" | "participant_slots" | "fighters";
 export const PARTICIPANT_MODEL: Record<SportKey, ParticipantModel> = {
   mlb: "roster",
   wnba: "roster",
+  nba: "roster",
   nfl: "roster",
   cfb: "roster",
   cbb: "roster",
@@ -551,6 +591,7 @@ export function matchLinePeriodFor(sport: SportKey): "full_game" | "regulation" 
 export const GAME_TOTAL_STAT: Record<SportKey, string> = {
   mlb: "points",
   wnba: "points",
+  nba: "points",
   nfl: "points",
   cfb: "points",
   cbb: "points",

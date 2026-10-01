@@ -10,6 +10,8 @@ import {
   detectDurationColumns,
   detectUnparsableColumns,
   extractRoster,
+  duplicateLabelIndexes,
+  namesAreUnique,
   type EspnGamelog,
 } from "../services/espnClient.js";
 import { flexBoolean, flexIntOptional, asBoolean, asNumber } from "../services/flexibleInput.js";
@@ -275,6 +277,12 @@ Examples:
         const eventsMetaCount = log.events ? Object.keys(log.events).length : 0;
         const allGames = flattenGamelog(log, { includePreseason: true }).games.length;
 
+        /* LABEL COLLISIONS, v2.14.0. NFL repeats YDS, TD, AVG and LNG across the
+         * passing and rushing halves of the same row, so a label-keyed mapping would
+         * silently pick the wrong stat. Reported so the next league gets checked. */
+        const duplicateLabels = duplicateLabelIndexes(labels);
+        const namesUnique = namesAreUnique(names);
+
         const paired = detectPairedColumns(labels, flat.games);
         /* NAMED SEPARATELY, v2.12.1. Hockey TOI/G is "20:14" and PROD is "0:00", neither
          * a number nor a made-attempted pair. Reporting them as a third and fourth kind
@@ -320,6 +328,10 @@ Examples:
                 `${JSON.stringify(flat.structure, null, 2)}\n\n` +
                 `PAIRED COLUMNS (made-attempted, e.g. "7-21" - these are NOT numbers): ` +
                 `${paired.length ? paired.map((i) => `${i}:${labels[i]}`).join(", ") : "none"}\n` +
+                (Object.keys(duplicateLabels).length
+                  ? `DUPLICATE LABELS (do NOT key a mapping on labels here): ` +
+                    `${Object.entries(duplicateLabels).map(([l, idx]) => `${l}@${idx.join("/")}`).join(", ")}\n`
+                  : `Labels are unique on this league.\n`) +
                 `DURATION COLUMNS (mm:ss, value returned in minutes): ` +
                 `${durations.length ? durations.map((i) => `${i}:${labels[i]}`).join(", ") : "none"}\n` +
                 `STILL UNPARSABLE (a form nothing handles yet - do NOT use these): ` +
@@ -349,6 +361,15 @@ Examples:
             eventsMetaCount,
             reconciles: eventsMetaCount === allGames,
             seasonStructure: flat.structure,
+            duplicateLabels,
+            labelsAreUnique: Object.keys(duplicateLabels).length === 0,
+            namesAreUnique: namesUnique,
+            mappingKeyAdvice: namesUnique
+              ? `Map on \`names\` or on index. ` +
+                (Object.keys(duplicateLabels).length
+                  ? `\`labels\` REPEATS on this league and must not key a mapping.`
+                  : `\`labels\` happens to be unique here, but do not rely on that: NFL repeats YDS, TD, AVG and LNG.`)
+              : `WARNING: \`names\` is NOT unique on this league either. Map on INDEX only, and work out what the duplicate names mean before using them.`,
             pairedColumnIndexes: paired,
             pairedColumnLabels: paired.map((i) => labels[i]),
             durationColumnIndexes: durations,
