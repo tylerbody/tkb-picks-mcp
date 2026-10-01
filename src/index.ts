@@ -36,6 +36,7 @@ import { registerRankingsTool } from "./tools/rankings.js";
 import { registerStandingsTool } from "./tools/standings.js";
 import { registerEventProbeTool } from "./tools/eventProbe.js";
 import { registerEspnProbeTool } from "./tools/espnProbe.js";
+import { registerDevigTool } from "./tools/devig.js";
 import { registerCfbdStatsProbeTool } from "./tools/cfbdStatsProbe.js";
 import { registerMlbMatchupTool } from "./tools/mlbMatchup.js";
 import { registerVerifyRosterTool } from "./tools/verifyRoster.js";
@@ -154,7 +155,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.12.2";
+const SERVER_VERSION = "2.13.0";
 
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -191,6 +192,9 @@ function buildServer(): McpServer {
    * which is the entire point of it. Diagnostic only until the probe confirms Render can
    * reach ESPN and that the measured shape still holds. */
   registerEspnProbeTool(server);
+  /* DEVIG, v2.13.0. Pure arithmetic on prices the caller supplies, so no client and no
+   * provider. Deliberately NOT wired into the prop board yet. */
+  registerDevigTool(server);
   if (cfbd) registerCfbdStatsProbeTool(server, cfbd);
   registerMlbMatchupTool(server, mlbStats);
   registerVerifyRosterTool(server, bdl);
