@@ -125,8 +125,19 @@ describe("v2.15.0 wiring: index.ts actually reaches the tool", () => {
     assert.match(indexSrc, /^\s*registerDebugEventTool\(server, sgo\);/m);
   });
 
-  test("the version was bumped with the behaviour change", () => {
-    assert.match(indexSrc, /const SERVER_VERSION = "2\.15\.0";/);
+  /* THIS TEST USED TO PIN THE EXACT STRING "2.15.0", WHICH WAS A MISTAKE.
+   * It failed the moment v2.16.0 bumped the version, flagging a correct release as a
+   * regression. A test that must be edited on every release is not testing anything;
+   * it is a second copy of the version number. The durable invariants are that the
+   * version is real semver and is NOT BELOW the release this file was written for. */
+  test("SERVER_VERSION is valid semver and has not regressed below 2.15.0", () => {
+    const m = indexSrc.match(/const SERVER_VERSION = "(\d+)\.(\d+)\.(\d+)";/);
+    assert.ok(m, "SERVER_VERSION is missing or is not plain semver");
+    const [major, minor, patch] = m!.slice(1, 4).map(Number);
+    assert.ok(
+      major > 2 || (major === 2 && minor >= 15),
+      `SERVER_VERSION ${major}.${minor}.${patch} is below the 2.15.0 this file covers`
+    );
   });
 
   /* package.json does not feed /health - SERVER_VERSION does - but the repo has

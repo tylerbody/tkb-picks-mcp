@@ -41,6 +41,7 @@ import { registerCfbdStatsProbeTool } from "./tools/cfbdStatsProbe.js";
 import { registerMlbMatchupTool } from "./tools/mlbMatchup.js";
 import { registerVerifyRosterTool } from "./tools/verifyRoster.js";
 import { registerDebugEventTool } from "./tools/debugEvent.js";
+import { createUnavailableBDLClient, isBdlConfigured } from "./services/bdlUnavailable.js";
 
 // ---- Environment / config ----
 
@@ -52,15 +53,29 @@ if (!SGO_API_KEY) {
   console.error("FATAL: SGO_API_KEY environment variable is not set.");
   process.exit(1);
 }
-if (!BDL_API_KEY) {
-  console.error("FATAL: BDL_API_KEY environment variable is not set.");
-  process.exit(1);
-}
 
 // ---- Build shared API clients (one instance each, reused across all tool calls) ----
 
 const sgo = new SGOClient(SGO_API_KEY);
-const bdl = new BDLClient(BDL_API_KEY);
+
+/**
+ * BALLDONTLIE IS OPTIONAL AS OF v2.16.0. IT USED TO BE FATAL.
+ *
+ * The guard that stood here was `if (!BDL_API_KEY) process.exit(1)`, which took all
+ * 31 tools down over a key that six of them need - the exact mistake the CFBD comment
+ * below warns about, made one screen earlier. Measured 2026-10-01: SGO serves every
+ * hit rate, box score, line, prop and grade; BDL is the only source for just one
+ * capability, the injury feed, plus standings, the CFB poll, streak scanning and roster
+ * verification.
+ *
+ * WITH NO KEY the connector runs on SportsGameOdds and the BDL-backed tools refuse by
+ * name rather than guessing. See services/bdlUnavailable.ts for why this is a Proxy
+ * rather than a `BDLClient | null` threaded through twelve signatures.
+ *
+ * SWAPPING BACK IS SETTING BDL_API_KEY IN RENDER. No code change: the client, the
+ * aggregators and every BDL route still ship intact.
+ */
+const bdl = BDL_API_KEY ? new BDLClient(BDL_API_KEY) : createUnavailableBDLClient();
 
 /**
  * CFBD IS OPTIONAL, UNLIKE SGO AND BDL, AND THE SERVER MUST STILL BOOT WITHOUT IT.
@@ -126,6 +141,19 @@ if (!cbbd) {
       "tool is unaffected."
   );
 }
+if (!isBdlConfigured(bdl)) {
+  console.warn(
+    "WARN: BDL_API_KEY is not set. The connector is running on SportsGameOdds alone. " +
+      "Unaffected: hit rates, box scores, odds, props, period odds, game lines, " +
+      "schedules, grading, weather, ESPN research. " +
+      "REFUSING BY NAME: tkb_get_injuries, tkb_get_standings, tkb_get_rankings, " +
+      "tkb_scan_streaks, tkb_verify_roster, tkb_debug_bdl_stats, and " +
+      'tkb_get_player_hit_rate with an explicit dataSource="bdl". ' +
+      "THE INJURY FEED HAS NO SUBSTITUTE - SGO publishes none, so confirm availability " +
+      "against the official injury report before posting a player prop. " +
+      "Restore by setting BDL_API_KEY in Render; no code change is required."
+  );
+}
 const weather = new WeatherClient(); // no API key needed - free public NWS API
 
 // ---- Build MCP server and register tools ----
@@ -156,7 +184,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.15.0";
+const SERVER_VERSION = "2.16.0";
 
 function buildServer(): McpServer {
   const server = new McpServer({

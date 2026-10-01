@@ -1,51 +1,68 @@
-# v2.15.0 apply notes
+# v2.16.0 apply notes: running on SportsGameOdds alone
 
-## 1. Overwrite these four files
-
-```
-src/index.ts
-src/tools/debugEvent.ts
-test/v2_15_0.test.ts      (NEW)
-package.json
-```
-
-## 2. DELETE one file. A zip cannot express a deletion, so do this by hand.
+## Overwrite these six files
 
 ```
-src/tools/debugInjuries.ts
+src/index.ts                      BDL no longer fatal; conditional client; boot warning
+src/services/bdlUnavailable.ts    NEW
+src/tools/hitRate.ts              one up-front refusal for explicit dataSource="bdl"
+test/v2_16_0.test.ts              NEW, 22 tests
+test/v2_15_0.test.ts              fixes a brittle version pin I shipped yesterday
+package.json                      2.15.0 -> 2.16.0
 ```
 
-Nothing imports it. `src/index.ts` never referenced it, so there is nothing
-dangling to clean up. `test/v2_15_0.test.ts` ASSERTS it is gone, so the suite
-fails if it is still present (mutation-verified: restoring the file fails the
-suite).
+Nothing to delete this time. No BDL code is removed anywhere.
 
-One loose end left deliberately alone: `bdlClient.getRawInjuries()` was that
-tool's only caller in `src/`. It is now unused except by a stub in
-`test/toolWiring.test.ts`. Removing it would mean editing two more files for no
-behavioural gain, so it stays. Flagging it rather than hiding it.
+## Then, in Render
 
-## 3. Unchanged on purpose
+Leave `BDL_API_KEY` alone until this build is deployed and verified. Once it is
+live you can delete the env var, and the connector keeps running.
 
-- `src/tools/futures.ts` kept, still unregistered. Blocked on the `type` value
-  this release makes readable.
-- `src/tools/teamRecord.ts` kept, still unregistered, per your call.
+Order matters: deploying this FIRST is what makes removing the key safe.
 
-## 4. Verify after deploy
+## Verify after deploy
 
 ```
-npm test          # expect 851 pass / 0 fail
+npm test     # expect 873 pass / 0 fail
 ```
 
-Then confirm the deploy took and read the field this release exists for:
+Then, with the key still set, confirm nothing regressed:
 
 ```
-tkb_get_api_usage                 -> header should report 2.15.0
-tkb_debug_raw_event(sport: "nfl", eventID: "ygBw5sEmEBR0sBPv7C4g")   # 15 Aug preseason
-tkb_debug_raw_event(sport: "nfl", eventID: "J5HTln3CEGxm5DE8iDDD")   # 13 Sep reg opener
+tkb_get_api_usage          -> header reports 2.16.0
+tkb_get_injuries(nfl)      -> still returns the live feed
+tkb_get_player_hit_rate    -> still statSourceUsed "sgo"
 ```
 
-Read `SCALARS_FIRST.type` in both. If the two differ, that is the preseason
-discriminator and the NFL/NHL filter can be built on it. If both say "match",
-SGO does not distinguish and the fallback is a per-sport season-start date
-table. Do not build the table until those two calls are made.
+After you remove `BDL_API_KEY` and it redeploys, confirm the new behaviour:
+
+```
+tkb_get_player_hit_rate(... no dataSource ...)   -> WORKS, statSourceUsed "sgo"
+tkb_get_injuries(nfl)                            -> refuses, naming BDL_API_KEY
+tkb_get_standings(nfl)                           -> refuses, naming BDL_API_KEY
+```
+
+The Render logs should carry one `WARN: BDL_API_KEY is not set` line at boot
+listing exactly what refuses.
+
+## What you lose, in one place
+
+| tool | after cancelling |
+| --- | --- |
+| `tkb_get_injuries` | REFUSES. No substitute exists; SGO publishes no injury feed. |
+| `tkb_get_standings` | REFUSES. `teamRecord.ts` is written and unregistered if you want an SGO version. |
+| `tkb_get_rankings` | REFUSES. CFB AP poll. CFBD's API has `/rankings` and you already hold that key. |
+| `tkb_scan_streaks` | REFUSES per player, scan still returns with reasons. |
+| `tkb_verify_roster` | REFUSES. `tkb_get_players` already gives teamID per event. |
+| `tkb_debug_bdl_stats` | REFUSES. Diagnostic only. |
+| `tkb_get_player_hit_rate` with `dataSource:"bdl"` | REFUSES, and points at `"sgo"`. |
+
+Everything else is untouched: hit rates (SGO default since v2.14.0), odds, props,
+period odds, game lines, schedules, grading, weather, ESPN research, devig.
+
+## Reimplementing BDL later
+
+Set `BDL_API_KEY` in Render. That is the whole procedure. The client, the
+aggregators, the stat maps and all twelve BDL routes still ship byte-for-byte;
+`index.ts` constructs the real client on the next boot. There is no code change
+to undo, which is the point: the subscription decision and the code are decoupled.

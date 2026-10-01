@@ -21,6 +21,7 @@ import {
   priorSeasonBdlLookback,
 } from "../services/bdlHitRateAggregator.js";
 import { isStatSupported } from "../services/bdlStatMap.js";
+import { isBdlConfigured, BDL_UNAVAILABLE_MESSAGE } from "../services/bdlUnavailable.js";
 import { NHLStatsClient } from "../services/nhlStatsClient.js";
 import { getNhlPlayerHitRate } from "../services/nhlHitRateAggregator.js";
 import { allNhlClubCodes, nhlClubCode } from "../services/nhlTeams.js";
@@ -503,6 +504,41 @@ Error Handling:
          * exist. If this account swaps back to a Rookie key the entity cap returns and
          * BDL-first becomes correct again; flipping SGO_FIRST_SPORTS back is then a
          * one-line change rather than a rebuild. */
+        /* ---- BDL MAY NOT BE CONFIGURED AT ALL, ADDED v2.16.0 ----
+         *
+         * This check comes BEFORE bdlCanServe on purpose. The resolver question ("does
+         * BDL have a resolver for this sport and stat") is the wrong thing to answer
+         * first when there is no BDL account behind it: the caller would be told their
+         * STAT is unsupported, go pick a different stat, and be refused again. Checking
+         * configuration first names the real cause once.
+         *
+         * `auto` is untouched by this. Since v2.14.0 it routes to SGO for every sport
+         * except CFB, CBB and NHL, which use their own non-BDL sources, so a default
+         * hit rate does not depend on a BDL key at all. Only an EXPLICIT
+         * dataSource="bdl" reaches here. */
+        if (params.dataSource === "bdl" && !isBdlConfigured(bdl)) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `dataSource="bdl" was requested, but ${BDL_UNAVAILABLE_MESSAGE}\n\n` +
+                  `FOR THIS CALL: drop dataSource to use the default source for ` +
+                  `${params.sport.toUpperCase()}, or pass dataSource="sgo" explicitly. ` +
+                  `SGO's box scores were verified against ESPN on 2026-10-01.`,
+              },
+            ],
+            structuredContent: {
+              ok: false,
+              reason: "bdl_not_configured",
+              sport: params.sport,
+              statID: params.statID,
+              suggestedDataSource: "sgo",
+            },
+            isError: true,
+          };
+        }
+
         const bdlCanServe = isStatSupported(params.sport, params.statID);
 
         /* REFUSE AN IMPOSSIBLE EXPLICIT CHOICE rather than quietly substituting. */
