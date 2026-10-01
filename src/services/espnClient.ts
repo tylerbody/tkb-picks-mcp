@@ -144,16 +144,34 @@ export class EspnClient {
     return season ? `${base}?season=${season}` : base;
   }
 
+  /* ---- ONE HOST, NOT TWO. Fixed v2.12.2 by measurement. ----
+   *
+   * These two used to point at `site.api.espn.com`, which is where espn.com's own pages
+   * call them from. From Render that host returns **403** on every path, while
+   * `site.web.api.espn.com` returns 200. Both answer a browser, which is exactly why this
+   * could only be settled by calling from the server.
+   *
+   * The win is that site.web.api serves the SAME `/apis/site/v2/...` paths. Measured
+   * 2026-09-29: the Las Vegas Aces roster came back 200 in 22ms with all 14 athletes,
+   * ids and names, including the awkward ones (Cheyenne Parker-Tyus, Ta'Niya Latson,
+   * A'ja Wilson). So the player-id mapping that looked blocked is a host change.
+   *
+   * `sports.core.api.espn.com` is also reachable (200 in 18ms) and was the fallback, but
+   * its athlete index returns `$ref` links rather than inline records, which would be one
+   * request per player. Not needed now, recorded in case this host ever starts refusing.
+   */
+  private static readonly SITE_HOST = "https://site.web.api.espn.com";
+
   teamsUrl(path: EspnLeaguePath): string {
     return (
-      `https://site.api.espn.com/apis/site/v2/sports/` +
+      `${EspnClient.SITE_HOST}/apis/site/v2/sports/` +
       `${path.sport}/${path.league}/teams`
     );
   }
 
   rosterUrl(path: EspnLeaguePath, teamEspnId: string): string {
     return (
-      `https://site.api.espn.com/apis/site/v2/sports/` +
+      `${EspnClient.SITE_HOST}/apis/site/v2/sports/` +
       `${path.sport}/${path.league}/teams/${encodeURIComponent(teamEspnId)}/roster`
     );
   }

@@ -178,14 +178,42 @@ describe("v2.12.0 league paths and URLs", () => {
     );
   });
 
-  test("roster and teams URLs use the OTHER host, which is easy to get wrong", () => {
-    assert.match(espn.teamsUrl(ESPN_LEAGUE_PATHS.wnba), /^https:\/\/site\.api\.espn\.com\//);
+  /* CHANGED IN v2.12.2 BY MEASUREMENT. These used to point at site.api.espn.com, which
+   * 403s from Render on every path while site.web.api returns 200. Both answer a browser.
+   * site.web.api serves the same /apis/site/v2 paths, so one host covers everything. */
+  test("roster and teams use the SAME host as the gamelog, because the other one 403s", () => {
     assert.equal(
       espn.rosterUrl(ESPN_LEAGUE_PATHS.wnba, "17"),
-      "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/teams/17/roster"
+      "https://site.web.api.espn.com/apis/site/v2/sports/basketball/wnba/teams/17/roster"
     );
-    // The gamelog host is site.web.api, the roster host is site.api. Not the same.
-    assert.match(espn.gamelogUrl(ESPN_LEAGUE_PATHS.wnba, "1"), /^https:\/\/site\.web\.api\.espn\.com\//);
+    assert.equal(
+      espn.teamsUrl(ESPN_LEAGUE_PATHS.wnba),
+      "https://site.web.api.espn.com/apis/site/v2/sports/basketball/wnba/teams"
+    );
+    // REGRESSION GUARD: the blocked host must never come back.
+    for (const url of [
+      espn.teamsUrl(ESPN_LEAGUE_PATHS.wnba),
+      espn.rosterUrl(ESPN_LEAGUE_PATHS.wnba, "17"),
+      espn.gamelogUrl(ESPN_LEAGUE_PATHS.wnba, "1"),
+    ]) {
+      assert.ok(url.startsWith("https://site.web.api.espn.com/"), `wrong host: ${url}`);
+      assert.doesNotMatch(url, /^https:\/\/site\.api\.espn\.com\//, `403 host returned: ${url}`);
+    }
+  });
+
+  /* THE REAL ROSTER PAYLOAD, verbatim from the live 200 on the fixed host. Proves the
+   * extractor handles the names that break naive matching. */
+  test("the live roster shape yields ids for the awkward names", async () => {
+    const { extractRoster } = await import("../src/services/espnClient.js");
+    const live = { athletes: [{ items: [
+      { id: "2529458", displayName: "Cheyenne Parker-Tyus", firstName: "Cheyenne", jersey: "32" },
+      { id: "4609797", displayName: "Ta'Niya Latson", firstName: "Ta'Niya", jersey: "1" },
+      { id: "3149391", displayName: "A'ja Wilson", firstName: "A'ja", jersey: "22" },
+    ] }] };
+    const r = extractRoster(live);
+    assert.equal(r.length, 3);
+    assert.equal(r.find((a) => a.displayName === "Cheyenne Parker-Tyus")?.id, "2529458");
+    assert.equal(r.find((a) => a.displayName === "Ta'Niya Latson")?.id, "4609797");
   });
 
   test("an id with unsafe characters is encoded, not interpolated raw", () => {
