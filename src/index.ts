@@ -40,6 +40,7 @@ import { registerDevigTool } from "./tools/devig.js";
 import { registerCfbdStatsProbeTool } from "./tools/cfbdStatsProbe.js";
 import { registerMlbMatchupTool } from "./tools/mlbMatchup.js";
 import { registerVerifyRosterTool } from "./tools/verifyRoster.js";
+import { registerDebugEventTool } from "./tools/debugEvent.js";
 
 // ---- Environment / config ----
 
@@ -155,7 +156,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.14.0";
+const SERVER_VERSION = "2.15.0";
 
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -198,6 +199,35 @@ function buildServer(): McpServer {
   if (cfbd) registerCfbdStatsProbeTool(server, cfbd);
   registerMlbMatchupTool(server, mlbStats);
   registerVerifyRosterTool(server, bdl);
+  /* RAW EVENT DUMP, registered v2.15.0 after sitting written-but-unreachable.
+   *
+   * WHY IT IS BEING TURNED ON RATHER THAN DELETED, measured 2026-10-01: two separate
+   * items are blocked on ONE unknown, the value of the event's top-level `type` field.
+   *
+   *   1. PRESEASON CONTAMINATION. A live NFL hit rate (Josh Allen, 4 counted
+   *      appearances) included the 15 Aug 2026 PRESEASON game as a real 111-yard
+   *      sample, and its two preseason DNPs drove recentAvailability to playRate 0.67
+   *      with flag IRREGULAR on a QB who has missed no regular-season game. The
+   *      obvious filter does not work: info.seasonWeek reads "Week 1" for BOTH the
+   *      15 Aug preseason game (ygBw5sEmEBR0sBPv7C4g) and the 13 Sep regular-season
+   *      opener (J5HTln3CEGxm5DE8iDDD), and tkb_probe_event_fields shows `info` holds
+   *      only venue and seasonWeek, so nothing else in there can discriminate.
+   *
+   *   2. FUTURES. tools/futures.ts is complete and unregistered for exactly one
+   *      stated reason, and it names this tool as the fix: "the event `type` value
+   *      used to identify futures is not yet confirmed ... the first thing to check
+   *      via tkb_debug_raw_event".
+   *
+   * tkb_probe_event_fields reports `type` as a SHAPE ("type":"string") and never as a
+   * VALUE, so it cannot answer either question. This tool dumps the raw object, which
+   * can. Building a hardcoded season-start date table before reading `type` would be
+   * assuming instead of measuring, and would ship an annual maintenance burden that
+   * may turn out to be unnecessary.
+   *
+   * SCOPE: read-only, one event, no fallbacks, no derived numbers. It cannot feed a
+   * published pick. Retire it once `type` is recorded in the docs and both items above
+   * are closed. */
+  registerDebugEventTool(server, sgo);
 
   return server;
 }
