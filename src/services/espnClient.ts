@@ -38,6 +38,23 @@ export const ESPN_LEAGUE_PATHS: Record<string, EspnLeaguePath> = {
   nhl: { sport: "hockey", league: "nhl" },
   nfl: { sport: "football", league: "nfl" },
   mlb: { sport: "baseball", league: "mlb" },
+  /* SOCCER ADDED v2.17.0, both paths measured live 2026-10-05.
+   *
+   * The roster path answered 200 with 31 Liverpool athletes, and the gamelog path
+   * answered 200 with the same top-level key set as the basketball and football logs.
+   * Soccer has TWO column shapes rather than one:
+   *
+   *   outfield  totalGoals goalAssists totalShots shotsOnTarget foulsCommitted
+   *             foulsSuffered offsides yellowCards redCards
+   *   keeper    cleanSheet saves goalsConceded totalGoals goalAssists foulsCommitted
+   *             foulsSuffered yellowCards redCards
+   *
+   * NO MINUTES COLUMN ON EITHER, which espnStatMap.ts refuses with an operational
+   * warning rather than a shrug: rotation risk is the biggest hazard in soccer props
+   * and a 20-minute substitute appearance is indistinguishable from a start in a
+   * counted rate. */
+  epl: { sport: "soccer", league: "eng.1" },
+  ucl: { sport: "soccer", league: "uefa.champions" },
 };
 
 export interface EspnGameRow {

@@ -22,6 +22,12 @@ import {
 } from "../services/bdlHitRateAggregator.js";
 import { isStatSupported } from "../services/bdlStatMap.js";
 import { isBdlConfigured, BDL_UNAVAILABLE_MESSAGE } from "../services/bdlUnavailable.js";
+import { EspnClient, ESPN_LEAGUE_PATHS } from "../services/espnClient.js";
+import {
+  getEspnPlayerHitRate,
+  EspnRefusal,
+} from "../services/espnHitRateAggregator.js";
+import { isEspnStatSupported, espnStatUnavailableReason } from "../services/espnStatMap.js";
 import { NHLStatsClient } from "../services/nhlStatsClient.js";
 import { getNhlPlayerHitRate } from "../services/nhlHitRateAggregator.js";
 import { allNhlClubCodes, nhlClubCode } from "../services/nhlTeams.js";
@@ -60,10 +66,10 @@ const HitRateInputSchema = z
         "How many games the PLAYER ACTUALLY APPEARED IN to collect (not team games). The server scans backward through team games until it has this many real appearances. Defaults by role: 10 for starting pitchers, 15 for batters, 12 for skaters. For a starting pitcher this may scan ~5x this many team games."
       ),
     dataSource: z
-      .enum(["auto", "bdl", "sgo", "cfbd"])
+      .enum(["auto", "bdl", "sgo", "cfbd", "espn"])
       .default("auto")
       .describe(
-        "Which provider computes the rate. CHANGED IN v2.14.0: 'auto' (default) now uses SPORTSGAMEODDS, not BALLDONTLIE. The old BDL-first default existed because the Rookie key capped objects at 100,000/month; the Pro key allows 3,000,000/DAY (1,552 used on 2026-10-01), so that cost argument no longer applies, and SGO's box scores were verified against ESPN's independent game log on 2026-10-01 (NFL passing yards matched exactly across three games). Per-sport exceptions in 'auto' are unchanged and are all measurements: CFB uses CollegeFootballData because SGO carries CFB games but NOT CFB player box scores outside the playoff (2026-08-31: Dante Moore had 3 box scores across 15 started games) and BDL gates NCAAF behind GOAT; NHL uses the free NHL API; CBB uses CollegeBasketballData. 'bdl' forces BALLDONTLIE and is now REFUSED BY NAME where it has no resolvers rather than silently returning SGO data, which is what it used to do: resolvers exist for MLB and WNBA only, nine sports have none, and WNBA is 401-gated behind GOAT on this account. BDL is fully preserved for a swap back to a Rookie key. Every answer reports statSourceUsed."
+        "Which provider computes the rate. CHANGED IN v2.17.0: 'auto' now uses ESPN's free public game log for NBA, NFL, WNBA, EPL and UCL. Measured 2026-10-05: ESPN is keyless, costs ZERO SportsGameOdds entities, carries multiple prior seasons (two complete NBA seasons confirmed), and labels preseason natively so a preseason game cannot contaminate a sample. Adopted because BALLDONTLIE prices PER SPORT, so every league added cost another subscription, and because the SGO key is a Rookie key whose MONTHLY entity cap makes hit rates, the heaviest consumer in this connector, the binding constraint. The v2.14.0 note that cost 'no longer applies' was written against a Pro key and is NO LONGER TRUE; do not treat SGO entities as free. Per-sport routing in 'auto', all measurements: NBA/NFL/WNBA/EPL/UCL use ESPN; CFB uses CollegeFootballData because SGO carries CFB games but NOT CFB player box scores outside the playoff; CBB uses CollegeBasketballData; NHL uses the free NHL API; MLB still uses SGO. 'espn' forces ESPN and is REFUSED BY NAME where it has no mapping. 'bdl' forces BALLDONTLIE, which has resolvers for MLB and WNBA ONLY and is refused by name elsewhere; BDL is preserved in full for a swap back. 'sgo' forces SportsGameOdds and SPENDS ENTITIES. Every answer reports statSourceUsed. WHAT ESPN CANNOT SERVE, each a named refusal rather than an empty rate: NFL kicking and punting (ESPN returns HTTP 200 with ZERO rows for kickers, measured on Tyler Bass), NFL bare 'touchdowns' and 'turnovers' (ambiguous definition, ask for rushing_touchdowns or receiving_touchdowns), basketball 'offensiveRebounds' (ESPN carries only totalRebounds), soccer 'minutesPlayed' (NO minutes column exists on either soccer shape, which also means a soccer rate cannot tell you whether a 20-minute substitute appearance and a 90-minute start are in the same sample, so read the team news), and soccer 'points' (unverified crossover against goals; ask for goals+assists)."
       ),
     includePriorSeason: z
       .boolean()
@@ -94,7 +100,9 @@ export function registerHitRateTool(
   // NOT optional in practice: the NHL feed needs no key, so there is no configuration
   // under which it is absent. Defaulted rather than required so the existing call
   // sites and tests keep compiling.
-  nhl: NHLStatsClient = new NHLStatsClient()
+  nhl: NHLStatsClient = new NHLStatsClient(),
+  // Needs no key, same as NHLStatsClient. Defaulted so existing call sites compile.
+  espn: EspnClient = new EspnClient()
 ) {
   server.registerTool(
     "tkb_get_player_hit_rate",
@@ -504,6 +512,140 @@ Error Handling:
          * exist. If this account swaps back to a Rookie key the entity cap returns and
          * BDL-first becomes correct again; flipping SGO_FIRST_SPORTS back is then a
          * one-line change rather than a rebuild. */
+        /* ======================================================================
+         * ESPN, THE DEFAULT FOR NBA, NFL, WNBA, EPL AND UCL. ADDED v2.17.0.
+         * ======================================================================
+         *
+         * Placed AFTER the NHL, CBB and CFB branches because each of those has its own
+         * better free source, and BEFORE the BDL and SGO paths because on a Rookie key
+         * SGO entities are the binding constraint and ESPN costs none.
+         *
+         * `dataSource: "sgo"` and `"bdl"` still skip this, so the old paths stay
+         * reachable for a cross-check. That matters: a second independent source is how
+         * the SGO box scores were verified in the first place.
+         */
+        const ESPN_AUTO_SPORTS: SportKey[] = ["nba", "nfl", "wnba", "epl", "ucl"];
+        const espnWanted =
+          params.dataSource === "espn" ||
+          (params.dataSource === "auto" && ESPN_AUTO_SPORTS.includes(params.sport));
+
+        if (espnWanted) {
+          if (!ESPN_LEAGUE_PATHS[params.sport]) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `ESPN has no configured game-log path for ` +
+                    `${params.sport.toUpperCase()}. Configured: ` +
+                    `${Object.keys(ESPN_LEAGUE_PATHS).join(", ")}.`,
+                },
+              ],
+              isError: true,
+            };
+          }
+
+          /* REFUSE BEFORE ANY HTTP. An unmapped stat is a code-level fact, and the
+           * aggregator would spend three requests to reach the same conclusion. */
+          const espnReason = espnStatUnavailableReason(params.sport, params.statID);
+          if (espnReason || !isEspnStatSupported(params.sport, params.statID)) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `ESPN cannot serve a rate for ${params.sport.toUpperCase()} ` +
+                    `"${params.statID}".\n\n` +
+                    (espnReason ??
+                      `That statID has no ESPN game-log mapping.`) +
+                    `\n\nThis is a REFUSAL, not an empty result: an empty rate would ` +
+                    `read as "he has not done it". Pass dataSource="sgo" to spend SGO ` +
+                    `entities on it instead, if the market is worth the quota.`,
+                },
+              ],
+              structuredContent: {
+                ok: false,
+                reason: "espn_cannot_serve",
+                sport: params.sport,
+                statID: params.statID,
+              },
+              isError: true,
+            };
+          }
+
+          /* THE TEAM NAME, AND WHY teamName IS WORTH PASSING FOR SOCCER.
+           * ESPN is resolved by team DISPLAY NAME, not by SGO teamID. Deriving
+           * "buffalo bills" from BUFFALO_BILLS_NFL works; deriving "liverpool fc"
+           * from LIVERPOOL_FC_EPL needs the club-form strip in
+           * normaliseEspnTeamName to reach ESPN's "Liverpool". Passing teamName
+           * explicitly skips the derivation entirely. */
+          const espnTeamName =
+            params.teamName ??
+            params.teamID.replace(/_[A-Z]+$/, "").replace(/_/g, " ");
+
+          try {
+            const r = await getEspnPlayerHitRate(espn, {
+              sport: params.sport,
+              playerName: params.playerName,
+              teamName: espnTeamName,
+              statID: params.statID,
+              line: params.line,
+              direction: params.direction,
+              targetAppearances: params.lookbackGames,
+              /* Reaching back a season is ONE MORE FREE REQUEST here, versus a cost
+               * multiplier on SGO. So it is on by default, and still labelled by
+               * summarizeSeasons running on real dates. */
+              allowPriorSeasons: true,
+              maxSeasons: params.includePriorSeason ? 3 : 2,
+            });
+
+            const summary =
+              `${params.playerName} | ${params.statID} ${params.direction} ${params.line}\n` +
+              `${r.gamesHit} of ${r.gamesConsidered} appearance(s).` +
+              (r.sampleWarning ? `\n\n${r.sampleWarning}` : "");
+
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `${summary}\n\nSource: ESPN public game log (${r.espnTeamName}, ` +
+                    `athlete ${r.espnAthleteId}). FREE and keyless: this consumes ZERO ` +
+                    `SportsGameOdds entities and zero BALLDONTLIE calls. Preseason is ` +
+                    `excluded by ESPN's own season labelling, not by a maintained date ` +
+                    `table.\n\n${JSON.stringify(r, null, 2)}`,
+                },
+              ],
+              structuredContent: { ...r, statSourceUsed: "espn" },
+            };
+          } catch (err) {
+            /* An EspnRefusal is a considered refusal, not a crash, and it carries the
+             * reason. Surfaced as-is rather than reworded into something vaguer. */
+            const msg = err instanceof Error ? err.message : String(err);
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `ESPN could not produce a rate for ${params.playerName}.\n\n${msg}` +
+                    (err instanceof EspnRefusal
+                      ? `\n\nThis is a refusal by design. Pass dataSource="sgo" to use ` +
+                        `SportsGameOdds instead, which spends entities but uses SGO's own ` +
+                        `player IDs and so does not depend on a name match.`
+                      : ""),
+                },
+              ],
+              structuredContent: {
+                ok: false,
+                reason: "espn_refused",
+                sport: params.sport,
+                statID: params.statID,
+              },
+              isError: true,
+            };
+          }
+        }
+
         /* ---- BDL MAY NOT BE CONFIGURED AT ALL, ADDED v2.16.0 ----
          *
          * This check comes BEFORE bdlCanServe on purpose. The resolver question ("does

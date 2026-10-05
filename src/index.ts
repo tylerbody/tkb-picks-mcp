@@ -42,6 +42,7 @@ import { registerMlbMatchupTool } from "./tools/mlbMatchup.js";
 import { registerVerifyRosterTool } from "./tools/verifyRoster.js";
 import { registerDebugEventTool } from "./tools/debugEvent.js";
 import { createUnavailableBDLClient, isBdlConfigured } from "./services/bdlUnavailable.js";
+import { EspnClient } from "./services/espnClient.js";
 
 // ---- Environment / config ----
 
@@ -125,6 +126,15 @@ const mlbStats = new MLBStatsClient();
  * NHL rates refuse and NHL grading loses its cross-check; nothing silently degrades.
  */
 const nhlStats = new NHLStatsClient();
+/**
+ * ESPN, v2.17.0. No key, same as NHLStatsClient, so there is no configuration under
+ * which it is absent and nothing to warn about at boot.
+ *
+ * ONE INSTANCE, SHARED, because it is now a PRIMARY rate source rather than a probe:
+ * `auto` routes NBA, NFL, WNBA, EPL and UCL here. The probe keeps its own default
+ * instance, which is fine - neither holds state worth sharing beyond the axios agent.
+ */
+const espn = new EspnClient();
 if (!cfbd) {
   console.warn(
     "WARN: CFBD_API_KEY is not set. CFB hit rates will refuse rather than fall back " +
@@ -184,7 +194,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.16.0";
+const SERVER_VERSION = "2.17.0";
 
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -194,7 +204,7 @@ function buildServer(): McpServer {
 
   registerScheduleTool(server, sgo);
   registerOddsTool(server, sgo);
-  registerHitRateTool(server, sgo, bdl, cfbd, cbbd, nhlStats);
+  registerHitRateTool(server, sgo, bdl, cfbd, cbbd, nhlStats, espn);
   registerInjuriesTool(server, bdl);
   registerSplitsTool(server, sgo, bdl);
   registerYesNoPropsTool(server, sgo);
@@ -220,7 +230,7 @@ function buildServer(): McpServer {
   /* ESPN PROBE, v2.12.0. Registered with no client argument: EspnClient needs no key,
    * which is the entire point of it. Diagnostic only until the probe confirms Render can
    * reach ESPN and that the measured shape still holds. */
-  registerEspnProbeTool(server);
+  registerEspnProbeTool(server, espn);
   /* DEVIG, v2.13.0. Pure arithmetic on prices the caller supplies, so no client and no
    * provider. Deliberately NOT wired into the prop board yet. */
   registerDevigTool(server);
