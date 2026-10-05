@@ -19,6 +19,7 @@ import {
   espnSeasonsToFetch,
   extractEventMeta,
   getEspnPlayerHitRate,
+  espnRowSeasonYear,
   EspnRefusal,
 } from "../src/services/espnHitRateAggregator.js";
 import { ESPN_LEAGUE_PATHS } from "../src/services/espnClient.js";
@@ -379,6 +380,87 @@ describe("v2.17.0 dates come from the events map, or the row is dropped", () => 
 
   test("no events map at all yields an empty map rather than throwing", () => {
     assert.equal(extractEventMeta({ names: NBA } as never).size, 0);
+  });
+});
+
+describe("v2.17.0 seasonYear comes from the DATE, not from ESPN's season param", () => {
+  /* FOUND ON A LIVE DEPLOY. Luka's March/April 2026 games were fetched under ESPN
+   * season=2026 and the rows were stamped seasonYear 2026, while summarizeSeasons in
+   * the SAME response reported seasonsRepresented [2025] and "EVERY game is from a
+   * PRIOR season". types.ts defines seasonYear as "the year the season STARTED", and
+   * ESPN's param is the END year for NBA. Echoing the provider's param into a field
+   * with a different contract is the NHL season-label bug again. */
+  test("an NBA April game belongs to the season that STARTED the prior autumn", () => {
+    assert.equal(espnRowSeasonYear("nba" as never, "2026-04-03T01:30:00.000Z"), 2025);
+  });
+
+  test("an NBA December game belongs to that same season", () => {
+    assert.equal(espnRowSeasonYear("nba" as never, "2025-12-09T01:30:00.000Z"), 2025);
+  });
+
+  test("an NFL January playoff game belongs to the prior start year", () => {
+    assert.equal(espnRowSeasonYear("nfl" as never, "2026-01-17T21:30:00.000Z"), 2025);
+  });
+
+  test("an NFL October game belongs to the current start year", () => {
+    assert.equal(espnRowSeasonYear("nfl" as never, "2026-10-04T17:00:00.000Z"), 2026);
+  });
+
+  /* THE INVARIANT THAT MATTERS: whatever the per-row label is, it must agree with
+   * seasonsRepresented, which summarizeSeasons derives from the same dates. Two
+   * conventions in one response is the defect, so the test is agreement rather than
+   * any particular number. */
+  test("every row's seasonYear appears in seasonsRepresented", async () => {
+    const TEAMS = {
+      sports: [{ leagues: [{ teams: [
+        { team: { id: "13", displayName: "Los Angeles Lakers", abbreviation: "LAL" } },
+      ] }] }],
+    };
+    const ROSTER = { athletes: [{ id: "3945274", displayName: "Luka Doncic", firstName: "Luka" }] };
+    const dates = ["2026-04-03T01:30:00.000Z", "2026-03-28T02:30:00.000Z"];
+    const log = {
+      names: NBA,
+      labels: NBA,
+      seasonTypes: [{
+        displayName: "2025-26 Regular Season",
+        categories: [{
+          displayName: "april",
+          events: dates.map((_, i) => ({ eventId: `E${i}`, stats: NBA_ROW })),
+        }],
+      }],
+      events: Object.fromEntries(
+        dates.map((d, i) => [`E${i}`, { id: `E${i}`, gameDate: d, atVs: "vs", opponent: { abbreviation: "OKC" } }])
+      ),
+    };
+    const espn = {
+      fetchTeams: async () => ({ ok: true, data: TEAMS, elapsedMs: 1, url: "t" }),
+      fetchRoster: async () => ({ ok: true, data: ROSTER, elapsedMs: 1, url: "r" }),
+      fetchGamelog: async () => ({ ok: true, data: log, elapsedMs: 1, url: "g" }),
+    } as never;
+
+    const r = await getEspnPlayerHitRate(espn, {
+      sport: "nba" as never,
+      playerName: "Luka Doncic",
+      teamName: "Los Angeles Lakers",
+      statID: "points",
+      line: 20.5,
+      direction: "over",
+      allowPriorSeasons: false,
+    });
+
+    assert.ok(r.log.length > 0);
+    for (const row of r.log) {
+      assert.ok(
+        row.seasonYear !== undefined,
+        `a row carried no seasonYear (${row.date})`
+      );
+      assert.ok(
+        (r.seasonsRepresented as number[]).includes(row.seasonYear!),
+        `row labelled season ${row.seasonYear} but seasonsRepresented is ` +
+          `${JSON.stringify(r.seasonsRepresented)} - two conventions in one response`
+      );
+    }
+    assert.equal(r.log[0].seasonYear, 2025, "an April 2026 NBA game is the 2025 season");
   });
 });
 

@@ -1,77 +1,57 @@
-# v2.17.0: ESPN becomes the primary hit-rate source
+# v2.17.1 hotfix: seasonYear was labelled from ESPN's param, not the game's date
 
-Tests 873 -> 935. 13 mutations, all caught. No BDL code removed.
-
-## Overwrite these eight files
+Found on YOUR live v2.17.0 deploy, in the first NBA call. Four files.
 
 ```
-src/services/espnClient.ts              epl + ucl added to ESPN_LEAGUE_PATHS
-src/services/espnStatMap.ts             NEW  the label map + witness mechanism
-src/services/espnPlayerResolution.ts    NEW  the SGO -> ESPN id bridge
-src/services/espnHitRateAggregator.ts   NEW  the rate computation
-src/tools/hitRate.ts                    dataSource "espn"; auto routes 5 sports
-src/index.ts                            shared EspnClient; 2.16.0 -> 2.17.0
-test/v2_17_0.test.ts                    NEW  62 tests
-package.json                            2.17.0
+src/services/espnHitRateAggregator.ts   the fix + espnRowSeasonYear()
+src/index.ts                            2.17.0 -> 2.17.1
+test/v2_17_0.test.ts                    +5 tests (67 in this file, 940 total)
+package.json                            2.17.1
 ```
 
-Nothing to delete. No Render env var changes. ESPN needs no key.
+## What was wrong
 
-## Verify after deploy
-
-```
-npm test     # expect 935 pass / 0 fail
-```
-
-Then live, and the first two are the ones that matter:
+Luka Doncic, games dated March and April 2026, fetched under ESPN `season=2026`:
 
 ```
-# 1. NBA off a prior season. The current season has no games yet; this should
-#    still answer, from ESPN, at zero SGO entity cost.
-tkb_get_player_hit_rate(sport:"nba", teamID:"LOS_ANGELES_LAKERS_NBA",
-  playerID:"LUKA_DONCIC_1_NBA", playerName:"Luka Doncic",
-  statID:"points", line:28.5, direction:"over")
-  -> expect statSourceUsed "espn", espnAthleteId 3945274
-
-# 2. THE COLLISION GUARD. Must REFUSE, not return a number.
-tkb_get_player_hit_rate(sport:"nfl", teamID:"BUFFALO_BILLS_NFL",
-  playerID:"JOSH_ALLEN_1_NFL", playerName:"Josh Allen",
-  statID:"defense_sacks", line:0.5, direction:"over")
-  -> expect a refusal naming "totalTackles" and the wrong shape
-
-# 3. Soccer, and pass teamName for soccer (see below)
-tkb_get_player_hit_rate(sport:"epl", teamID:"LIVERPOOL_FC_EPL",
-  playerID:"ALEXANDER_ISAK_1_EPL", playerName:"Alexander Isak",
-  teamName:"Liverpool", statID:"shots_onGoal", line:1.5, direction:"over")
-
-# 4. A named refusal rather than an empty rate
-tkb_get_player_hit_rate(sport:"nfl", ..., statID:"fieldGoals_made", ...)
-  -> expect a refusal citing the measured kicker result
-
-# 5. SGO is still reachable for a cross-check, and still spends entities
-tkb_get_player_hit_rate(... dataSource:"sgo" ...)
+log[].seasonYear:     2026          <- WRONG
+seasonsRepresented:   [2025]
+seasonWarning:        "EVERY game ... from a PRIOR season (2025)"
 ```
 
-## Two things to know when using it
+Two conventions in one response, disagreeing about the same games. `types.ts`
+defines `seasonYear` as "the year the season STARTED". ESPN's param is the END
+year for NBA and NHL and the START year for NFL, so I was echoing a provider
+parameter into a field with a different contract.
 
-**PASS `teamName` FOR SOCCER.** ESPN resolves teams by display name. Deriving
-"buffalo bills" from `BUFFALO_BILLS_NFL` works; deriving "liverpool fc" from
-`LIVERPOOL_FC_EPL` relies on the club-form strip to reach ESPN's "Liverpool".
-Passing `teamName` skips the derivation. NFL, NBA and WNBA do not need it.
+NFL happened to be correct by coincidence (ESPN's NFL param already is the start
+year). NBA was off by one on every row, and soccer rows carried no seasonYear at
+all because the soccer convention is unmeasured and the param is omitted.
 
-**SOCCER HAS NO MINUTES COLUMN**, on either the outfield or the goalkeeper shape.
-`minutesPlayed` is a named refusal that says so. A 20-minute substitute
-appearance is indistinguishable from a 90-minute start in a counted rate, so a
-soccer rate cannot tell you whether the sample is even comparable game to game.
-Keep reading the team news for soccer.
+The prose was right and the per-row label was wrong, which is the worse half: a
+reader scanning the log sees 2026 beside an April date and reads the sample as
+current.
 
-## Still outstanding, not in this build
+This is the NHL season-label bug from
+`preseason-scope-corrected-and-nhl-season-label-bug.md`, which I wrote up four
+days ago, reproduced by me from the same cause: a season label derived from
+something other than the game's date.
 
-- The NFL preseason date table from `preseason-discriminator-measured-2026-10-01.md`
-  is now **unnecessary for any ESPN-routed sport**: ESPN labels season phase
-  itself and `flattenGamelog` already excludes preseason. MLB still runs on SGO,
-  but MLB was never exposed.
-- `altLines` still fetches and discards, and still reports `altLinesIncluded: true`.
-- The NHL season-label bug (a Sep 29 regular-season game reported as prior season).
-- `includePriorSeason` is still on in the scheduled prompts and is still an ~8.7x
-  SGO entity multiplier on the sports that remain on SGO.
+## The fix
+
+`seasonYear` now comes from `seasonForDate(sport, date)`, the repo's single copy
+of that rule, which every other aggregator already keys on. Rows and the summary
+agree by construction, for every sport and every param convention.
+
+The test asserts the INVARIANT rather than any particular number: every row's
+`seasonYear` must appear in `seasonsRepresented`. Mutation-verified by reverting
+to the old line, which fails it.
+
+## Verify
+
+```
+npm test     # expect 940 pass / 0 fail
+```
+
+Then re-run the NBA call. `log[0].seasonYear` should read **2025** on an April
+2026 game, and should match `seasonsRepresented`.

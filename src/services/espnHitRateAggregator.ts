@@ -20,7 +20,7 @@ import {
   espnStatUnavailableReason,
   supportedEspnStatIDs,
 } from "./espnStatMap.js";
-import { summarizeSeasons } from "./seasonBoundary.js";
+import { summarizeSeasons, seasonForDate } from "./seasonBoundary.js";
 import { describeRecency, type SampleRecency } from "./sampleRecency.js";
 
 /**
@@ -226,6 +226,40 @@ export function extractEventMeta(log: EspnGamelog): Map<string, EspnEventMeta> {
   return out;
 }
 
+/**
+ * PURE. Which season does this GAME belong to, by its own date?
+ *
+ * ---- WHY NOT JUST ECHO ESPN'S `season` PARAM, WHICH WE ALREADY HAVE ----
+ *
+ * Because they are different numbers with different meanings, and the field they go
+ * into has a documented contract. types.ts says seasonYear is "the year the season
+ * STARTED". ESPN's param is the END year for NBA and NHL and the START year for NFL.
+ *
+ * CAUGHT ON A LIVE DEPLOY, not in review. Luka Doncic, dates in March and April 2026,
+ * fetched under ESPN season=2026, came back as:
+ *
+ *     log[].seasonYear:    2026
+ *     seasonsRepresented:  [2025]
+ *     seasonWarning:       "EVERY game ... from a PRIOR season (2025)"
+ *
+ * Two conventions in one response, disagreeing about the same games. The prose was
+ * right - those games ARE last season - and the per-row label was wrong, which is the
+ * worse half: a reader scanning the log sees 2026 beside an April date and concludes
+ * the sample is current.
+ *
+ * That is the NHL season-label bug recorded in
+ * preseason-scope-corrected-and-nhl-season-label-bug.md, reproduced here by me, from
+ * the same cause: a season label derived from something other than the game's date.
+ *
+ * So the label comes from seasonBoundary, the repo's ONE copy of the rule every other
+ * aggregator already keys on. Rows and the summary then agree by construction, for
+ * every sport, including the ones whose ESPN param convention is unmeasured and
+ * therefore absent.
+ */
+export function espnRowSeasonYear(sport: SportKey, dateISO: string): number | undefined {
+  return seasonForDate(sport, dateISO)?.seasonYear;
+}
+
 export class EspnRefusal extends Error {}
 
 function refuse(message: string): never {
@@ -426,7 +460,7 @@ export async function getEspnPlayerHitRate(
         isHome: row.meta.isHome ?? false,
         statValue: null,
         dataStatus: "stat_unsettled",
-        seasonYear: row.season ?? undefined,
+        seasonYear: espnRowSeasonYear(params.sport, row.meta.dateISO),
       } as GameLogEntry);
       continue;
     }
@@ -447,7 +481,7 @@ export async function getEspnPlayerHitRate(
       isHome: row.meta.isHome ?? false,
       statValue: v,
       dataStatus: "value",
-      seasonYear: row.season ?? undefined,
+      seasonYear: espnRowSeasonYear(params.sport, row.meta.dateISO),
     } as GameLogEntry);
   }
 
