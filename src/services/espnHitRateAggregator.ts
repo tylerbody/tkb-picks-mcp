@@ -88,8 +88,37 @@ export interface EspnHitRateParams {
   allowPriorSeasons?: boolean;
   /** How many seasons back to reach at most, including the current one. Default 2. */
   maxSeasons?: number;
+  /**
+   * WHICH GAMES COUNT. Default "regular", which is every behaviour this file had before.
+   *
+   * ADDED v2.18.0 because ESPN already returns preseason games, labelled, in the same
+   * payload, and this aggregator was discarding them. They are useful - preseason
+   * minutes are the earliest read on rotation and role before opening night - and they
+   * are dangerous: Luka Doncic's first 2026-27 preseason game was 16 MINUTES. A
+   * preseason points total is not evidence for a regular-season points line, and
+   * blending it in silently is the NFL contamination bug recorded in
+   * preseason-discriminator-measured-2026-10-01.md.
+   *
+   *   "regular"    preseason excluded (default, unchanged)
+   *   "preseason"  ONLY the current season's preseason games, every row tagged
+   *   "both"       both, every row tagged, and the split stated in the warning
+   */
+  seasonPhase?: SeasonPhaseMode;
   asOf?: Date;
 }
+
+export type SeasonPhaseMode = "regular" | "preseason" | "both";
+
+/**
+ * Sports where a preseason exists in ESPN's game log. Measured for NBA on 2026-10-06
+ * ("2026-27 Preseason", Luka Doncic, 1 game). NFL's preseason is labelled the same way
+ * and was the source of the August contamination. WNBA plays a short preseason.
+ *
+ * SOCCER IS NOT HERE ON PURPOSE. Club friendlies are not league fixtures and do not
+ * appear in an EPL or UCL game log, so a preseason request there can only return
+ * nothing, and an empty result reads as "he has done nothing". It is refused by name.
+ */
+export const PRESEASON_CAPABLE_SPORTS: SportKey[] = ["nba", "nfl", "wnba"];
 
 export interface EspnHitRateExtras {
   recency: SampleRecency;
@@ -105,6 +134,10 @@ export interface EspnHitRateExtras {
   /** Rows whose stats array length disagreed with labels. */
   rowsWithLengthMismatch: number;
   preseasonExcluded: boolean;
+  /** Which phase filter produced this result. */
+  seasonPhase: SeasonPhaseMode;
+  /** Counted appearances that were preseason games. Always reported, never folded in silently. */
+  preseasonAppearances: number;
   espnColumnsSeen: string[];
 }
 
@@ -295,6 +328,21 @@ export async function getEspnPlayerHitRate(
     );
   }
 
+  /* seasonPhase is checked BEFORE ANY HTTP, like the stat refusals above: whether a
+   * sport has a preseason in ESPN's log is a code-level fact, not something to spend
+   * two requests discovering. */
+  const phase: SeasonPhaseMode = params.seasonPhase ?? "regular";
+
+  if (phase !== "regular" && !PRESEASON_CAPABLE_SPORTS.includes(params.sport)) {
+    refuse(
+      `seasonPhase "${phase}" is not available for ${params.sport.toUpperCase()}. ` +
+        `ESPN carries a labelled preseason for ${PRESEASON_CAPABLE_SPORTS.join(", ")} ` +
+        `only. Soccer friendlies are not league fixtures and never appear in a league ` +
+        `game log, so the request could only return an empty sample, which would read ` +
+        `as "he has done nothing".`
+    );
+  }
+
   /* ---- HOP 1: SGO team name -> ESPN team id ---- */
   const teamsRes = await espn.fetchTeams(path);
   if (!teamsRes.ok || !teamsRes.data) {
@@ -336,12 +384,18 @@ export async function getEspnPlayerHitRate(
   /* ---- HOP 3: the game logs, newest season first, stopping once the sample is full ---- */
   const target = params.targetAppearances ?? 10;
   const minSufficient = params.minSufficient ?? 5;
+
+  /* PRESEASON MODE READS ONLY THE CURRENT SEASON. Last October's preseason is a year
+   * old and describes a different roster; reaching back for it would be the stale-sample
+   * problem with an extra layer of irrelevance on top. */
   const seasons = espnSeasonsToFetch(params.sport, asOf, {
-    allowPriorSeasons: params.allowPriorSeasons,
+    allowPriorSeasons: phase === "preseason" ? false : params.allowPriorSeasons,
     maxSeasons: params.maxSeasons,
   });
+  const isPreseasonRow = (g: FlattenedGame) => /preseason/i.test(g.seasonType);
 
   const collected: {
+    phase: "regular" | "preseason";
     game: FlattenedGame;
     meta: EspnEventMeta;
     season: number | null;
@@ -387,7 +441,7 @@ export async function getEspnPlayerHitRate(
     const theseNames = log.names ?? [];
     if (theseNames.length && !names.length) names = theseNames;
 
-    const flat = flattenGamelog(log, { includePreseason: false });
+    const flat = flattenGamelog(log, { includePreseason: phase !== "regular" });
     rowsWithLengthMismatch += flat.lengthMismatches.length;
     for (const [st, cats] of Object.entries(flat.structure)) {
       structure[st] = { ...(structure[st] ?? {}), ...cats };
@@ -401,8 +455,11 @@ export async function getEspnPlayerHitRate(
         continue;
       }
       if (seenEventIds.has(g.eventId)) continue;
+      const rowPhase: "regular" | "preseason" = isPreseasonRow(g) ? "preseason" : "regular";
+      // "preseason" mode keeps ONLY preseason rows. "both" keeps everything, tagged.
+      if (phase === "preseason" && rowPhase !== "preseason") continue;
       seenEventIds.add(g.eventId);
-      collected.push({ game: g, meta: m, season: season ?? null });
+      collected.push({ phase: rowPhase, game: g, meta: m, season: season ?? null });
     }
 
     if (collected.length >= target) break;
@@ -430,6 +487,20 @@ export async function getEspnPlayerHitRate(
   collected.sort((a, b) => (a.meta.dateISO < b.meta.dateISO ? 1 : a.meta.dateISO > b.meta.dateISO ? -1 : 0));
 
   const log: GameLogEntry[] = [];
+
+  /* MINUTES TRAVEL WITH EVERY ROW where the sport has a minutes column (basketball).
+   * In preseason this is the whole story: 21 points in 16 minutes and 21 points in 34
+   * minutes are different players. Read from `names`, never by index. NFL and soccer
+   * have no minutes column, so the field is simply absent there rather than zero. */
+  const minutesIdx = names.indexOf("minutes");
+  const readMinutes = (stats: string[]): number | undefined => {
+    if (minutesIdx < 0) return undefined;
+    const raw = stats[minutesIdx];
+    if (raw === undefined || raw === "" || raw === "-" || raw === "--") return undefined;
+    const n = Number(String(raw).split(":")[0]);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  let preseasonAppearances = 0;
   let gamesHit = 0;
   let overHits = 0;
   let underHits = 0;
@@ -461,11 +532,14 @@ export async function getEspnPlayerHitRate(
         statValue: null,
         dataStatus: "stat_unsettled",
         seasonYear: espnRowSeasonYear(params.sport, row.meta.dateISO),
+        seasonPhase: row.phase,
+        minutes: readMinutes(row.game.stats),
       } as GameLogEntry);
       continue;
     }
 
     appearances++;
+    if (row.phase === "preseason") preseasonAppearances++;
     const v = read.value;
     const hitOver = v > params.line;
     const hitUnder = v < params.line;
@@ -482,6 +556,8 @@ export async function getEspnPlayerHitRate(
       statValue: v,
       dataStatus: "value",
       seasonYear: espnRowSeasonYear(params.sport, row.meta.dateISO),
+      seasonPhase: row.phase,
+      minutes: readMinutes(row.game.stats),
     } as GameLogEntry);
   }
 
@@ -510,6 +586,23 @@ export async function getEspnPlayerHitRate(
   }
   if (seasonSummary.warning) parts.push(seasonSummary.warning);
   if (recency.warning) parts.push(recency.warning);
+  if (preseasonAppearances > 0) {
+    const mins = log
+      .filter((l) => l.seasonPhase === "preseason" && l.statValue !== null)
+      .map((l) => (l.minutes !== undefined ? `${l.minutes}` : "?"));
+    parts.push(
+      `PRESEASON GAMES COUNTED: ${preseasonAppearances} of ${appearances}` +
+        (mins.length && minutesIdx >= 0 ? `, played in ${mins.join(", ")} minute(s)` : "") +
+        `. Starters' minutes are capped and rotations are experimental in preseason. A ` +
+        `preseason total is NOT evidence for a regular-season line, so this must not be ` +
+        `written up as form. It is a read on ROLE: who started, who played, how much. ` +
+        (phase === "both"
+          ? `This sample BLENDS ${preseasonAppearances} preseason and ` +
+            `${appearances - preseasonAppearances} regular-season game(s); report them ` +
+            `separately, never as one rate.`
+          : ``)
+    );
+  }
   if (unreadable > 0) {
     parts.push(
       `${unreadable} game(s) carried no readable value for this stat and were EXCLUDED ` +
@@ -567,7 +660,9 @@ export async function getEspnPlayerHitRate(
     seasonStructure: structure,
     rowsWithoutDate,
     rowsWithLengthMismatch,
-    preseasonExcluded: true,
+    preseasonExcluded: phase === "regular",
+    seasonPhase: phase,
+    preseasonAppearances,
     espnColumnsSeen: names,
   } as HitRateResult & EspnHitRateExtras;
 }

@@ -26,6 +26,7 @@ import { EspnClient, ESPN_LEAGUE_PATHS } from "../services/espnClient.js";
 import {
   getEspnPlayerHitRate,
   EspnRefusal,
+  PRESEASON_CAPABLE_SPORTS,
 } from "../services/espnHitRateAggregator.js";
 import { isEspnStatSupported, espnStatUnavailableReason } from "../services/espnStatMap.js";
 import { NHLStatsClient } from "../services/nhlStatsClient.js";
@@ -76,6 +77,12 @@ const HitRateInputSchema = z
       .default(false)
       .describe(
         "Widen the lookback to its 400-day ceiling so the PREVIOUS season is in range. Use in the OPENING WEEKS of a season, when the default window sits in empty offseason and returns nothing. ONE FLAG RATHER THAN RAW NUMBERS on purpose: raising lookbackGames alone is clamped to a 225-day window that reaches the playoffs and misses the regular season, which looks like it worked. Every rate returned will carry the prior-season warning, and that language is mandatory in the thread. Turn it off once the current season is 4 to 6 games old."
+      ),
+    seasonPhase: z
+      .enum(["regular", "preseason", "both"])
+      .default("regular")
+      .describe(
+        "ADDED v2.18.0. Which games count. 'regular' (default) excludes preseason, exactly as before. 'preseason' counts ONLY the current season's preseason games. 'both' counts both, with every row tagged. Served from ESPN's game log, which labels season phase itself (measured 2026-10-06: Luka Doncic's first 2026-27 preseason game, 16 minutes, 21 points). Available for NBA, NFL and WNBA only, and REFUSED BY NAME everywhere else rather than silently ignored: SportsGameOdds carries no NBA preseason events at all, the NHL path is regular-season only, and soccer friendlies never appear in a league game log. Every log row carries seasonPhase and, for basketball, minutes. PRESEASON IS A READ ON ROLE, NOT FORM: starters' minutes are capped and rotations experimental, so a preseason points total is NOT evidence for a regular-season line. Use it for who started, who played, and how much. When any preseason game is counted, the warning says so and lists the minutes, and that language belongs in the thread."
       ),
     maxTeamGamesScanned: z
       .number()
@@ -180,6 +187,47 @@ Error Handling:
         // for a returning starter. So a missing CFBD key REFUSES rather than falls
         // back, per the rule this connector is built on - an unanswerable question
         // gets a refusal, not a plausible answer.
+        /* ---- seasonPhase GATE, ADDED v2.18.0. RUNS BEFORE EVERY OTHER BRANCH. ----
+         *
+         * Placement is the whole point. The NHL, CBB and CFB branches below each return
+         * early, so a preseason request that reached them would be answered with a
+         * regular-season-only rate and the flag silently dropped - the caller would
+         * believe they were looking at preseason games. Only the ESPN path can honour
+         * seasonPhase, so anything that will not reach ESPN is refused HERE, by name. */
+        if (params.seasonPhase && params.seasonPhase !== "regular") {
+          const reachesEspn =
+            params.dataSource === "espn" ||
+            (params.dataSource === "auto" &&
+              (["nba", "nfl", "wnba", "epl", "ucl"] as SportKey[]).includes(params.sport));
+          if (!reachesEspn || !PRESEASON_CAPABLE_SPORTS.includes(params.sport)) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `seasonPhase "${params.seasonPhase}" cannot be served for ` +
+                    `${params.sport.toUpperCase()}` +
+                    (params.dataSource !== "auto" ? ` with dataSource "${params.dataSource}"` : "") +
+                    `.\n\nPreseason games come from ESPN's game log, which labels season ` +
+                    `phase itself, and only for ${PRESEASON_CAPABLE_SPORTS.join(", ")}. ` +
+                    `SportsGameOdds carries no NBA preseason events, the NHL path reads ` +
+                    `regular-season game logs only, and soccer friendlies are not league ` +
+                    `fixtures. Refused rather than ignored: answering with a ` +
+                    `regular-season rate here would look like a preseason answer.`,
+                },
+              ],
+              structuredContent: {
+                ok: false,
+                reason: "season_phase_unsupported",
+                sport: params.sport,
+                seasonPhase: params.seasonPhase,
+                supportedSports: PRESEASON_CAPABLE_SPORTS,
+              },
+              isError: true,
+            };
+          }
+        }
+
         // ---- HOCKEY GOES TO THE NHL'S OWN FEED, AND ONLY THERE ----
         //
         // NO KEY, NO QUOTA, TWO REQUESTS. Unlike CFB and CBB, this branch cannot fail
@@ -597,6 +645,7 @@ Error Handling:
                * summarizeSeasons running on real dates. */
               allowPriorSeasons: true,
               maxSeasons: params.includePriorSeason ? 3 : 2,
+              seasonPhase: params.seasonPhase,
             });
 
             const summary =

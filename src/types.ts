@@ -438,6 +438,13 @@ export interface GameLogEntry {
   dataStatus?: GameDataStatus;
   /** Which season this game belongs to (year the season started). */
   seasonYear?: number;
+  /**
+   * Regular season or preseason. Set by the ESPN path from v2.18.0, where preseason
+   * can be requested explicitly; absent elsewhere, where preseason is never counted.
+   */
+  seasonPhase?: "regular" | "preseason";
+  /** Minutes played, where the provider has a minutes column (basketball). Absent, not 0, otherwise. */
+  minutes?: number;
 }
 
 export interface HitRateResult {
