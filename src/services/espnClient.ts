@@ -508,3 +508,41 @@ export function extractRoster(payload: unknown): EspnRosterEntry[] {
   walk(payload, 0);
   return out;
 }
+
+/**
+ * PER-CALL REQUEST MEMO. ADDED v2.19.0 for the prop screener.
+ *
+ * getEspnPlayerHitRate makes three to five requests per (player, stat): the team list,
+ * the roster, and one game log per season. The screener asks for several stats per
+ * player, so on a 113-market NBA board that is roughly 450 requests, nearly all of them
+ * identical. Memoised for the lifetime of ONE screen, it is about 30: one team list,
+ * two rosters, and two seasons of logs per player.
+ *
+ * SCOPED TO ONE CALL ON PURPOSE, not a server-wide cache. Nothing here can serve a
+ * stale log to tomorrow's run; the memo is garbage the moment the screen returns.
+ * Promises are stored, not values, so concurrent workers share one in-flight request
+ * (the v2.6.0 lesson from the SGO team-history cache).
+ */
+export function withRequestMemo(espn: EspnClient): EspnClient {
+  const memo = new Map<string, Promise<unknown>>();
+  const once = <T>(key: string, run: () => Promise<T>): Promise<T> => {
+    let p = memo.get(key) as Promise<T> | undefined;
+    if (!p) {
+      p = run();
+      memo.set(key, p);
+    }
+    return p;
+  };
+  const wrapped = Object.create(espn) as EspnClient;
+  wrapped.fetchTeams = (path) =>
+    once(`teams|${path.sport}|${path.league}`, () => espn.fetchTeams(path));
+  wrapped.fetchRoster = (path, teamEspnId) =>
+    once(`roster|${path.sport}|${path.league}|${teamEspnId}`, () =>
+      espn.fetchRoster(path, teamEspnId)
+    );
+  wrapped.fetchGamelog = (path, espnId, season) =>
+    once(`log|${path.sport}|${path.league}|${espnId}|${season ?? "default"}`, () =>
+      espn.fetchGamelog(path, espnId, season)
+    );
+  return wrapped;
+}

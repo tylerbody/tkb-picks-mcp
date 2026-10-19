@@ -33,6 +33,45 @@ import {
   type SportKey,
 } from "../constants.js";
 import { readMatchTeams } from "../services/eventShape.js";
+import { EspnClient, ESPN_LEAGUE_PATHS, withRequestMemo } from "../services/espnClient.js";
+import { getEspnPlayerHitRate, EspnRefusal } from "../services/espnHitRateAggregator.js";
+import { isEspnStatSupported, espnStatUnavailableReason } from "../services/espnStatMap.js";
+import {
+  ESPN_INJURY_SPORTS,
+  getEspnInjuries,
+  findInjuryEntry,
+  describeFeedFreshness,
+  type EspnInjuryFeed,
+} from "../services/espnInjuries.js";
+
+/**
+ * SPORTS WHOSE SCREENER RATES COME FROM ESPN. ADDED v2.19.0.
+ *
+ * Same list as ESPN_AUTO_SPORTS in tools/hitRate.ts, which v2.17.0 moved to ESPN. The
+ * screener was never moved with it. Measured 2026-10-19 on Celtics @ Pistons: 113 priced
+ * NBA markets, 0 qualified, every filter off, in 319ms. 319ms is too fast to have
+ * computed a single rate: NBA stats went to BALLDONTLIE (cancelled in v2.16.0, rejects
+ * instantly) and then to the SGO fallback, which produced nothing usable, and the board
+ * read "NOTHING CLEARED" as if the market were empty. tkb_get_player_hit_rate on the
+ * same players worked, because it was already on ESPN.
+ */
+export const ESPN_SCREEN_SPORTS: SportKey[] = ["nba", "nfl", "wnba", "epl", "ucl"];
+
+/**
+ * Why each candidate left the board, counted. v2.19.0. The 2026-10-19 failure was
+ * invisible precisely because "no rate" and "rate below the bar" both produced an empty
+ * board with the same sentence. These are returned in structuredContent so a zero is
+ * always explained.
+ */
+export interface ScreenDropReasons {
+  noRate: number;
+  insufficientSample: number;
+  belowMinSample: number;
+  belowMinEdge: number;
+  belowMinHitRate: number;
+  /** A worker threw. Counted, with the first message kept, never swallowed. */
+  threw: number;
+}
 
 /**
  * PROP SCREENER
@@ -371,12 +410,18 @@ interface ScreenedProp {
   /** Prose naming which recency check fired, or null when the sample is current. */
   stalenessNote: string | null;
   daysSinceMostRecentGame: number | null;
+  injuryStatus: string | null;
+  injuryDetail: string | null;
+  injuryReturnDate: string | null;
+  injuryUpdatedAt: string | null;
+  injuryComment: string | null;
 }
 
-async function mapWithConcurrency<T, R>(
+export async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,
-  fn: (item: T) => Promise<R | null>
+  fn: (item: T) => Promise<R | null>,
+  onError?: (err: unknown) => void
 ): Promise<R[]> {
   const out: R[] = [];
   let cursor = 0;
@@ -386,8 +431,11 @@ async function mapWithConcurrency<T, R>(
       try {
         const r = await fn(items[idx]!);
         if (r !== null) out.push(r);
-      } catch {
-        // One bad market must never abort the sweep.
+      } catch (err) {
+        // One bad market must never abort the sweep. But it must be COUNTED: before
+        // v2.19.0 this was a bare catch, and on 2026-10-19 it is how 113 NBA markets
+        // disappeared without a single reason being reported.
+        onError?.(err);
       }
     }
   }
@@ -433,7 +481,8 @@ export function registerScreenPropsTool(
   sgo: SGOClient,
   bdl: BDLClient,
   cfbd: CFBDClient | null,
-  cbbd: CBBDClient | null = null
+  cbbd: CBBDClient | null = null,
+  espn: EspnClient | null = null
 ) {
   server.registerTool(
     "tkb_screen_props",
@@ -450,6 +499,8 @@ Set minHitRate=0.6 with maxAmericanOdds=-200 for a win-rate-first screen. Both f
 AUTOMATICALLY EXCLUDED: model-estimated (fairOdds) prices that no book has posted, samples too small to be evidence, combo stats that cannot be counted, and prices shorter than maxAmericanOdds.
 
 Replaces 10-15 manual tkb_get_odds + tkb_get_player_hit_rate calls per game.
+
+RATE SOURCES (v2.19.0): NBA, NFL, WNBA, EPL and UCL rates come from ESPN's free game log, the same source tkb_get_player_hit_rate uses, at zero SportsGameOdds entities. CFB uses CollegeFootballData, CBB uses CollegeBasketballData, MLB uses SGO, and NHL is not screened here (use tkb_get_player_hit_rate). Every response counts WHY each prop left the board (no rate, thin sample, under edge, under hit rate, error), so an empty board is always explained. NBA, NFL and WNBA props also carry injuryStatus from ESPN's injury feed, with the feed's age stated.
 
 Returns per prop: player, market, line, side, real price, roundedOdds (publishable form), book, hit rate, sample size, break-even, edge, last 6 values, and a playing-time flag.
 
@@ -794,7 +845,36 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
       let sgoFallback = 0;
       let cfbdServed = 0;
       let cbbdServed = 0;
+      let espnServed = 0;
       const bdlFailures = new Map<string, number>();
+      const dropReasons: ScreenDropReasons = {
+        noRate: 0,
+        insufficientSample: 0,
+        belowMinSample: 0,
+        belowMinEdge: 0,
+        belowMinHitRate: 0,
+        threw: 0,
+      };
+      let firstThrow: string | null = null;
+      // One memo per screen: ~450 identical ESPN requests on a full NBA board become ~30.
+      const espnForScreen =
+        espn && ESPN_SCREEN_SPORTS.includes(input.sport as SportKey) && ESPN_LEAGUE_PATHS[input.sport]
+          ? withRequestMemo(espn)
+          : null;
+
+      // INJURY ANNOTATION, v2.19.0. One league-wide ESPN fetch per screen (cached ten
+      // minutes across screens). A WARNING, NOT A FILTER, per this file's standing rule,
+      // because ESPN's status wording is loose: a months-long injury has been measured
+      // as "Day-To-Day". A failed fetch is stated, never read as "nobody is hurt".
+      let injuryFeed: EspnInjuryFeed | null = null;
+      let injuryFeedError: string | null = null;
+      if (espn && ESPN_INJURY_SPORTS.includes(input.sport as SportKey)) {
+        try {
+          injuryFeed = await getEspnInjuries(espn, input.sport as SportKey);
+        } catch (err) {
+          injuryFeedError = err instanceof Error ? err.message : String(err);
+        }
+      }
 
       const availabilityFor = async (
         teamID: string,
@@ -894,6 +974,56 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
             // behind GOAT for that sport and SGO carries college games rather than
             // college box scores, so an SGO fallback here would not cost more, it
             // would manufacture DNPs. Routed away entirely.
+            // ---- ESPN FOR NBA/NFL/WNBA/EPL/UCL, v2.19.0 ----
+            //
+            // Mirrors tools/hitRate.ts `auto`. NO FALLTHROUGH to BDL or SGO when ESPN
+            // refuses: BDL is cancelled, and an SGO fallback here spends entities on a
+            // number the single-player tool would not have produced either. The refusal
+            // is counted by cause instead, so an empty board says why.
+            if (espnForScreen) {
+              const reason =
+                espnStatUnavailableReason(input.sport as SportKey, c.statID) ??
+                (isEspnStatSupported(input.sport as SportKey, c.statID)
+                  ? null
+                  : "espn stat not mapped");
+              if (reason) {
+                const bucket = reason === "espn stat not mapped" ? reason : "espn stat refused by name";
+                bdlFailures.set(bucket, (bdlFailures.get(bucket) ?? 0) + 1);
+                return undefined as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
+              }
+              try {
+                const espnRate = await getEspnPlayerHitRate(espnForScreen, {
+                  sport: input.sport as SportKey,
+                  playerName: player.name,
+                  teamName:
+                    teamNames[player.teamID] ??
+                    player.teamID.replace(/_[A-Z]+$/, "").replace(/_/g, " "),
+                  statID: c.statID,
+                  line: c.line,
+                  direction: c.side,
+                  // Reaching back a season is one more FREE request on ESPN, so it is on
+                  // by default exactly as in tkb_get_player_hit_rate, and still labelled.
+                  allowPriorSeasons: true,
+                  maxSeasons: input.includePriorSeason ? 3 : 2,
+                });
+                espnServed++;
+                return espnRate as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                const bucket = !(err instanceof EspnRefusal)
+                  ? "espn other"
+                  : /map .* to an ESPN athlete/.test(msg)
+                    ? "espn player not matched"
+                    : /map .* to an ESPN team/.test(msg)
+                      ? "espn team not matched"
+                      : /unavailable/.test(msg)
+                        ? "espn unreachable"
+                        : "espn refused";
+                bdlFailures.set(bucket, (bdlFailures.get(bucket) ?? 0) + 1);
+                return undefined as unknown as Awaited<ReturnType<typeof getPlayerHitRate>>;
+              }
+            }
+
             if (input.sport === "cbb" && cbbd && isCbbdStatSupported(c.statID)) {
               try {
                 const cbbdRate = await getCbbdPlayerHitRate(cbbd, {
@@ -1080,8 +1210,21 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           }
           const rate = await pending;
 
-          if (!rate.sampleSufficient) return null;
-          if (rate.gamesConsidered < input.minSample) return null;
+          // `rate` is undefined whenever a source refused (the casts above hide that
+          // from the type). Reading .sampleSufficient off it threw, mapWithConcurrency
+          // swallowed the throw, and the prop vanished uncounted. Counted now.
+          if (!rate) {
+            dropReasons.noRate++;
+            return null;
+          }
+          if (!rate.sampleSufficient) {
+            dropReasons.insufficientSample++;
+            return null;
+          }
+          if (rate.gamesConsidered < input.minSample) {
+            dropReasons.belowMinSample++;
+            return null;
+          }
 
           const avail = await availabilityFor(player.teamID, c.playerID, c.statID);
 
@@ -1094,13 +1237,27 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           const hitRatePct = hits / rate.gamesConsidered;
           const breakevenPct = impliedProbability(c.americanOdds);
           const edge = computeEdge(hitRatePct, c.americanOdds);
-          if (edge < input.minEdge) return null;
+          if (edge < input.minEdge) {
+            dropReasons.belowMinEdge++;
+            return null;
+          }
           // WIN-RATE FLOOR, applied independently of edge. A prop can carry a
           // positive edge on a plus-money price while still losing most nights -
           // one screened on 2026-08-10 showed 6 of 15 (40%) at +220 and cleared
           // an edge filter comfortably. For an account judged on visible wins
           // rather than ROI, that is the wrong pick regardless of the maths.
-          if (hitRatePct < input.minHitRate) return null;
+          if (hitRatePct < input.minHitRate) {
+            dropReasons.belowMinHitRate++;
+            return null;
+          }
+
+          const injury = injuryFeed
+            ? findInjuryEntry(
+                injuryFeed.entries,
+                player.name,
+                teamNames[player.teamID] ?? undefined
+              ).match
+            : null;
 
           return {
             playerName: player.name,
@@ -1165,9 +1322,50 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
             sampleIsStale: recency.isStale,
             stalenessNote: recency.warning,
             daysSinceMostRecentGame: recency.daysSinceMostRecent,
+            // ESPN injury entry for this player, or null. null means "not listed in the
+            // feed", which is only meaningful when injuryFeed is fresh - see the routing
+            // line, which states the feed's age on every screen.
+            injuryStatus: injury ? injury.status : null,
+            injuryDetail: injury
+              ? [injury.injuryType, injury.detail].filter(Boolean).join(" ") || null
+              : null,
+            injuryReturnDate: injury ? injury.returnDate : null,
+            injuryUpdatedAt: injury ? injury.updatedAt : null,
+            injuryComment: injury ? injury.shortComment : null,
           };
+        },
+        (err) => {
+          dropReasons.threw++;
+          if (firstThrow === null) firstThrow = err instanceof Error ? err.message : String(err);
         }
       );
+
+      // ---- DROP ACCOUNTING AND INJURY LINE, v2.19.0 ----
+      const dropLine =
+        `\n\nWHY PROPS LEFT THE BOARD: ` +
+        `${dropReasons.noRate} no rate source, ` +
+        `${dropReasons.insufficientSample} sample too thin, ` +
+        `${dropReasons.belowMinSample} under minSample, ` +
+        `${dropReasons.belowMinEdge} under minEdge, ` +
+        `${dropReasons.belowMinHitRate} under minHitRate` +
+        (dropReasons.threw
+          ? `, ${dropReasons.threw} FAILED WITH AN ERROR (first: ${firstThrow})`
+          : "") +
+        `.` +
+        (dropReasons.noRate + dropReasons.threw > 0 &&
+        dropReasons.noRate + dropReasons.threw >= Math.ceil(candidates.length * 0.8)
+          ? ` MOST OF THIS BOARD HAD NO RATE AT ALL, so an empty result here is a SOURCE ` +
+            `failure, not a verdict on the market. Read the refusal causes above, and use ` +
+            `tkb_get_prop_board plus tkb_get_player_hit_rate per player instead.`
+          : "");
+
+      const injuryLine = injuryFeed
+        ? `\n\n${describeFeedFreshness(injuryFeed)} Each prop carries injuryStatus from it ` +
+          `(null = not listed). A warning, not a filter.`
+        : injuryFeedError
+          ? `\n\nINJURY FEED UNAVAILABLE: ${injuryFeedError} No prop on this board has been ` +
+            `checked against an injury list; confirm availability by live search.`
+          : "";
 
       // ---- CURRENT-SEASON FLOOR, APPLIED BEFORE RANKING ----
       //
@@ -1215,9 +1413,9 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
             `with a coin-flip prop.` +
             `\n\nTO SEE THE BOARD ANYWAY, use tkb_get_prop_board. It prints every priced ` +
             `market with no hit-rate requirement. That is the right call when the sport ` +
-            `has no rate source at all - early-season CFB, or any WNBA market while BDL ` +
-            `gates player stats - where this screener will always return empty no matter ` +
-            `how low the thresholds go.` +
+            `has no rate source at all, where this screener will always return empty no ` +
+            `matter how low the thresholds go. WHY PROPS LEFT THE BOARD, below, says ` +
+            `which case this is.` +
             (bookFilter
               ? `\n\nNOTE: priced against ${bookFilter} only. A market that exists but ` +
                 `was only priced by an excluded venue is invisible here BY DESIGN, so ` +
@@ -1282,20 +1480,22 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           `do NOT publish prices from this board without re-pulling at your books.`;
 
       const routing =
-        bdlServed + sgoFallback + cfbdServed + cbbdServed === 0
+        bdlServed + sgoFallback + cfbdServed + cbbdServed + espnServed === 0
           ? `\n\n${bookLine}${priorSeasonLine}${seasonFloorLine}${rosterLine}${diversityLine}` +
             (input.sport === "cfb" && !cfbd
               ? ` NO CFB RATE SOURCE: CFBD_API_KEY is not set, so no CFB prop can be ` +
                 `scored. This board is empty for that reason, NOT because the market ` +
                 `is empty - run tkb_get_prop_board to see what is actually priced.`
               : "")
-          : `\n\n${bookLine}${priorSeasonLine}${seasonFloorLine}${rosterLine}${diversityLine} Rate sources: ${bdlServed} from BALLDONTLIE (no SGO quota), ` +
+          : `\n\n${bookLine}${priorSeasonLine}${seasonFloorLine}${rosterLine}${diversityLine} Rate sources: ` +
+            (espnServed ? `${espnServed} from ESPN (free, zero SGO entities), ` : "") +
+            `${bdlServed} from BALLDONTLIE (no SGO quota), ` +
             `${sgoFallback} from SportsGameOdds` +
             (cfbdServed ? `, ${cfbdServed} from CollegeFootballData` : "") +
             (cbbdServed ? `, ${cbbdServed} from CollegeBasketballData` : "") +
             `.` +
             (bdlFailures.size
-              ? ` BDL fallback reasons: ` +
+              ? ` Rate refusals by cause: ` +
                 [...bdlFailures.entries()]
                   .sort((a, b) => b[1] - a[1])
                   .map(([reason, n]) => `${reason} (${n})`)
@@ -1343,7 +1543,10 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
 
       return {
         content: [
-          { type: "text" as const, text: `${summary}${routing}\n\n${JSON.stringify(top, null, 2)}` },
+          {
+            type: "text" as const,
+            text: `${summary}${routing}${dropLine}${injuryLine}\n\n${JSON.stringify(top, null, 2)}`,
+          },
         ],
         structuredContent: {
           eventID: input.eventID,
@@ -1357,6 +1560,25 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
           rosterClipped,
           distinctPlayersShown: distinctPlayers,
           suppressedByDiversity,
+          rateSources: {
+            espn: espnServed,
+            bdl: bdlServed,
+            sgo: sgoFallback,
+            cfbd: cfbdServed,
+            cbbd: cbbdServed,
+          },
+          rateRefusals: Object.fromEntries(bdlFailures),
+          dropReasons,
+          injuryFeed: injuryFeed
+            ? {
+                feedTimestamp: injuryFeed.feedTimestamp,
+                feedAgeHours: injuryFeed.feedAgeHours,
+                stale: injuryFeed.stale,
+                flaggedOnBoard: top.filter((p) => p.injuryStatus !== null).length,
+              }
+            : injuryFeedError
+              ? { error: injuryFeedError }
+              : null,
           props: top,
         },
       };

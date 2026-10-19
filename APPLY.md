@@ -1,43 +1,50 @@
-# v2.18.0: preseason is accessible, explicitly
+# TKB connector v2.19.0: screener on ESPN + ESPN injury feed
 
-Six files. Suite 942 -> 961. Twelve mutations, all caught. Default behaviour unchanged.
+Built on GitHub main at v2.18.0 (commit 053a4ff). 985/985 tests pass, `tsc` clean.
 
-```
-src/services/espnHitRateAggregator.ts   seasonPhase, row tagging, minutes, warning
-src/tools/hitRate.ts                    seasonPhase input + a gate before every branch
-src/types.ts                            seasonPhase + minutes on GameLogEntry (optional)
-src/index.ts                            2.17.2 -> 2.18.0
-test/v2_18_0.test.ts                    NEW, 19 tests
-package.json                            2.18.0
-```
+## Upload these (same paths, overwrite)
 
-## How to use it
+- package.json
+- src/constants.ts
+- src/index.ts
+- src/services/espnClient.ts
+- src/services/espnInjuries.ts   (NEW)
+- src/tools/injuries.ts
+- src/tools/screenProps.ts
+- test/v2_19_0.test.ts            (NEW)
 
-New input on `tkb_get_player_hit_rate`:
+## Delete this on GitHub
 
-| seasonPhase | counts |
-| --- | --- |
-| `regular` (default) | regular season only. Exactly the old behaviour. |
-| `preseason` | ONLY this season's preseason games |
-| `both` | both, every row tagged, and the warning states the split |
+- src/tools/debugInjuries.ts
 
-NBA, NFL and WNBA only. Every other sport is refused by name.
+v2.15.0 already removed it, but it is still in the repo, and the v2.15.0 test fails
+because of it. Nothing imports it.
 
-## Verify after deploy
+## What changed
 
-```
-npm test     # expect 961 pass / 0 fail
-```
+1. tkb_screen_props: NBA, NFL, WNBA, EPL and UCL rates now come from ESPN, the same
+   source tkb_get_player_hit_rate uses. Before this, NBA went to BDL (cancelled),
+   then fell back to SGO and produced nothing: 0 of 113 markets. If ESPN refuses a
+   prop, it is no longer passed silently to SGO (that cost entities and produced no
+   rate either). ESPN requests are memoised within each screen, so roughly 450
+   requests become about 30.
+2. Every screen now reports WHY each prop left the board: no rate, sample too thin,
+   under minSample, under edge, under hit rate, or an error. Errors used to be
+   swallowed silently. If most of the board has no rate, it says the problem is the
+   source, not the market.
+3. Screen props for NBA, NFL and WNBA carry injuryStatus from ESPN, and the board
+   states how old the injury feed is. This is a warning, not a filter.
+4. tkb_get_injuries: NBA, NFL, NHL and WNBA now read ESPN's free league-wide feed.
+   Both ESPN hosts are fetched and the newer snapshot wins, because they serve
+   different copies (one was measured two months behind the other). Every answer
+   shows the feed's age. Anything older than 24h is marked STALE, and an empty result
+   from a stale feed is never treated as "healthy". A return date that has already
+   passed is flagged.
+5. The NBA injuries refusal no longer talks about a missing NCAAF endpoint.
 
-```
-tkb_get_player_hit_rate(sport:"nba", teamID:"LOS_ANGELES_LAKERS_NBA",
-  playerID:"LUKA_DONCIC_1_NBA", playerName:"Luka Doncic",
-  statID:"points", line:20.5, direction:"over", seasonPhase:"preseason")
-```
+## After deploy, check
 
-Expect `statSourceUsed: "espn"`, `seasonPhase: "preseason"`, at least one row
-tagged `"preseason"` with `minutes: 16`, and a warning starting
-`PRESEASON GAMES COUNTED`.
-
-Then confirm the guard: the same call with `sport:"nhl"` must return
-`reason: "season_phase_unsupported"`, not a regular-season rate.
+- tkb_get_api_usage shows version 2.19.0 (or check /health).
+- tkb_screen_props on an NBA eventID: "Rate sources: N from ESPN" and a
+  "WHY PROPS LEFT THE BOARD" line.
+- tkb_get_injuries sport=nba: entries plus "ESPN injury feed last updated ...".

@@ -3,6 +3,14 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 import type { NormalizedInjury, BDLInjury } from "../types.js";
+import type { EspnClient } from "../services/espnClient.js";
+import {
+  ESPN_INJURY_SPORTS,
+  getEspnInjuries,
+  describeFeedFreshness,
+  injuryTeamHaystack,
+} from "../services/espnInjuries.js";
+import { normaliseEspnName } from "../services/espnPlayerResolution.js";
 
 const InjuriesInputSchema = z
   .object({
@@ -79,12 +87,91 @@ function resolveSummary(injury: BDLInjury): string {
   );
 }
 
-export function registerInjuriesTool(server: McpServer, bdl: BDLClient) {
+/**
+ * ESPN PATH, v2.19.0. NBA, NFL, NHL and WNBA read ESPN's keyless league-wide feed.
+ * Exported so it is testable without an MCP server.
+ */
+export async function espnInjuriesResponse(espn: Pick<EspnClient, "fetchRawEspn">, params: InjuriesInput) {
+  const feed = await getEspnInjuries(espn, params.sport);
+  let entries = feed.entries;
+  if (params.playerName) {
+    const needle = normaliseEspnName(params.playerName);
+    entries = entries.filter((e) => normaliseEspnName(e.playerName).includes(needle));
+  }
+  if (params.teamName) {
+    const needle = params.teamName.toLowerCase();
+    entries = entries.filter((e) => injuryTeamHaystack(e).includes(needle));
+  }
+  const freshness = describeFeedFreshness(feed);
+  const label = params.sport.toUpperCase();
+  const scope = params.playerName
+    ? `player matching "${params.playerName}"`
+    : params.teamName
+      ? `team matching "${params.teamName}"`
+      : label;
+
+  const passed = entries.filter((e) => e.returnDatePassed).length;
+  const passedNote = passed
+    ? ` ${passed} entr${passed === 1 ? "y has" : "ies have"} a return date that has ALREADY PASSED; ` +
+      `ESPN often leaves those up after the player is back, or before his status is updated, so ` +
+      `read them as "check this player", never as a confirmed status.`
+    : "";
+
+  const header = entries.length
+    ? `${entries.length} ${label} injury record(s) for ${scope}. Source: ESPN (${feed.host}).`
+    : feed.stale
+      ? `No ${label} injury entries found for ${scope}, BUT THE FEED IS STALE, so this is NOT a clean bill of health.`
+      : `No ${label} injury entries found for ${scope} in a current ESPN feed. This filter ran against ` +
+        `${feed.teamCount} team group(s) of real data, so the empty result means ESPN lists no injury for them.`;
+
+  const sportNote =
+    params.sport === "nfl"
+      ? ` NFL: Wednesday-Friday practice reports and Friday game designations move here with a lag, and ` +
+        `inactives come 90 minutes before kickoff. A clean entry on Thursday is not a Sunday confirmation.`
+      : params.sport === "nhl"
+        ? ` NHL: clubs report "upper body"/"lower body" and goalie starts are confirmed at warmups, ` +
+          `which this feed does not carry. Confirm the starting goalie separately.`
+        : ` Game-time decisions and late scratches can post after this feed updates.`;
+
+  const output = {
+    source: "espn",
+    sport: params.sport,
+    feedTimestamp: feed.feedTimestamp,
+    feedAgeHours: feed.feedAgeHours,
+    stale: feed.stale,
+    host: feed.host,
+    hostsTried: feed.hostsTried,
+    count: entries.length,
+    injuries: entries,
+  };
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text:
+          `${header}\n\n${freshness}${passedNote}${sportNote} ESPN's status wording is loose (a ` +
+          `months-long injury has been measured as "Day-To-Day"), so read shortComment and returnDate, ` +
+          `not the status alone.\n\n${JSON.stringify(output, null, 2)}`,
+      },
+    ],
+    structuredContent: output,
+  };
+}
+
+export function registerInjuriesTool(server: McpServer, bdl: BDLClient, espn?: EspnClient) {
   server.registerTool(
     "tkb_get_injuries",
     {
       title: "Get Player Injuries",
-      description: `Get current injury reports from BALLDONTLIE for a sport, optionally filtered by player or team.
+      description: `Get current injury reports for a sport, optionally filtered by player or team.
+
+SOURCE BY SPORT (v2.19.0): NBA, NFL, NHL and WNBA read ESPN's free league-wide injury
+feed (no key, zero SportsGameOdds entities). Every answer prints the feed's own
+timestamp and age, and a feed older than 24 hours is flagged STALE. MLB still reads
+BALLDONTLIE, which works only while a BDL key is configured. Two ESPN hosts serve
+different snapshots of the same feed (one was measured two months behind the other),
+so both are fetched and the newer one is used.
 
 This is a structured injury data source (not a web search) - use it as the FIRST
 check before including any player in a pick. It returns status (Out/Questionable/
@@ -130,6 +217,10 @@ Error Handling:
     },
     async (params: InjuriesInput) => {
       try {
+        if (espn && ESPN_INJURY_SPORTS.includes(params.sport)) {
+          return await espnInjuriesResponse(espn, params);
+        }
+
         if (!supportsCapability(params.sport, "injuries")) {
           return {
             content: [

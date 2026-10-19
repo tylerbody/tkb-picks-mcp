@@ -462,8 +462,9 @@ export const SPORT_CONFIG = {
    * in hitRate.ts. SGO's own box scores were verified against ESPN on 2026-10-01 and
    * matched to the yard on three NFL games, which is the evidence for trusting them.
    *
-   * injuries FALSE: BDL's injury feed is the only one wired up and it has no nba path
-   * here. weather FALSE: indoor. */
+   * injuries FALSE here, and that flag now describes BALLDONTLIE only. Since v2.19.0
+   * tkb_get_injuries serves NBA from ESPN's free feed BEFORE this flag is read (see
+   * ESPN_INJURY_SPORTS in services/espnInjuries.ts). weather FALSE: indoor. */
   nba: {
     label: "NBA",
     sgoLeagueID: "NBA",
@@ -674,7 +675,13 @@ export function unsupportedMessage(
             ? `No injury feed is available for ${label} on the current subscription. BALLDONTLIE gates /player_injuries behind GOAT for this sport. Rotation matters more here than injury in a midweek-plus-weekend competition, so confirm the expected XI from team news before posting a ${label} player prop.`
             : slots
               ? `No injury feed is available for ${label} on the current subscription. Tennis withdrawals and retirements are announced by the tournament, so check tour news directly before posting a ${label} pick.`
-              : `BALLDONTLIE has no ${label} injuries endpoint at all. Verified live 2026-08-31: both /ncaaf/v1/player_injuries and /ncaaf/v1/injuries return 404, while the same path returns 200 for MLB on the same key. This is a MISSING ENDPOINT, not a subscription limit, so it cannot be unlocked by upgrading. Check ${label} injury and availability news via live web search, and note that CFB availability also has to be confirmed from a depth chart because CollegeFootballData lists a player only where he recorded a stat.`,
+              : sport !== "cfb"
+                ? /* v2.19.0: NBA used to fall through to the CFB text below and tell the
+                   * reader about a missing /ncaaf/ path. Measured 2026-10-19. NBA, NFL, NHL
+                   * and WNBA are served by ESPN in tkb_get_injuries before this is reached,
+                   * so this line only appears if that client is not wired. */
+                  `No injury feed is wired for ${label} in this call. ESPN's free feed serves NBA, NFL, NHL and WNBA through tkb_get_injuries when the ESPN client is configured; if you are reading this, it was not. Confirm ${label} availability by live search before posting.`
+                : `BALLDONTLIE has no ${label} injuries endpoint at all. Verified live 2026-08-31: both /ncaaf/v1/player_injuries and /ncaaf/v1/injuries return 404, while the same path returns 200 for MLB on the same key. This is a MISSING ENDPOINT, not a subscription limit, so it cannot be unlocked by upgrading. Check ${label} injury and availability news via live web search, and note that CFB availability also has to be confirmed from a depth chart because CollegeFootballData lists a player only where he recorded a stat.`,
 
     weather:
       sport === "ufc"
