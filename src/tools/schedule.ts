@@ -5,6 +5,7 @@ import type { SGOClient } from "../services/sgoClient.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
 import { emptyResultExplanation } from "../services/leagueAccess.js";
 import type { NormalizedGame } from "../types.js";
+import { slateDayBounds } from "../services/slateDay.js";
 import {
   normalizeTeamKey,
   POWER_4,
@@ -25,7 +26,7 @@ const ScheduleInputSchema = z
       .string()
       .optional()
       .describe(
-        "Single date in YYYY-MM-DD format. Omit to use startsAfter/startsBefore instead for a range."
+        "Single date YYYY-MM-DD, read as a PACIFIC calendar day (local midnight to midnight, DST-correct), so it holds every US game of that date including late West Coast and Hawaii starts. Before v2.19.1 this was a UTC day, which dropped every game from 8 PM Eastern on and pulled in the previous night's late games. Omit to use startsAfter/startsBefore, which are passed through exactly as given."
       ),
     startsAfter: z
       .string()
@@ -77,7 +78,8 @@ export function registerScheduleTool(server: McpServer, sgo: SGOClient) {
 
 Args:
   - sport ('mlb'|'wnba'|'nfl'|'cfb'|'atp'|'wta'): which sport
-  - date (string, optional): single date YYYY-MM-DD
+  - date (string, optional): single date YYYY-MM-DD, a PACIFIC calendar day (v2.19.1;
+    it was a UTC day and hid late games). The response states the exact UTC window used.
   - startsAfter / startsBefore (ISO datetime, optional): date range instead of single date
   - teamName (string, optional): filter to one team's games
   - conference (string, optional, CFB only): 'SEC' | 'Big Ten' | 'Big 12' | 'ACC'
@@ -123,9 +125,14 @@ Error Handling:
 
         let startsAfter = params.startsAfter;
         let startsBefore = params.startsBefore;
+        // v2.19.1: a date is a PACIFIC calendar day, not a UTC one. The UTC window
+        // dropped every game from 8 PM Eastern on and pulled in last night's late
+        // games. See services/slateDay.ts. Explicit bounds are untouched.
+        let dayWindow: ReturnType<typeof slateDayBounds> | null = null;
         if (params.date) {
-          startsAfter = `${params.date}T00:00:00Z`;
-          startsBefore = `${params.date}T23:59:59Z`;
+          dayWindow = slateDayBounds(params.date);
+          startsAfter = dayWindow.startsAfter;
+          startsBefore = dayWindow.startsBefore;
         } else if (!startsAfter && !startsBefore && !params.teamName) {
           // No date given and no team filter either - default to "today onward"
           // rather than pulling the entire multi-season history unbounded.
@@ -380,6 +387,13 @@ Error Handling:
           // The raw fetch size, so "the filter cut it" and "the cap cut it" are
           // distinguishable from the response alone rather than by re-running.
           eventsFetchedBeforeFilters: events.length,
+          // The exact UTC window asked of SGO, so a "missing" game can be checked
+          // against the bounds from the response alone.
+          window: {
+            startsAfter: startsAfter ?? null,
+            startsBefore: startsBefore ?? null,
+            ...(dayWindow ? { dateReadAs: `Pacific calendar day ${params.date}` } : {}),
+          },
           games,
         };
 

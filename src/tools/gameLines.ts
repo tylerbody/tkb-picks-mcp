@@ -6,6 +6,7 @@ import { extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js
 import { gameTotalStatFor, SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, matchLinePeriodFor, type SportKey } from "../constants.js";
 import { readMatchTeams } from "../services/eventShape.js";
 import type { SGOEvent } from "../types.js";
+import { slateDayBounds } from "../services/slateDay.js";
 
 /**
  * SLATE-WIDE TEAM LINES - moneyline, spread and total for many games at once.
@@ -60,7 +61,9 @@ const GameLinesInputSchema = z
     date: z
       .string()
       .optional()
-      .describe("Single date YYYY-MM-DD. Pulls every game that day in ONE request."),
+      .describe(
+        "Single date YYYY-MM-DD, read as a PACIFIC calendar day (v2.19.1; it was a UTC day, which dropped games from 8 PM Eastern on). Pulls every game that day in ONE request."
+      ),
     startsAfter: z.string().optional().describe("ISO datetime lower bound."),
     startsBefore: z.string().optional().describe("ISO datetime upper bound."),
     markets: z
@@ -355,9 +358,11 @@ Error Handling:
         } else {
           let startsAfter = input.startsAfter;
           let startsBefore = input.startsBefore;
+          // v2.19.1: a PACIFIC calendar day, not a UTC one. See services/slateDay.ts.
           if (input.date) {
-            startsAfter = `${input.date}T00:00:00Z`;
-            startsBefore = `${input.date}T23:59:59Z`;
+            const w = slateDayBounds(input.date);
+            startsAfter = w.startsAfter;
+            startsBefore = w.startsBefore;
           }
 
           /* ---- A DATE RANGE USED TO SILENTLY SHRINK THE SLATE (FIXED v2.10.4) ----
