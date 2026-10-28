@@ -1,6 +1,6 @@
 import type { SportKey } from "../constants.js";
 import { ESPN_LEAGUE_PATHS, type EspnClient, type EspnFetchResult } from "./espnClient.js";
-import { normaliseEspnName, normaliseEspnTeamName } from "./espnPlayerResolution.js";
+import { normaliseEspnName, normaliseEspnTeamName, extractTeams } from "./espnPlayerResolution.js";
 
 /**
  * ESPN INJURY FEED. ADDED v2.19.0.
@@ -40,7 +40,10 @@ import { normaliseEspnName, normaliseEspnTeamName } from "./espnPlayerResolution
  */
 
 /** Sports with a measured ESPN league-wide injury feed. */
-export const ESPN_INJURY_SPORTS: SportKey[] = ["nba", "nfl", "nhl", "wnba"];
+/* MLB ADDED v2.20.0: site.api.espn.com/.../baseball/mlb/injuries answered 200 from Render
+ * on 2026-10-19 with the same top-level keys, and BALLDONTLIE (MLB's old source) is
+ * cancelled. */
+export const ESPN_INJURY_SPORTS: SportKey[] = ["nba", "nfl", "nhl", "wnba", "mlb"];
 
 /** Hosts tried, in order. Both are fetched; the freshest payload wins. */
 export const ESPN_INJURY_HOSTS = [
@@ -48,8 +51,15 @@ export const ESPN_INJURY_HOSTS = [
   "https://site.web.api.espn.com",
 ] as const;
 
-/** A feed older than this on the day of use gets a loud staleness warning. */
-export const INJURY_FEED_STALE_HOURS = 24;
+/**
+ * FRESHNESS IS MEASURED FROM THE NEWEST ENTRY, NOT THE TOP-LEVEL TIMESTAMP (v2.20.0).
+ * Measured 2026-10-19 and 2026-10-28: the payload's `timestamp` equalled the moment of the
+ * request on both hosts, so it is when ESPN BUILT the response, not when the report last
+ * changed. A feed ESPN stopped updating would still read "0h old". The newest entry's
+ * `date` is the real signal. In season a league posts several updates a day, so 36 hours
+ * without one is flagged STALE.
+ */
+export const INJURY_FEED_STALE_HOURS = 36;
 
 export interface EspnInjuryEntry {
   playerName: string;
@@ -81,8 +91,18 @@ export interface EspnInjuryFeed {
   /** The feed's own top-level timestamp. */
   feedTimestamp: string | null;
   /** Hours between feedTimestamp and asOf. Null when the timestamp is missing. */
+  /** Hours since the NEWEST entry was posted. This is what `stale` is judged on. */
   feedAgeHours: number | null;
+  /** When the most recent entry in the feed was posted. */
+  newestEntryAt: string | null;
   stale: boolean;
+  /**
+   * TEAM COVERAGE (v2.20.0). ESPN's league feed OMITS teams with nothing listed, so a
+   * missing team used to read as full coverage. Measured 2026-10-28: 27 teams present,
+   * Milwaukee absent. Every team not in the feed is listed here and, when possible,
+   * confirmed against ESPN's per-team injury endpoint.
+   */
+  coverage: InjuryCoverage | null;
   seasonLabel: string | null;
   host: string;
   /** Every host tried and what it said, so a stale pick is explainable. */
@@ -92,6 +112,22 @@ export interface EspnInjuryFeed {
 }
 
 export class EspnInjuryShapeError extends Error {}
+
+export interface NotListedTeam {
+  team: string;
+  espnTeamId: string;
+  /** ESPN_LISTS_ZERO: the per-team endpoint confirms no entries.
+   *  MISSING_FROM_FEED: the per-team endpoint HAS entries the league feed left out.
+   *  UNCONFIRMED: the per-team check could not run. */
+  status: "ESPN_LISTS_ZERO" | "MISSING_FROM_FEED" | "UNCONFIRMED";
+  perTeamCount: number | null;
+}
+
+export interface InjuryCoverage {
+  leagueTeams: number;
+  teamsInFeed: string[];
+  notListed: NotListedTeam[];
+}
 
 function str(v: unknown): string | null {
   return typeof v === "string" && v.trim() ? v : null;
@@ -231,8 +267,59 @@ export function clearEspnInjuryCache(): void {
   cache.clear();
 }
 
+/** PURE. The latest `updatedAt` among entries, or null. */
+export function newestEntryDate(entries: EspnInjuryEntry[]): string | null {
+  let best: string | null = null;
+  let bestT = -Infinity;
+  for (const e of entries) {
+    const t = e.updatedAt ? Date.parse(e.updatedAt) : NaN;
+    if (Number.isFinite(t) && t > bestT) {
+      bestT = t;
+      best = e.updatedAt;
+    }
+  }
+  return best;
+}
+
+export function espnCoreTeamInjuriesUrl(sport: SportKey, espnTeamId: string): string {
+  const p = ESPN_LEAGUE_PATHS[sport]!;
+  return `https://sports.core.api.espn.com/v2/sports/${p.sport}/leagues/${p.league}/teams/${encodeURIComponent(espnTeamId)}/injuries?limit=100`;
+}
+
+/** Which league teams the feed covered, with a per-team check on every absent one. */
+async function buildCoverage(
+  espn: Pick<EspnClient, "fetchRawEspn"> & Partial<Pick<EspnClient, "fetchTeams">>,
+  sport: SportKey,
+  entries: EspnInjuryEntry[]
+): Promise<InjuryCoverage | null> {
+  if (!espn.fetchTeams) return null;
+  const teamsRes = await espn.fetchTeams(ESPN_LEAGUE_PATHS[sport]!);
+  const teams = teamsRes.ok && teamsRes.data ? extractTeams(teamsRes.data) : [];
+  if (!teams.length) return null;
+  const inFeedIds = new Set(entries.map((e) => e.espnTeamId).filter(Boolean));
+  const inFeedNames = new Set(entries.map((e) => normaliseEspnTeamName(e.team)));
+  const listed = teams.filter((t) => inFeedIds.has(t.id) || inFeedNames.has(normaliseEspnTeamName(t.displayName)));
+  const absent = teams.filter((t) => !listed.includes(t));
+  const notListed = await Promise.all(
+    absent.map(async (t): Promise<NotListedTeam> => {
+      const res = await espn.fetchRawEspn(espnCoreTeamInjuriesUrl(sport, t.id));
+      const count = res.ok ? (res.data as { count?: unknown })?.count : undefined;
+      if (typeof count !== "number") {
+        return { team: t.displayName, espnTeamId: t.id, status: "UNCONFIRMED", perTeamCount: null };
+      }
+      return {
+        team: t.displayName,
+        espnTeamId: t.id,
+        status: count === 0 ? "ESPN_LISTS_ZERO" : "MISSING_FROM_FEED",
+        perTeamCount: count,
+      };
+    })
+  );
+  return { leagueTeams: teams.length, teamsInFeed: listed.map((t) => t.displayName).sort(), notListed };
+}
+
 export function getEspnInjuries(
-  espn: Pick<EspnClient, "fetchRawEspn">,
+  espn: Pick<EspnClient, "fetchRawEspn"> & Partial<Pick<EspnClient, "fetchTeams">>,
   sport: SportKey,
   asOf: Date = new Date()
 ): Promise<EspnInjuryFeed> {
@@ -273,18 +360,31 @@ export function getEspnInjuries(
         ? { host: r.host, ok: true, status: r.status, feedTimestamp: r.feedTimestamp }
         : { host: r.host, ok: false, status: r.status, reason: r.reason }
     );
-    const best = pickFreshest(good);
+    // Judge hosts by their newest ENTRY, falling back to the build timestamp only when a
+    // payload has no dated entries at all.
+    const best = pickFreshest(
+      good.map((g) => ({ ...g, feedTimestamp: newestEntryDate(g.entries) ?? g.feedTimestamp }))
+    );
     if (!best) {
       throw new EspnInjuryShapeError(
         `No ESPN host returned a usable ${sport.toUpperCase()} injury feed. ` +
           hostsTried.map((h) => `${h.host}: ${h.ok ? "ok" : h.reason}`).join("; ")
       );
     }
-    const age = feedAgeHours(best.feedTimestamp, asOf);
+    const newest = newestEntryDate(best.entries);
+    const age = feedAgeHours(newest, asOf);
+    let coverage: InjuryCoverage | null = null;
+    try {
+      coverage = await buildCoverage(espn, sport, best.entries);
+    } catch {
+      coverage = null;
+    }
     return {
       sport,
-      feedTimestamp: best.feedTimestamp,
+      feedTimestamp: good.find((g) => g.host === best.host)?.feedTimestamp ?? null,
       feedAgeHours: age === null ? null : Number(age.toFixed(1)),
+      newestEntryAt: newest,
+      coverage,
       stale: age === null || age > INJURY_FEED_STALE_HOURS,
       seasonLabel: best.seasonLabel,
       host: best.host,
@@ -330,10 +430,32 @@ export function injuryTeamHaystack(e: EspnInjuryEntry): string {
 
 /** PURE. One-line staleness statement used by both the tool and the screener. */
 export function describeFeedFreshness(feed: EspnInjuryFeed): string {
-  const when = feed.feedTimestamp ?? "an unknown time";
-  const age = feed.feedAgeHours === null ? "unknown age" : `${feed.feedAgeHours}h old`;
-  return feed.stale
-    ? `STALE ESPN INJURY FEED: last updated ${when} (${age}). Do NOT treat an absent player as healthy; ` +
-        `confirm availability by live search before posting.`
-    : `ESPN injury feed last updated ${when} (${age}).`;
+  const when = feed.newestEntryAt ?? "an unknown time";
+  const age = feed.feedAgeHours === null ? "unknown age" : `${feed.feedAgeHours}h ago`;
+  const head = feed.stale
+    ? `STALE ESPN INJURY FEED: the newest entry was posted ${when} (${age}). Do NOT treat an absent ` +
+      `player as healthy; confirm availability by live search before posting.`
+    : `ESPN injury feed: newest entry posted ${when} (${age}).`;
+  return head + describeCoverage(feed);
+}
+
+/** PURE. One-line coverage statement: which teams the feed actually covered. */
+export function describeCoverage(feed: EspnInjuryFeed): string {
+  const c = feed.coverage;
+  if (!c) return ` Team coverage could not be checked, so a team with no entries is UNVERIFIED, not healthy.`;
+  const missing = c.notListed.filter((n) => n.status === "MISSING_FROM_FEED");
+  const unconfirmed = c.notListed.filter((n) => n.status === "UNCONFIRMED");
+  const zero = c.notListed.filter((n) => n.status === "ESPN_LISTS_ZERO");
+  return (
+    ` Coverage: ${c.teamsInFeed.length} of ${c.leagueTeams} teams have entries.` +
+    (zero.length ? ` ESPN's per-team check confirms ZERO listed injuries for: ${zero.map((z) => z.team).join(", ")}.` : "") +
+    (missing.length
+      ? ` WARNING: the league feed LEFT OUT entries that ESPN's per-team endpoint has for: ` +
+        missing.map((m) => `${m.team} (${m.perTeamCount})`).join(", ") +
+        `. Treat those teams as UNVERIFIED and search them.`
+      : "") +
+    (unconfirmed.length
+      ? ` Could not confirm (treat as UNVERIFIED): ${unconfirmed.map((u) => u.team).join(", ")}.`
+      : "")
+  );
 }

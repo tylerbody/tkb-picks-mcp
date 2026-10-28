@@ -2,6 +2,10 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { normalizeName } from "../services/standingsNormalizer.js";
+import type { EspnClient } from "../services/espnClient.js";
+import type { CFBDClient } from "../services/cfbdClient.js";
+import { ESPN_ROSTER_SPORTS, buildRosterIndex, checkAgainstIndex } from "../services/espnRosterIndex.js";
+import { isBdlConfigured } from "../services/bdlUnavailable.js";
 import {
   SUPPORTED_SPORTS,
   supportsCapability,
@@ -180,6 +184,149 @@ export function assessRosterMatch(
   };
 }
 
+export interface VerifyResult {
+  verdict: string;
+  playerName: string;
+  expectedTeam: string;
+  source: string;
+  resolvedExpectedTeam?: string | null;
+  candidates: { team: string; id: string | number }[];
+  note: string;
+  headline: string;
+}
+
+function headlineFor(verdict: string, playerName: string, expectedTeam: string): string {
+  switch (verdict) {
+    case "CONFIRMED":
+      return `CONFIRMED: ${playerName} is listed on ${expectedTeam}.`;
+    case "MISMATCH":
+      return `MISMATCH - DO NOT PUBLISH THIS PICK YET. ${playerName} is NOT on ${expectedTeam}.`;
+    case "NAME_NOT_FOUND":
+      return `NAME NOT FOUND: no "${playerName}" on any roster checked.`;
+    case "TEAM_NOT_RESOLVED":
+      return `TEAM NOT RESOLVED: could not match "${expectedTeam}" to a team, so ${playerName} is unverified.`;
+    default:
+      return `INCONCLUSIVE: ${playerName} could not be verified either way.`;
+  }
+}
+
+/**
+ * One check, routed by sport. v2.20.0: ESPN league index for the pro leagues, CFBD
+ * player search for CFB, BALLDONTLIE only when a BDL key is configured. Never throws:
+ * a failure becomes an INCONCLUSIVE result naming the cause, so one bad lookup in a
+ * batch never sinks the other 39.
+ */
+export async function verifyOne(
+  sport: SportKey,
+  playerName: string,
+  expectedTeam: string,
+  clients: { bdl: BDLClient; espn: EspnClient | null; cfbd: CFBDClient | null }
+): Promise<VerifyResult> {
+  const finish = (r: Omit<VerifyResult, "headline">): VerifyResult => ({
+    ...r,
+    headline: headlineFor(r.verdict, playerName, expectedTeam),
+  });
+  try {
+    if (clients.espn && ESPN_ROSTER_SPORTS.includes(sport)) {
+      const index = await buildRosterIndex(clients.espn, sport);
+      const c = checkAgainstIndex(index, playerName, expectedTeam);
+      return finish({
+        verdict: c.verdict,
+        playerName,
+        expectedTeam,
+        source: `ESPN rosters (${index.rostersLoaded} of ${index.teams.length} teams loaded, index built ${index.builtAt})`,
+        resolvedExpectedTeam: c.resolvedExpectedTeam,
+        candidates: c.foundOn.map((f) => ({ team: f.team, id: f.espnAthleteId })),
+        note: c.note,
+      });
+    }
+
+    let rawCandidates: RosterCandidate[] = [];
+    let truncated = false;
+    let source = "";
+    const wantName = normalizeName(playerName);
+    if (sport === "cfb" && clients.cfbd) {
+      source = "CollegeFootballData player search";
+      const rows = (await clients.cfbd.searchPlayers(playerName)) as Record<string, unknown>[];
+      rawCandidates = rows
+        .filter((p) => {
+          const full =
+            typeof p.name === "string" && p.name
+              ? p.name
+              : `${String(p.firstName ?? "")} ${String(p.lastName ?? "")}`;
+          return normalizeName(full) === wantName;
+        })
+        .map((p) => {
+          const team = String(p.team ?? "unknown");
+          return {
+            bdlPlayerID: Number(p.id) || 0,
+            name: playerName,
+            team,
+            teamKeys: [normalizeName(team)].filter(Boolean),
+          };
+        });
+    } else if (isBdlConfigured(clients.bdl)) {
+      source = "BALLDONTLIE player search";
+      const search = await clients.bdl.searchPlayers(sport, playerName);
+      truncated = Boolean(search.truncated);
+      rawCandidates = (search.data ?? [])
+        .filter((p) => normalizeName(`${p.first_name} ${p.last_name}`) === wantName)
+        .map((p) => {
+          const t = (p.team ?? {}) as Record<string, unknown>;
+          const str = (k: string): string | null => (typeof t[k] === "string" && t[k] ? (t[k] as string) : null);
+          const keys = [
+            str("full_name"), str("display_name"), str("short_display_name"), str("college"),
+            str("name"), str("location"), str("abbreviation"),
+            [str("location"), str("name")].filter(Boolean).join(" "),
+            [str("college"), str("name")].filter(Boolean).join(" "),
+          ]
+            .filter((v): v is string => Boolean(v))
+            .map(normalizeName)
+            .filter(Boolean);
+          return {
+            bdlPlayerID: p.id,
+            name: `${p.first_name} ${p.last_name}`,
+            team: str("full_name") ?? str("display_name") ?? str("college") ?? str("name") ?? "unknown",
+            teamKeys: [...new Set(keys)],
+          };
+        });
+    } else {
+      return finish({
+        verdict: "INCONCLUSIVE",
+        playerName,
+        expectedTeam,
+        source: "none",
+        candidates: [],
+        note:
+          `No roster source is wired for ${sport.toUpperCase()}: ESPN covers ${ESPN_ROSTER_SPORTS.join(", ")}, ` +
+          `CFBD covers cfb` + (sport === "cfb" ? " (CFBD_API_KEY is not set)" : "") +
+          `, and BALLDONTLIE is cancelled. Confirm the team from the club's official site.`,
+      });
+    }
+
+    const a = assessRosterMatch(rawCandidates, expectedTeam, truncated);
+    return finish({
+      verdict: a.verdict,
+      playerName,
+      expectedTeam,
+      source,
+      candidates: a.allCandidates.map((c) => ({ team: c.team, id: c.bdlPlayerID })),
+      note: a.note,
+    });
+  } catch (err) {
+    return finish({
+      verdict: "INCONCLUSIVE",
+      playerName,
+      expectedTeam,
+      source: "error",
+      candidates: [],
+      note:
+        `The check could not run: ${err instanceof Error ? err.message : String(err)}. A failure is NOT a ` +
+        `mismatch; the team field is simply unverified. Confirm it manually before publishing.`,
+    });
+  }
+}
+
 const VerifyRosterInputSchema = z
   .object({
     sport: z
@@ -187,9 +334,21 @@ const VerifyRosterInputSchema = z
       .describe("Which sport. Tennis has no roster and is refused with a reason."),
     playerName: z
       .string()
-      .describe("Full player name as the odds feed spells it, e.g. 'Bryson Washington'."),
+      .optional()
+      .describe("Full player name as the odds feed spells it, e.g. 'Bryson Washington'. Use this OR players."),
+    players: z
+      .array(z.object({ playerName: z.string(), expectedTeam: z.string() }).strict())
+      .min(1)
+      .max(40)
+      .optional()
+      .describe(
+        "BATCH MODE (v2.20.0): up to 40 {playerName, expectedTeam} pairs checked in ONE call. " +
+          "For NBA/NFL/NHL/MLB/WNBA/EPL/UCL the whole league index is built once and cached six hours, " +
+          "so a batch costs no more than a single check."
+      ),
     expectedTeam: z
       .string()
+      .optional()
       .describe(
         "The team the odds feed claims this player is on - the value to CHECK, not a filter. " +
           "Pass it exactly as SGO gave it, e.g. 'Baylor' or 'Auburn Tigers'."
@@ -199,7 +358,12 @@ const VerifyRosterInputSchema = z
 
 type VerifyRosterInput = z.infer<typeof VerifyRosterInputSchema>;
 
-export function registerVerifyRosterTool(server: McpServer, bdl: BDLClient) {
+export function registerVerifyRosterTool(
+  server: McpServer,
+  bdl: BDLClient,
+  espn: EspnClient | null = null,
+  cfbd: CFBDClient | null = null
+) {
   server.registerTool(
     "tkb_verify_roster",
     {
@@ -220,7 +384,15 @@ RUN THIS on any player whose team you have not independently confirmed, and ALWA
 early-season college football, where portal movement is heavy and boards are built from
 last season's rosters.
 
-Costs ZERO SportsGameOdds entities. One paginated BALLDONTLIE search, cached 15 minutes.
+Costs ZERO SportsGameOdds entities.
+
+SOURCES (v2.20.0; BALLDONTLIE is cancelled, which is why batches used to "rate limit"):
+  - NBA, NFL, NHL, MLB, WNBA, EPL, UCL: ESPN's current team rosters. The whole league is
+    indexed once (one request per team) and cached SIX HOURS, so a batch of 40 costs the
+    same as one check. If any roster failed to load, "not found" is INCONCLUSIVE.
+  - CFB: CollegeFootballData player search (one request per name, cached six hours).
+  - Every result names its source.
+Use the players array for a batch: players=[{playerName, expectedTeam}, ...] up to 40.
 
 Args:
   - sport, playerName
@@ -232,7 +404,9 @@ Returns one of:
   - MISMATCH: nobody by this name is on that team, but the name exists on other teams.
     The feed's team field is the likely error. Do not publish until resolved.
   - NAME_NOT_FOUND: the name is not in the index at all. Usually a spelling difference.
-  - INCONCLUSIVE_TRUNCATED: the search hit its page cap. Absence is NOT evidence here.
+  - INCONCLUSIVE / INCONCLUSIVE_TRUNCATED: the index was incomplete or the search hit its
+    page cap. Absence is NOT evidence here.
+  - TEAM_NOT_RESOLVED: the claimed team could not be matched to an ESPN team.
 
 Examples:
   - Use when: any CFB or NFL prop where the player could plausibly have moved
@@ -265,110 +439,48 @@ Error Handling:
           };
         }
 
-        const search = await bdl.searchPlayers(params.sport, params.playerName);
+        const pairs =
+          params.players ??
+          (params.playerName && params.expectedTeam
+            ? [{ playerName: params.playerName, expectedTeam: params.expectedTeam }]
+            : []);
+        if (!pairs.length) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Pass playerName + expectedTeam, or players: [{playerName, expectedTeam}, ...] for a batch.`,
+              },
+            ],
+            isError: true,
+          };
+        }
 
-        const wantName = normalizeName(params.playerName);
-        const candidates: RosterCandidate[] = (search.data ?? [])
-          .filter(
-            (p) => normalizeName(`${p.first_name} ${p.last_name}`) === wantName
-          )
-          .map((p) => {
-            const t = (p.team ?? {}) as Record<string, unknown>;
-            const str = (k: string): string | null =>
-              typeof t[k] === "string" && t[k] ? (t[k] as string) : null;
-            const display =
-              str("full_name") ??
-              str("display_name") ??
-              [str("location"), str("name")].filter(Boolean).join(" ") ??
-              str("college") ??
-              str("name") ??
-              "unknown";
+        const results: VerifyResult[] = [];
+        for (const pair of pairs) {
+          results.push(await verifyOne(params.sport, pair.playerName, pair.expectedTeam, { bdl, espn, cfbd }));
+        }
 
-            // Candidate set for EXACT matching. "college" matters most for NCAAF,
-            // where SGO says "Baylor" and BDL's full_name is "Baylor Bears".
-            const keys = [
-              str("full_name"),
-              str("display_name"),
-              str("short_display_name"),
-              str("college"),
-              str("name"),
-              str("location"),
-              str("abbreviation"),
-              [str("location"), str("name")].filter(Boolean).join(" "),
-              [str("college"), str("name")].filter(Boolean).join(" "),
-            ]
-              .filter((v): v is string => Boolean(v))
-              .map(normalizeName)
-              .filter(Boolean);
+        const counts = results.reduce<Record<string, number>>((acc, r) => {
+          acc[r.verdict] = (acc[r.verdict] ?? 0) + 1;
+          return acc;
+        }, {});
+        const flagged = results.filter((r) => r.verdict !== "CONFIRMED");
+        const single = results.length === 1 ? results[0]! : null;
 
-            return {
-              bdlPlayerID: p.id,
-              name: `${p.first_name} ${p.last_name}`,
-              team: display,
-              teamKeys: [...new Set(keys)],
-            };
-          });
-
-        const assessment = assessRosterMatch(
-          candidates,
-          params.expectedTeam,
-          Boolean(search.truncated)
-        );
-
-        const headline =
-          assessment.verdict === "CONFIRMED"
-            ? `CONFIRMED: ${params.playerName} is listed on ${params.expectedTeam}.`
-            : assessment.verdict === "MISMATCH"
-              ? `MISMATCH - DO NOT PUBLISH THIS PICK YET. ${params.playerName} is NOT on ${params.expectedTeam}.`
-              : assessment.verdict === "INCONCLUSIVE_TRUNCATED"
-                ? `INCONCLUSIVE: the player search was truncated, so this proves nothing either way.`
-                : `NAME NOT FOUND: no "${params.playerName}" in the ${params.sport.toUpperCase()} index on any team.`;
-
-        const teamsLine = assessment.allCandidates.length
-          ? `\n\nTeams carrying this name: ` +
-            assessment.allCandidates
-              .map((c) => `${c.team} (id ${c.bdlPlayerID})`)
-              .join(", ") +
-            (assessment.mostRecentCandidate
-              ? `\nHighest id is ${assessment.mostRecentCandidate.bdlPlayerID} (${assessment.mostRecentCandidate.team}). ` +
-                `Ids are assigned in ingest order, so the highest is the most recently ingested ` +
-                `row - useful CONTEXT for guessing a current affiliation, and nothing more. It ` +
-                `is not used to decide the verdict and must not be treated as authoritative.`
-              : ``)
-          : ``;
+        const text = single
+          ? `${single.headline}\n\n${single.note}\n\n${JSON.stringify(single, null, 2)}`
+          : `${results.length} player(s) checked: ` +
+            Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(", ") +
+            `.` +
+            (flagged.length
+              ? `\n\nNEEDS ATTENTION:\n` + flagged.map((r) => `- ${r.headline} ${r.note}`).join("\n")
+              : `\n\nEvery player is on the team the feed claims.`) +
+            `\n\n${JSON.stringify(results.map(({ headline: _h, ...rest }) => rest), null, 2)}`;
 
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: `${headline}\n\n${assessment.note}${teamsLine}\n\n${JSON.stringify(
-                {
-                  verdict: assessment.verdict,
-                  playerName: params.playerName,
-                  expectedTeam: params.expectedTeam,
-                  candidateCount: assessment.allCandidates.length,
-                  candidates: assessment.allCandidates.map((c) => ({
-                    bdlPlayerID: c.bdlPlayerID,
-                    team: c.team,
-                  })),
-                  searchTruncated: Boolean(search.truncated),
-                },
-                null,
-                2
-              )}`,
-            },
-          ],
-          structuredContent: {
-            verdict: assessment.verdict,
-            playerName: params.playerName,
-            expectedTeam: params.expectedTeam,
-            candidateCount: assessment.allCandidates.length,
-            candidates: assessment.allCandidates.map((c) => ({
-              bdlPlayerID: c.bdlPlayerID,
-              team: c.team,
-            })),
-            searchTruncated: Boolean(search.truncated),
-          },
+          content: [{ type: "text" as const, text }],
+          structuredContent: single ? { ...single } : { count: results.length, verdictCounts: counts, results },
         };
       } catch (err) {
         return {

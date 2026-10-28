@@ -192,8 +192,11 @@ describe("getEspnInjuries", () => {
   });
 
   test("an old feed is marked stale", async () => {
+    /* v2.20.0: staleness is judged by the NEWEST ENTRY, not the build timestamp, so the
+     * fixture's entries are aged too (a fresh entry under an old timestamp is fresh). */
+    const old = { ...ENTRY_CADE, date: "2026-10-15T08:00Z" };
     const f = await getEspnInjuries(
-      hostFake({ "https://site.api.espn.com": feed("2026-10-15T08:07:12Z") }),
+      hostFake({ "https://site.api.espn.com": feed("2026-10-15T08:07:12Z", [old]) }),
       "nba",
       ASOF
     );
@@ -223,7 +226,8 @@ describe("getEspnInjuries", () => {
       espnInjuriesUrl("https://site.api.espn.com", "nfl"),
       "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries"
     );
-    assert.deepEqual([...ESPN_INJURY_SPORTS].sort(), ["nba", "nfl", "nhl", "wnba"]);
+    // mlb added in v2.20.0.
+    assert.deepEqual([...ESPN_INJURY_SPORTS].sort(), ["mlb", "nba", "nfl", "nhl", "wnba"]);
   });
 
   test("an unwired sport is refused, not silently empty", async () => {
@@ -263,11 +267,19 @@ describe("tkb_get_injuries routes NBA to ESPN", () => {
 
   test("NBA answers from ESPN with the feed age, and never touches BDL", async () => {
     const { server, handlers } = capture();
-    registerInjuriesTool(server, deadBdl, hostFake({ "https://site.api.espn.com": feed(new Date().toISOString()) }));
+    // v2.20.0: freshness is the newest ENTRY's date, so the entries must be recent too.
+    const now = new Date().toISOString().slice(0, 16) + "Z";
+    registerInjuriesTool(
+      server,
+      deadBdl,
+      hostFake({
+        "https://site.api.espn.com": feed(new Date().toISOString(), [{ ...ENTRY_CADE, date: now }, ENTRY_OLD_RETURN]),
+      })
+    );
     const r = await handlers["tkb_get_injuries"]({ sport: "nba", teamName: "Pistons" } as never);
     const text = r.content[0]!.text;
     assert.match(text, /Cade Cunningham/);
-    assert.match(text, /ESPN injury feed last updated/);
+    assert.match(text, /ESPN injury feed: newest entry posted/);
     assert.match(text, /ALREADY PASSED/);
     assert.equal(r.structuredContent.source, "espn");
   });
@@ -381,7 +393,9 @@ const espnFake = (counts = { teams: 0, roster: 0, log: 0, raw: 0 }, opts: { inju
   c.fetchGamelog = async () => { counts.log++; return { ok: true, elapsedMs: 1, url: "g", data: LOG as never }; };
   c.fetchRawEspn = async (url: string) => {
     counts.raw++;
-    return { ok: true, status: 200, elapsedMs: 1, url, data: feed(opts.injuryTs ?? new Date().toISOString(), [ENTRY_CADE]) };
+    // v2.20.0: freshness is judged on the entry date, so a "fresh" fixture needs a fresh entry.
+    const ts = opts.injuryTs ?? new Date().toISOString();
+    return { ok: true, status: 200, elapsedMs: 1, url, data: feed(ts, [{ ...ENTRY_CADE, date: ts.slice(0, 16) + "Z" }]) };
   };
   return c;
 };
@@ -432,7 +446,7 @@ describe("tkb_screen_props on NBA uses ESPN (the 2026-10-19 zero-of-113 regressi
     const r = await handlers["tkb_screen_props"](SCREEN_INPUT as never);
     assert.equal(r.structuredContent.props[0].injuryStatus, "Day-To-Day");
     assert.equal(r.structuredContent.injuryFeed.flaggedOnBoard >= 1, true);
-    assert.match(r.content[0]!.text, /ESPN injury feed last updated/);
+    assert.match(r.content[0]!.text, /ESPN injury feed: newest entry posted/);
   });
 
   test("a STALE injury feed is announced on the board", async () => {
@@ -447,7 +461,9 @@ describe("tkb_screen_props on NBA uses ESPN (the 2026-10-19 zero-of-113 regressi
     const { server, handlers } = capture();
     registerScreenPropsTool(server, nbaSgo(), {} as never, null, null, espnFake(counts));
     await handlers["tkb_screen_props"](SCREEN_INPUT as never);
-    assert.equal(counts.teams, 1);
+    // v2.20.0: the injury coverage check reads the team list once more (outside the
+    // rate memo, cached ten minutes), so two team-list reads per screen, not one.
+    assert.ok(counts.teams <= 2, `teams fetched ${counts.teams} times`);
     assert.equal(counts.roster, 1);
     assert.ok(counts.log <= 2, `one log per season, got ${counts.log}`);
   });

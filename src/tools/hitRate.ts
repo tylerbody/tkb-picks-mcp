@@ -30,6 +30,7 @@ import {
 } from "../services/espnHitRateAggregator.js";
 import { isEspnStatSupported, espnStatUnavailableReason } from "../services/espnStatMap.js";
 import { NHLStatsClient } from "../services/nhlStatsClient.js";
+import { resolveStatID, type StatResolution } from "../services/statAliases.js";
 import { getNhlPlayerHitRate } from "../services/nhlHitRateAggregator.js";
 import { allNhlClubCodes, nhlClubCode } from "../services/nhlTeams.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
@@ -160,7 +161,11 @@ Error Handling:
         openWorldHint: true,
       },
     },
-    async (params: HitRateInput) => {
+    async (rawParams: HitRateInput) => {
+      // v2.20.0: accept a market label or short form ("receptions") for the statID.
+      const alias = resolveStatID(rawParams.sport, rawParams.statID);
+      const params: HitRateInput = { ...rawParams, statID: alias.statID };
+      const result = await (async () => {
       try {
         // Guard BEFORE routing. isStatSupported is already false for tennis, so
         // without this the call would fall straight through to the SGO path,
@@ -927,6 +932,27 @@ Error Handling:
           isError: true,
         };
       }
+      })();
+      return annotateStatAlias(result, alias, rawParams.statID);
     }
   );
+}
+
+/** Prefix the answer with the alias used, or append suggestions to a refusal. */
+function annotateStatAlias<R extends { content: { type: "text"; text: string }[]; isError?: boolean; structuredContent?: unknown }>(
+  result: R,
+  alias: StatResolution,
+  asked: string
+): R {
+  const first = result.content[0];
+  if (!first) return result;
+  if (alias.aliasedFrom) {
+    first.text = `statID "${asked}" was read as "${alias.statID}".\n\n${first.text}`;
+    if (result.structuredContent && typeof result.structuredContent === "object") {
+      (result.structuredContent as Record<string, unknown>).statIDAliasedFrom = asked;
+    }
+  } else if (result.isError && alias.suggestions.length) {
+    first.text += `\n\nDid you mean: ${alias.suggestions.join(", ")}?`;
+  }
+  return result;
 }

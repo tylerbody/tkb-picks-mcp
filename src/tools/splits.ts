@@ -6,6 +6,9 @@ import { getHomeRoadSplit, getOpponentSplit } from "../services/splitsAggregator
 import { currentSeason } from "../services/seasonBoundary.js";
 import { normalizeStanding, findStandingForTeam } from "../services/standingsNormalizer.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
+import type { EspnClient } from "../services/espnClient.js";
+import { ESPN_STANDINGS_SPORTS, getEspnStandings, findEspnStandingRow } from "../services/espnStandings.js";
+import { isBdlConfigured } from "../services/bdlUnavailable.js";
 
 /**
  * TEAM SPLITS - home record, road record, or head-to-head.
@@ -68,7 +71,12 @@ const SplitsInputSchema = z
 
 type SplitsInput = z.infer<typeof SplitsInputSchema>;
 
-export function registerSplitsTool(server: McpServer, sgo: SGOClient, bdl: BDLClient) {
+export function registerSplitsTool(
+  server: McpServer,
+  sgo: SGOClient,
+  bdl: BDLClient,
+  espn: EspnClient | null = null
+) {
   server.registerTool(
     "tkb_get_team_split",
     {
@@ -154,11 +162,21 @@ Error Handling:
         if (!params.forceSGO) {
           try {
             const season = currentSeason(params.sport).seasonYear;
-            const standings = await bdl.getStandings(params.sport, season);
-            const row = findStandingForTeam(standings.data, params.teamName);
+            // v2.20.0: ESPN standings first (BALLDONTLIE is cancelled). The BDL lookup
+            // runs only when a BDL key is configured, kept for a swap back.
+            let n: ReturnType<typeof normalizeStanding> | undefined;
+            let standingsSource = "espn_standings";
+            if (espn && ESPN_STANDINGS_SPORTS.includes(params.sport as SportKey)) {
+              const t = await getEspnStandings(espn, params.sport as SportKey);
+              n = findEspnStandingRow(t.rows, params.teamName);
+            } else if (isBdlConfigured(bdl)) {
+              const standings = await bdl.getStandings(params.sport, season);
+              const row = findStandingForTeam(standings.data, params.teamName);
+              n = row ? normalizeStanding(row) : undefined;
+              standingsSource = "balldontlie_standings";
+            }
 
-            if (row) {
-              const n = normalizeStanding(row);
+            if (n) {
               const recordString =
                 params.splitType === "home" ? n.homeRecord : n.roadRecord;
               const wins = params.splitType === "home" ? n.homeWins : n.roadWins;
@@ -171,7 +189,7 @@ Error Handling:
                   losses,
                   context: params.splitType,
                   record: recordString,
-                  source: "balldontlie_standings",
+                  source: standingsSource,
                   season,
                   // Extras the SGO tallying path cannot produce at all
                   overallRecord: n.overallRecord,

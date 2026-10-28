@@ -285,6 +285,52 @@ export class CFBDClient {
     }
   }
 
+  /* ---- v2.20.0: RECORDS, ROSTERS AND PLAYER SEARCH, replacing BALLDONTLIE (cancelled) ----
+   *
+   * Each is ONE request per (season, conference or team or name) and cached for six
+   * hours: a record changes once a week and a roster rarely. On a 1,000-a-month shared
+   * quota that is the difference between a few requests a week and one per tool call.
+   * Promise-keyed so concurrent callers share one request (the v2.6.0 lesson). */
+  private jsonCache = new Map<string, { at: number; promise: Promise<unknown[]> }>();
+  private static readonly JSON_TTL_MS = 6 * 60 * 60 * 1000;
+
+  private cachedList(path: string, params: Record<string, string | number>): Promise<unknown[]> {
+    const key = `${path}?${Object.entries(params).map(([k, v]) => `${k}=${v}`).sort().join("&")}`;
+    const hit = this.jsonCache.get(key);
+    if (hit && Date.now() - hit.at < CFBDClient.JSON_TTL_MS) {
+      this.stats.hits++;
+      return hit.promise;
+    }
+    this.stats.misses++;
+    this.stats.requests++;
+    const promise = this.http
+      .get(path, { params })
+      .then((res) => (Array.isArray(res.data) ? (res.data as unknown[]) : []))
+      .catch((err) => {
+        this.stats.errors++;
+        this.jsonCache.delete(key);
+        const status = err?.response?.status;
+        throw new Error(`CFBD ${path} failed${status ? ` (HTTP ${status})` : ""}: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    this.jsonCache.set(key, { at: Date.now(), promise });
+    return promise;
+  }
+
+  /** GET /records: every team's overall, home, away and conference record for a season. */
+  getTeamRecords(year: number, conference?: string): Promise<unknown[]> {
+    return this.cachedList("/records", conference ? { year, conference } : { year });
+  }
+
+  /** GET /player/search: every player matching a name, with his CURRENT team. One request. */
+  searchPlayers(searchTerm: string, year?: number): Promise<unknown[]> {
+    return this.cachedList("/player/search", year ? { searchTerm, year } : { searchTerm });
+  }
+
+  /** GET /roster: one team's roster for a season. */
+  getRoster(team: string, year: number): Promise<unknown[]> {
+    return this.cachedList("/roster", { team, year });
+  }
+
   /** Cache and request counters, for tkb_get_api_usage. */
   getStats(): {
     requests: number;

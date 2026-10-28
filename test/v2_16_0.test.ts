@@ -156,8 +156,16 @@ describe("v2.16.0 the BDL-exclusive tools refuse by name instead of crashing", (
 
       const res = await handlers[c.tool](c.args as never);
       const text = res.content.map((p) => p.text).join("\n");
-      assert.match(text, /BALLDONTLIE IS NOT CONFIGURED/, `${c.tool} did not surface the reason`);
-      assert.match(text, /BDL_API_KEY/, `${c.tool} did not name the env var to set`);
+      if (c.tool === "tkb_get_injuries") {
+        assert.match(text, /BALLDONTLIE IS NOT CONFIGURED/, `${c.tool} did not surface the reason`);
+        assert.match(text, /BDL_API_KEY/, `${c.tool} did not name the env var to set`);
+      } else {
+        /* v2.20.0: standings, rankings and verify_roster are no longer BDL-exclusive
+         * (ESPN / CFBD). With NO client wired at all they must still refuse by name,
+         * now naming the replacement sources and that BALLDONTLIE is cancelled. */
+        assert.match(text, /BALLDONTLIE is cancelled/, `${c.tool} did not surface the reason`);
+        assert.match(text, /ESPN/, `${c.tool} did not name the replacement source`);
+      }
     });
   }
 
@@ -268,10 +276,13 @@ describe("v2.16.0 index.ts wiring", () => {
     );
   });
 
-  test("boot warns when BDL is absent, and says the injury feed has no substitute", () => {
+  test("boot notes BDL is absent and names what is still BDL-only", () => {
     assert.match(indexSrc, /if \(!isBdlConfigured\(bdl\)\)/);
-    assert.match(indexSrc, /WARN: BDL_API_KEY is not set/);
-    assert.match(indexSrc, /NO SUBSTITUTE/);
+    /* v2.20.0: ESPN now substitutes for injuries, standings, the AP poll and rosters,
+     * so the old "no substitute" warning would be false. The boot message must still
+     * name the key and say what remains BDL-only. */
+    assert.match(indexSrc, /BDL_API_KEY is not set/);
+    assert.match(indexSrc, /STILL BDL-ONLY/);
   });
 
   test("package.json still agrees with SERVER_VERSION", () => {

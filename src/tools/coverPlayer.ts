@@ -6,6 +6,9 @@ import type { BDLClient } from "../services/bdlClient.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
 import { readMatchTeams } from "../services/eventShape.js";
 import type { BDLInjury, SGOEvent } from "../types.js";
+import type { EspnClient } from "../services/espnClient.js";
+import { ESPN_INJURY_SPORTS, getEspnInjuries } from "../services/espnInjuries.js";
+import { isBdlConfigured } from "../services/bdlUnavailable.js";
 
 /**
  * COVER PHOTO SUBJECT PICKER
@@ -104,7 +107,8 @@ export function opponentNameFor(event: SGOEvent, playerTeamID: string): string {
 export function registerCoverPlayerTool(
   server: McpServer,
   sgo: SGOClient,
-  bdl: BDLClient
+  bdl: BDLClient,
+  espn: EspnClient | null = null
 ) {
   server.registerTool(
     "tkb_get_cover_player",
@@ -232,19 +236,33 @@ NOT a betting-value tool. It ranks marketability and availability only.`,
       // Injuries are pulled once for the league and matched locally. Two per-team
       // calls would be the obvious shape but doubles the upstream cost for data
       // that arrives in one payload anyway.
-      let injuries: BDLInjury[] = [];
+      // v2.20.0: ESPN's injury feed for nba/nfl/nhl/wnba/mlb. Before this the gate read
+      // BALLDONTLIE only, and since BDL was cancelled it had been silently EMPTY for every
+      // sport, so a ruled-out star could be picked as the cover. BDL is still read when a
+      // key is configured, for the sports ESPN does not cover.
+      type InjuryLite = { status: string; team: string | null };
+      const injuryByName = new Map<string, InjuryLite>();
+      let injurySource = "none";
       try {
-        injuries = await bdl.getAllInjuries(input.sport as SportKey);
+        if (espn && ESPN_INJURY_SPORTS.includes(input.sport as SportKey)) {
+          const feed = await getEspnInjuries(espn, input.sport as SportKey);
+          for (const e of feed.entries) {
+            injuryByName.set(e.playerName.toLowerCase(), { status: e.status, team: e.team });
+          }
+          injurySource = `ESPN (newest entry ${feed.newestEntryAt ?? "unknown"})`;
+        } else if (isBdlConfigured(bdl)) {
+          const injuries: BDLInjury[] = await bdl.getAllInjuries(input.sport as SportKey);
+          for (const inj of injuries) {
+            const name = playerFullName(inj);
+            if (name) injuryByName.set(name, { status: inj.status ?? "", team: resolveTeamName(inj) });
+          }
+          injurySource = "BALLDONTLIE";
+        }
       } catch {
         // An injury-feed outage must not take the whole tool down; it degrades to
         // availability-from-game-logs only, and that is stated in the output.
       }
-
-      const injuryByName = new Map<string, BDLInjury>();
-      for (const inj of injuries) {
-        const name = playerFullName(inj);
-        if (name) injuryByName.set(name, inj);
-      }
+      const injuries = [...injuryByName.values()];
 
       // Recent team games, used to measure who is actually being played. This is
       // the signal a pure injury report cannot give.
@@ -410,7 +428,7 @@ NOT a betting-value tool. It ranks marketability and availability only.`,
           playerName: p.name,
           playerID: p.playerID,
           teamID: p.teamID,
-          teamName: teamNames[p.teamID] ?? resolveTeamName(inj ?? ({} as BDLInjury)) ?? p.teamID,
+          teamName: teamNames[p.teamID] ?? inj?.team ?? p.teamID,
           gamesPlayedLast10: played,
           teamGamesSeen,
           injuryStatus: inj?.status ?? null,
@@ -471,9 +489,9 @@ NOT a betting-value tool. It ranks marketability and availability only.`,
 
       const injuryNote =
         injuries.length === 0
-          ? "\n\nNOTE: the injury feed returned nothing, so availability here is based on " +
+          ? "\n\nNOTE: no injury feed answered (" + injurySource + "), so availability here is based on " +
             "game-log appearances only. Double-check the injury report before finalising."
-          : "";
+          : `\n\nInjury gate source: ${injurySource}.`;
 
       return {
         content: [

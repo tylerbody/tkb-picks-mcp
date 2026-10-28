@@ -612,10 +612,61 @@ const PropBoardInputSchema = z
       .describe(
         "ADDED v2.10.5. Include EVERY real book's price on each side, best first, as `allBooks`. Off by default because it multiplies payload size. The board always reports `bestPrice`, `betterPriceAvailable` and `bookCount` per side regardless, so you can see when the displayed book is not the best one without asking for the full set. Use this when line shopping, or when a book you can see in its own app appears to be missing: it is usually present in the data and simply lost the display slot, because the shown price comes from whichever book SGO returned first rather than from the best one."
       ),
+    compact: flexBoolean(false)
+      .describe(
+        "ADDED v2.20.0. Return ONE short line per market instead of full JSON objects: player, team, market, line, over price and book, under price and book, the best over/under price when a better one exists, and the book count. Measured 2026-10-28: most full NBA and NHL boards overflowed the tool-result ceiling and had to be dumped to a file. Compact is roughly a tenth of the size. structuredContent carries the same compact rows plus the coverage counts. Turn it off only when you need allBooks, split-line notes or per-side line detail."
+      ),
   })
   .strict();
 
 type PropBoardInput = z.infer<typeof PropBoardInputSchema>;
+
+/** PURE. One board row as a short pipe-separated line, and as a small object. v2.20.0. */
+export function compactRow(r: BoardRow): { line: string; row: CompactBoardRow } {
+  const side = (p: SidePrice | null) =>
+    p ? { price: p.americanOdds, book: p.bookmaker ?? null, line: p.line } : null;
+  const best = (p: SidePrice | null) =>
+    p?.betterPriceAvailable && p.bestPrice ? { price: p.bestPrice.americanOdds, book: p.bestPrice.bookmaker } : null;
+  const o = side(r.over);
+  const u = side(r.under);
+  const bo = best(r.over);
+  const bu = best(r.under);
+  const books = Math.max(r.over?.bookCount ?? 0, r.under?.bookCount ?? 0);
+  const lineText =
+    r.line !== null ? String(r.line) : `split O${r.over?.line ?? "-"}/U${r.under?.line ?? "-"}`;
+  const fmt = (label: string, x: { price: string; book: string | null } | null, b: { price: string; book: string } | null) =>
+    x ? `${label} ${x.price}${x.book ? ` ${x.book}` : ""}${b ? ` (best ${b.price} ${b.book})` : ""}` : `${label} -`;
+  return {
+    line: `${r.playerName} (${r.team}) | ${r.market} | ${lineText} | ${fmt("O", o, bo)} | ${fmt("U", u, bu)} | ${books} book(s)`,
+    row: {
+      player: r.playerName,
+      playerID: r.playerID,
+      team: r.team,
+      market: r.market,
+      statID: r.statID,
+      line: r.line,
+      over: o ? { price: o.price, book: o.book } : null,
+      under: u ? { price: u.price, book: u.book } : null,
+      bestOver: bo,
+      bestUnder: bu,
+      bookCount: books,
+    },
+  };
+}
+
+export interface CompactBoardRow {
+  player: string;
+  playerID: string;
+  team: string;
+  market: string;
+  statID: string;
+  line: number | null;
+  over: { price: string; book: string | null } | null;
+  under: { price: string; book: string | null } | null;
+  bestOver: { price: string; book: string } | null;
+  bestUnder: { price: string; book: string } | null;
+  bookCount: number;
+}
 
 export function registerPropBoardTool(server: McpServer, sgo: SGOClient) {
   server.registerTool(
@@ -1505,6 +1556,42 @@ Error Handling:
               .map(([k, reason]) => `- ${k} (${reason})`)
               .join("\n")
           : "";
+
+        if (input.compact) {
+          const compact = rows.map(compactRow);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `${summary}\n\nCOMPACT BOARD (player (team) | market | line | over | under | books):\n` +
+                  compact.map((c) => c.line).join("\n") +
+                  (wantYesNo && yesNoRows.length
+                    ? `\n\nYES/NO MARKETS (compact):\n` +
+                      yesNoRows
+                        .map(
+                          (y) =>
+                            `${y.playerName} (${y.team}) | ${y.market} | YES ${y.yes?.americanOdds ?? "-"}${y.yes?.bookmaker ? ` ${y.yes.bookmaker}` : ""} | NO ${y.no?.americanOdds ?? "-"}`
+                        )
+                        .join("\n")
+                    : "") +
+                  unpricedList,
+              },
+            ],
+            structuredContent: {
+              eventID: event.eventID,
+              matchup,
+              compact: true,
+              pricedRowCount: rows.length,
+              totalRowsBuilt: allRows.length,
+              truncated,
+              distinctPlayers,
+              pricedAgainst: bookFilter ?? "all",
+              period: requestedPeriod,
+              rows: compact.map((c) => c.row),
+            },
+          };
+        }
 
         return {
           content: [

@@ -33,6 +33,7 @@ import {
   type SportKey,
 } from "../constants.js";
 import { readMatchTeams } from "../services/eventShape.js";
+import { isBdlConfigured } from "../services/bdlUnavailable.js";
 import { EspnClient, ESPN_LEAGUE_PATHS, withRequestMemo } from "../services/espnClient.js";
 import { getEspnPlayerHitRate, EspnRefusal } from "../services/espnHitRateAggregator.js";
 import { isEspnStatSupported, espnStatUnavailableReason } from "../services/espnStatMap.js";
@@ -1098,7 +1099,10 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
               }
             }
 
-            if (isStatSupported(input.sport as SportKey, c.statID)) {
+            // v2.20.0: skip BALLDONTLIE entirely when no key is configured (it is
+            // cancelled). Each rejected call cost a round trip plus BDL's 1.1-second
+            // throttle on every MLB candidate before the SGO fallback below ran anyway.
+            if (isBdlConfigured(bdl) && isStatSupported(input.sport as SportKey, c.statID)) {
               try {
                 const bdlRate = await getBdlPlayerHitRate(bdl, {
                   sport: input.sport as SportKey,
@@ -1133,7 +1137,7 @@ Empty result is informative: it means nothing cleared the bar, and the thread sh
                 bdlFailures.set(bucket, (bdlFailures.get(bucket) ?? 0) + 1);
                 rate = undefined;
               }
-            } else {
+            } else if (isBdlConfigured(bdl)) {
               bdlFailures.set(
                 "stat not mapped",
                 (bdlFailures.get("stat not mapped") ?? 0) + 1

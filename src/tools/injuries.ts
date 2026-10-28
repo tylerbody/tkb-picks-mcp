@@ -91,7 +91,10 @@ function resolveSummary(injury: BDLInjury): string {
  * ESPN PATH, v2.19.0. NBA, NFL, NHL and WNBA read ESPN's keyless league-wide feed.
  * Exported so it is testable without an MCP server.
  */
-export async function espnInjuriesResponse(espn: Pick<EspnClient, "fetchRawEspn">, params: InjuriesInput) {
+export async function espnInjuriesResponse(
+  espn: Pick<EspnClient, "fetchRawEspn"> & Partial<Pick<EspnClient, "fetchTeams">>,
+  params: InjuriesInput
+) {
   const feed = await getEspnInjuries(espn, params.sport);
   let entries = feed.entries;
   if (params.playerName) {
@@ -117,12 +120,24 @@ export async function espnInjuriesResponse(espn: Pick<EspnClient, "fetchRawEspn"
       `read them as "check this player", never as a confirmed status.`
     : "";
 
+  // v2.20.0: a team with no entries is checked against the per-team endpoint, so an
+  // empty result says WHICH of "ESPN lists zero" and "the feed left this team out" it is.
+  const teamCheck = params.teamName
+    ? feed.coverage?.notListed.find((n) => n.team.toLowerCase().includes(params.teamName!.toLowerCase()))
+    : undefined;
   const header = entries.length
     ? `${entries.length} ${label} injury record(s) for ${scope}. Source: ESPN (${feed.host}).`
     : feed.stale
       ? `No ${label} injury entries found for ${scope}, BUT THE FEED IS STALE, so this is NOT a clean bill of health.`
-      : `No ${label} injury entries found for ${scope} in a current ESPN feed. This filter ran against ` +
-        `${feed.teamCount} team group(s) of real data, so the empty result means ESPN lists no injury for them.`;
+      : teamCheck?.status === "ESPN_LISTS_ZERO"
+        ? `No ${label} injury entries for ${scope}. ESPN's per-team endpoint CONFIRMS ${teamCheck.team} has zero ` +
+          `listed injuries, so this is a real empty list, not a gap in the feed.`
+        : teamCheck?.status === "MISSING_FROM_FEED"
+          ? `WARNING: the league feed has no entries for ${teamCheck.team}, but ESPN's per-team endpoint shows ` +
+            `${teamCheck.perTeamCount}. The feed LEFT THIS TEAM OUT. Treat every ${teamCheck.team} player as UNVERIFIED and search.`
+          : teamCheck?.status === "UNCONFIRMED"
+            ? `No ${label} injury entries for ${scope}, and the per-team check could not run. UNVERIFIED, not healthy.`
+            : `No ${label} injury entries found for ${scope} in a current ESPN feed.`;
 
   const sportNote =
     params.sport === "nfl"
@@ -138,7 +153,15 @@ export async function espnInjuriesResponse(espn: Pick<EspnClient, "fetchRawEspn"
     sport: params.sport,
     feedTimestamp: feed.feedTimestamp,
     feedAgeHours: feed.feedAgeHours,
+    newestEntryAt: feed.newestEntryAt,
     stale: feed.stale,
+    coverage: feed.coverage
+      ? {
+          leagueTeams: feed.coverage.leagueTeams,
+          teamsWithEntries: feed.coverage.teamsInFeed.length,
+          notListed: feed.coverage.notListed,
+        }
+      : null,
     host: feed.host,
     hostsTried: feed.hostsTried,
     count: entries.length,
@@ -166,12 +189,15 @@ export function registerInjuriesTool(server: McpServer, bdl: BDLClient, espn?: E
       title: "Get Player Injuries",
       description: `Get current injury reports for a sport, optionally filtered by player or team.
 
-SOURCE BY SPORT (v2.19.0): NBA, NFL, NHL and WNBA read ESPN's free league-wide injury
-feed (no key, zero SportsGameOdds entities). Every answer prints the feed's own
-timestamp and age, and a feed older than 24 hours is flagged STALE. MLB still reads
-BALLDONTLIE, which works only while a BDL key is configured. Two ESPN hosts serve
-different snapshots of the same feed (one was measured two months behind the other),
-so both are fetched and the newer one is used.
+SOURCE BY SPORT (v2.20.0): NBA, NFL, NHL, WNBA and MLB read ESPN's free league-wide
+injury feed (no key, zero SportsGameOdds entities). BALLDONTLIE is cancelled.
+FRESHNESS is the age of the NEWEST ENTRY (ESPN's top-level timestamp is just when the
+response was built); 36 hours without a new entry is flagged STALE.
+TEAM COVERAGE: ESPN's league feed omits teams with nothing listed, so every answer
+lists which teams it covered, and every team NOT in the feed is checked against ESPN's
+per-team endpoint: ESPN_LISTS_ZERO (a real empty list), MISSING_FROM_FEED (the league
+feed dropped entries that exist; treat that team as unverified) or UNCONFIRMED.
+Two ESPN hosts are fetched and the one with the newer entries is used.
 
 This is a structured injury data source (not a web search) - use it as the FIRST
 check before including any player in a pick. It returns status (Out/Questionable/

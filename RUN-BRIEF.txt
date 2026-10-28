@@ -1,0 +1,23 @@
+=== CONNECTOR UPDATE v2.20.0 (owner, 2026-10-28). READ BEFORE STEP 1 ===
+BALLDONTLIE IS CANCELLED. Never rely on it. Every tool below works without it.
+
+INJURIES: tkb_get_injuries(sport, teamName=...) now covers NBA, NFL, NHL, WNBA and MLB from ESPN.
+- Freshness = when the NEWEST entry was posted. If the answer says STALE, treat the feed as a hint only and search.
+- ESPN's league feed leaves out teams with nothing listed. The answer now says, for every such team:
+  ESPN_LISTS_ZERO = ESPN's per-team check confirms no listed injuries (a real empty list);
+  MISSING_FROM_FEED or UNCONFIRMED = UNVERIFIED: search that team's injury news before using any of its players.
+- An absent player is still never proof he is active. Read shortComment and returnDate, not the status word alone.
+
+ROSTER CHECKS: tkb_verify_roster is mandatory for every named player and now runs on ESPN rosters (CFB: CollegeFootballData).
+- Check the whole thread in ONE call: tkb_verify_roster(sport, players=[{playerName, expectedTeam}, ...]) (up to 40).
+- CONFIRMED = proceed. MISMATCH = do not publish that player. INCONCLUSIVE / NAME_NOT_FOUND / TEAM_NOT_RESOLVED = confirm on the club's official site before using him.
+
+RECORDS: tkb_get_standings works again (ESPN for NBA/NFL/NHL/MLB/WNBA; CFB via CollegeFootballData with a conference or teamName). Take every record, streak, home/road split and last-10 from it, never from an article. tkb_get_rankings (CFB AP Top 25) works again.
+
+PROP BOARD: call tkb_get_prop_board with compact=true. It returns one line per market (player, market, line, over, under, best price, book count) and fits in the response. Only drop compact when you need allBooks or split-line detail.
+
+SLATE SCREEN: instead of tkb_screen_props once per game, call tkb_screen_slate(sport, date=SLATE DATE) once. Same filters as tkb_screen_props. It lists, per game, how many props qualified and any game with no props posted yet; games it could not reach in time are listed under NOT SCREENED (screen those individually).
+
+HIT RATES: statID may now be the market label or short form ("receptions", "Receptions", "Rushing Yards"); the answer says which statID it used. Do NOT switch to dataSource="sgo" because of a statID refusal; read the "Did you mean" line instead.
+
+REPORTING: in NOTES, list any MISMATCH or INCONCLUSIVE roster results, any team whose injury coverage was MISSING_FROM_FEED or UNCONFIRMED, and any game the slate screen did not reach.

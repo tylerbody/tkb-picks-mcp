@@ -3,6 +3,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import { currentSeason } from "../services/seasonBoundary.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
+import type { EspnClient } from "../services/espnClient.js";
+import { getEspnApPoll } from "../services/espnRankings.js";
+import { isBdlConfigured } from "../services/bdlUnavailable.js";
 
 /**
  * AP POLL RANKINGS.
@@ -72,7 +75,7 @@ type RankingsInput = z.infer<typeof RankingsInputSchema>;
 /** Sports that actually have a poll. */
 const POLL_SPORTS: SportKey[] = ["cfb"];
 
-export function registerRankingsTool(server: McpServer, bdl: BDLClient) {
+export function registerRankingsTool(server: McpServer, bdl: BDLClient, espn: EspnClient | null = null) {
   server.registerTool(
     "tkb_get_rankings",
     {
@@ -134,13 +137,57 @@ Error Handling:
           };
         }
 
-        const season = input.season ?? currentSeason(sport).seasonYear;
-        const result = await bdl.getRankings(sport, {
-          season,
-          ...(input.week ? { week: input.week } : {}),
-        });
+        let season = input.season ?? currentSeason(sport).seasonYear;
+        let source = "ESPN AP Top 25";
+        let weekNote = "";
+        type PollRow = {
+          rank: number;
+          team: Record<string, string>;
+          record?: string | null;
+          first_place_votes?: number | null;
+          points?: number | null;
+          trend?: string | null;
+          week?: number | null;
+        };
+        let polled: PollRow[];
+        /* v2.20.0: ESPN first. BALLDONTLIE is cancelled and is reached only when a BDL
+         * key is configured. ESPN serves the CURRENT poll; a request for an older week
+         * is answered with the current one and says so, never silently. */
+        if (espn) {
+          const poll = await getEspnApPoll(espn);
+          season = poll.season ?? season;
+          if (input.week && poll.week && input.week !== poll.week) {
+            weekNote = ` NOTE: week ${input.week} was asked for, but ESPN serves only the CURRENT poll (week ${poll.week}).`;
+          }
+          polled = poll.rows.map((r) => ({
+            rank: r.rank,
+            team: { full_name: r.team },
+            record: r.record,
+            first_place_votes: r.firstPlaceVotes,
+            points: r.points,
+            trend: r.trend,
+            week: poll.week,
+          }));
+        } else if (isBdlConfigured(bdl)) {
+          source = "BALLDONTLIE";
+          const result = await bdl.getRankings(sport, {
+            season,
+            ...(input.week ? { week: input.week } : {}),
+          });
+          polled = (result.data ?? []) as unknown as PollRow[];
+        } else {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `No poll source is wired: ESPN is not configured and BALLDONTLIE is cancelled. Take the AP Top 25 from a live search.`,
+              },
+            ],
+            isError: true,
+          };
+        }
 
-        const rows = (result.data ?? [])
+        const rows = polled
           .slice()
           .sort((a, b) => a.rank - b.rank)
           .slice(0, input.top);
@@ -231,7 +278,7 @@ Error Handling:
         const summary =
           `AP Top ${rows.length}, season ${season}` +
           (rows[0]?.week ? `, week ${rows[0].week}` : ", current week") +
-          `. ${movementLine}\n\n` +
+          `. Source: ${source}.${weekNote} ${movementLine}\n\n` +
           `rankedTeams (paste into tkb_get_schedule):\n${rankedTeamsParam}\n\n` +
           `NOTE: this is a DECAYING fact. It is correct as of right now and wrong ` +
           `next Sunday. Re-pull rather than reusing it across weeks.`;
@@ -244,6 +291,7 @@ Error Handling:
             sport,
             season,
             week: rows[0]?.week ?? null,
+            source,
             count: table.length,
             rankedTeams: rankedTeamsParam,
             rankings: table,

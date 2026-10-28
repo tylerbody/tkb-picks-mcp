@@ -4,6 +4,12 @@ import type { BDLClient } from "../services/bdlClient.js";
 import { currentSeason } from "../services/seasonBoundary.js";
 import { normalizeStanding } from "../services/standingsNormalizer.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, type SportKey } from "../constants.js";
+import type { NormalizedStanding } from "../types.js";
+import type { EspnClient } from "../services/espnClient.js";
+import type { CFBDClient } from "../services/cfbdClient.js";
+import { ESPN_STANDINGS_SPORTS, getEspnStandings } from "../services/espnStandings.js";
+import { parseCfbdRecords, matchesConference } from "../services/cfbdRecords.js";
+import { isBdlConfigured } from "../services/bdlUnavailable.js";
 
 /**
  * STANDINGS - the whole table, not one team's split.
@@ -57,7 +63,12 @@ const StandingsInputSchema = z
 
 type StandingsInput = z.infer<typeof StandingsInputSchema>;
 
-export function registerStandingsTool(server: McpServer, bdl: BDLClient) {
+export function registerStandingsTool(
+  server: McpServer,
+  bdl: BDLClient,
+  espn: EspnClient | null = null,
+  cfbd: CFBDClient | null = null
+) {
   server.registerTool(
     "tkb_get_standings",
     {
@@ -71,10 +82,18 @@ This is the cheapest way to get them for a whole field at once.
 
 Costs ZERO SportsGameOdds entities.
 
+SOURCES (v2.20.0, BALLDONTLIE is cancelled): ESPN standings for NBA, NFL, NHL, MLB and
+WNBA (overall, home, road, division, conference and last-10 records, streak, points
+for/against, point differential, playoff seed, games back; NHL adds OT losses and
+standings points). CollegeFootballData /records for CFB (overall, home, away and
+conference records). ESPN's own CFB standings were measured all 0-0 in week 9 and are
+not used. Every answer names its source.
+
 Args:
   - sport
-  - conference: REQUIRED for cfb ('ACC', 'SEC', 'Big Ten', 'Big 12', ...). Ignored
-    for MLB, WNBA and NFL, which return league-wide standings.
+  - conference: for cfb, the conference ('ACC', 'SEC', 'Big Ten', 'Big 12', ...);
+    cfb needs a conference OR a teamName. For pro leagues it optionally filters to
+    a conference ('Eastern', 'AFC', ...).
   - season (optional): defaults to the current season
   - teamName (optional): filter to one team's row
 
@@ -120,57 +139,91 @@ Error Handling:
 
         const season = input.season ?? currentSeason(sport).seasonYear;
         let scope = `${sport.toUpperCase()} league-wide`;
-        let raw;
+        let source = "";
+        let rows: NormalizedStanding[] = [];
+        let sourceNote = "";
 
-        if (sport === "cfb") {
-          const conferences = await bdl.getConferences(sport);
-
-          if (!input.conference) {
+        /* ---- v2.20.0 ROUTING. BALLDONTLIE IS CANCELLED. ----
+         * ESPN for the pro leagues, CollegeFootballData for CFB. The BDL path below is
+         * kept only for a swap back and is reached only when a BDL key is configured. */
+        if (espn && ESPN_STANDINGS_SPORTS.includes(sport)) {
+          const t = await getEspnStandings(espn, sport);
+          rows = t.rows;
+          source = `ESPN standings (${t.host})`;
+          if (t.seasonLabel) scope = `${scope}, ${t.seasonLabel}`;
+          if (input.conference) {
+            const needle = input.conference.toLowerCase();
+            rows = rows.filter((r) => String((r as { conference?: string }).conference ?? "").toLowerCase().includes(needle));
+            scope = `${sport.toUpperCase()} ${input.conference}`;
+          }
+        } else if (sport === "cfb" && cfbd) {
+          const raw = await cfbd.getTeamRecords(season);
+          const parsed = parseCfbdRecords(raw, season);
+          let cfRows = parsed.rows.filter((r) => !r.classification || r.classification.toLowerCase() === "fbs");
+          if (input.conference) {
+            cfRows = cfRows.filter((r) => matchesConference(r.conference, input.conference!));
+            scope = input.conference;
+          } else if (!input.teamName) {
+            const confs = [...new Set(parsed.rows.map((r) => r.conference).filter(Boolean))].sort();
             return {
               content: [
                 {
                   type: "text" as const,
                   text:
-                    `CFB standings require a conference.\n\n` +
-                    `BALLDONTLIE scopes NCAAF standings per conference rather than league-wide, ` +
-                    `and there are ${conferences.length} of them - fetching every one to answer a ` +
-                    `question about one would be 25 requests of waste.\n\n` +
-                    `Valid conferences: ${conferences.map((c) => c.name).join(", ")}`,
+                    `CFB standings need a conference or a teamName, so the answer is one table ` +
+                    `rather than every FBS team.\n\nConferences in the data: ${confs.join(", ")}`,
                 },
               ],
             };
           }
-
-          const needle = input.conference.trim().toLowerCase();
-          const match =
-            conferences.find((c) => c.name.toLowerCase() === needle) ??
-            conferences.find((c) => (c.abbreviation ?? "").toLowerCase() === needle) ??
-            conferences.find((c) => c.name.toLowerCase().includes(needle));
-
-          if (!match) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text:
-                    `"${input.conference}" is not a recognised NCAAF conference.\n\n` +
-                    `Valid options: ${conferences.map((c) => c.name).join(", ")}`,
-                },
-              ],
-              isError: true,
-            };
+          rows = cfRows;
+          source = "CollegeFootballData /records";
+          if (parsed.unreadable) {
+            sourceNote = ` ${parsed.unreadable} CFBD row(s) had no readable record and were left out rather than shown as 0-0.`;
           }
-
-          scope = `${match.name}`;
-          raw = await bdl.getConferenceStandings(sport, {
-            conferenceId: match.id,
-            season,
-          });
+        } else if (isBdlConfigured(bdl)) {
+          source = "BALLDONTLIE";
+          let raw;
+          if (sport === "cfb") {
+            const conferences = await bdl.getConferences(sport);
+            const needle = (input.conference ?? "").trim().toLowerCase();
+            const match = needle
+              ? conferences.find((c) => c.name.toLowerCase() === needle) ??
+                conferences.find((c) => (c.abbreviation ?? "").toLowerCase() === needle) ??
+                conferences.find((c) => c.name.toLowerCase().includes(needle))
+              : undefined;
+            if (!match) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `CFB standings need a recognised conference. Valid: ${conferences.map((c) => c.name).join(", ")}`,
+                  },
+                ],
+                isError: true,
+              };
+            }
+            scope = match.name;
+            raw = await bdl.getConferenceStandings(sport, { conferenceId: match.id, season });
+          } else {
+            raw = await bdl.getStandings(sport, season);
+          }
+          rows = (raw.data ?? []).map(normalizeStanding);
         } else {
-          raw = await bdl.getStandings(sport, season);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `No standings source is wired for ${sport.toUpperCase()}. ESPN serves ` +
+                  `${ESPN_STANDINGS_SPORTS.join(", ")}, CollegeFootballData serves cfb` +
+                  (sport === "cfb" ? " (CFBD_API_KEY is not set)" : "") +
+                  `, and BALLDONTLIE is cancelled. Confirm records by live search.`,
+              },
+            ],
+            isError: true,
+          };
         }
-
-        let rows = (raw.data ?? []).map(normalizeStanding);
 
         if (input.teamName) {
           const needle = input.teamName.toLowerCase();
@@ -207,7 +260,7 @@ Error Handling:
         const withDiff = rows.filter((r) => typeof r.pointDifferential === "number").length;
 
         const summary =
-          `${rows.length} team(s), ${scope}, season ${season}.` +
+          `${rows.length} team(s), ${scope}, season ${season}. Source: ${source}.${sourceNote}` +
           (withDiff
             ? ` ${withDiff} row(s) carry point differential, which is stronger reasoning material than a raw record.`
             : ` Point differential is not populated for this sport/season.`) +
@@ -222,6 +275,7 @@ Error Handling:
             sport,
             scope,
             season,
+            source,
             count: rows.length,
             standings: rows,
           },

@@ -23,6 +23,7 @@ import { registerUsageTool } from "./tools/usage.js";
 import { registerLeagueAccessTool } from "./tools/leagueAccess.js";
 import { registerGradePicksTool } from "./tools/gradePicks.js";
 import { registerScreenPropsTool } from "./tools/screenProps.js";
+import { registerScreenSlateTool } from "./tools/screenSlate.js";
 import { registerCoverPlayerTool } from "./tools/coverPlayer.js";
 import { registerTweetCharsTool } from "./tools/tweetChars.js";
 import { registerBdlStatsProbeTool } from "./tools/bdlStatsProbe.js";
@@ -153,15 +154,13 @@ if (!cbbd) {
 }
 if (!isBdlConfigured(bdl)) {
   console.warn(
-    "WARN: BDL_API_KEY is not set. The connector is running on SportsGameOdds alone. " +
-      "Unaffected: hit rates, box scores, odds, props, period odds, game lines, " +
-      "schedules, grading, weather, ESPN research. " +
-      "REFUSING BY NAME: tkb_get_injuries, tkb_get_standings, tkb_get_rankings, " +
-      "tkb_scan_streaks, tkb_verify_roster, tkb_debug_bdl_stats, and " +
-      'tkb_get_player_hit_rate with an explicit dataSource="bdl". ' +
-      "THE INJURY FEED HAS NO SUBSTITUTE - SGO publishes none, so confirm availability " +
-      "against the official injury report before posting a player prop. " +
-      "Restore by setting BDL_API_KEY in Render; no code change is required."
+    "INFO: BDL_API_KEY is not set (BALLDONTLIE is cancelled; this is expected). " +
+      "v2.20.0 replacements: injuries, standings, AP poll and roster checks come from ESPN " +
+      "(CFB records and rosters from CollegeFootballData). STILL BDL-ONLY, so these " +
+      "refuse or degrade by name: tkb_scan_streaks, tkb_debug_bdl_stats, " +
+      'tkb_get_player_hit_rate with an explicit dataSource="bdl", and the second-source ' +
+      "finality check in grading for every sport except NHL (grading falls back to " +
+      "refusing a stuck event rather than guessing)."
   );
 }
 const weather = new WeatherClient(); // no API key needed - free public NWS API
@@ -194,7 +193,7 @@ const weather = new WeatherClient(); // no API key needed - free public NWS API
  * the build is new and only the string was forgotten - and that is now
  * diagnosable in one curl instead of a debugging cycle.
  */
-const SERVER_VERSION = "2.19.1";
+const SERVER_VERSION = "2.20.0";
 
 function buildServer(): McpServer {
   const server = new McpServer({
@@ -206,7 +205,7 @@ function buildServer(): McpServer {
   registerOddsTool(server, sgo);
   registerHitRateTool(server, sgo, bdl, cfbd, cbbd, nhlStats, espn);
   registerInjuriesTool(server, bdl, espn);
-  registerSplitsTool(server, sgo, bdl);
+  registerSplitsTool(server, sgo, bdl, espn);
   registerYesNoPropsTool(server, sgo);
   registerPeriodOddsTool(server, sgo);
   registerWeatherTool(server, weather);
@@ -215,7 +214,8 @@ function buildServer(): McpServer {
   registerLeagueAccessTool(server, sgo);
   registerGradePicksTool(server, sgo, bdl, nhlStats);
   registerScreenPropsTool(server, sgo, bdl, cfbd, cbbd, espn);
-  registerCoverPlayerTool(server, sgo, bdl);
+  registerScreenSlateTool(server, sgo, bdl, cfbd, cbbd, espn);
+  registerCoverPlayerTool(server, sgo, bdl, espn);
   registerTweetCharsTool(server);
   registerBdlStatsProbeTool(server, bdl);
   registerBatchGradeTool(server, sgo, bdl, nhlStats);
@@ -224,8 +224,8 @@ function buildServer(): McpServer {
   registerLiveMonitorTool(server, sgo);
   registerPropBoardTool(server, sgo);
   registerGameLinesTool(server, sgo);
-  registerRankingsTool(server, bdl);
-  registerStandingsTool(server, bdl);
+  registerRankingsTool(server, bdl, espn);
+  registerStandingsTool(server, bdl, espn, cfbd);
   registerEventProbeTool(server, sgo);
   /* ESPN PROBE, v2.12.0. Registered with no client argument: EspnClient needs no key,
    * which is the entire point of it. Diagnostic only until the probe confirms Render can
@@ -236,7 +236,7 @@ function buildServer(): McpServer {
   registerDevigTool(server);
   if (cfbd) registerCfbdStatsProbeTool(server, cfbd);
   registerMlbMatchupTool(server, mlbStats);
-  registerVerifyRosterTool(server, bdl);
+  registerVerifyRosterTool(server, bdl, espn, cfbd);
   /* RAW EVENT DUMP, registered v2.15.0 after sitting written-but-unreachable.
    *
    * WHY IT IS BEING TURNED ON RATHER THAN DELETED, measured 2026-10-01: two separate
