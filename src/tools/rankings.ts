@@ -84,8 +84,11 @@ export function registerRankingsTool(server: McpServer, bdl: BDLClient, espn: Es
 
 WHY THIS EXISTS: tkb_get_schedule's CFB tiering requires a rankedTeams list, and
 until now that meant running a web search and pasting names on every call. That was
-necessary because SportsGameOdds does not expose rankings - but BALLDONTLIE does,
-on the NCAAF ALL-STAR tier this account already holds.
+necessary because SportsGameOdds does not expose rankings.
+
+SOURCE (v2.20.0): ESPN's AP Top 25 (free, keyless). BALLDONTLIE is cancelled. ESPN
+serves the CURRENT poll only; asking for an older week returns the current one and
+says so in the answer.
 
 Costs ZERO SportsGameOdds entities.
 
@@ -109,7 +112,7 @@ Examples:
 
 Error Handling:
   - Refuses non-NCAA sports by name rather than returning an empty poll
-  - A 401 means the NCAAF BDL subscription lapsed, and says so`,
+  - If ESPN cannot be reached it says so; take the poll from a live search then`,
       inputSchema: RankingsInputSchema,
       annotations: {
         readOnlyHint: true,

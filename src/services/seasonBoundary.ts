@@ -134,17 +134,23 @@ export function summarizeSeasons(
 
   const seasonsRepresented = [...new Set(years)].sort((a, b) => b - a);
   const crossesSeasonBoundary = prior > 0;
+  /* v2.20.1: the parenthetical names PRIOR seasons only. It printed every season in the
+   * sample, so a live NBA warning on 2026-10-28 read "7 from prior season(s) (2026, 2025)",
+   * listing the current season as a prior one. */
+  const priorNames = seasonsRepresented
+    .filter((y) => y !== thisSeason)
+    .join(", ");
 
   let warning: string | null = null;
   if (prior > 0 && current === 0) {
     warning =
-      `EVERY game in this sample is from a PRIOR season (${seasonsRepresented.join(", ")}), not the current ${thisSeason} season. ` +
+      `EVERY game in this sample is from a PRIOR season (${priorNames}), not the current ${thisSeason} season. ` +
       `Do NOT write this as current form. If used at all, the reasoning bullet must say "last season" explicitly. ` +
       `Prior-season data is defensible for NFL team/player baselines but is a weaker claim than current-season form, ` +
       `and is materially less reliable where a player changed teams, role, or scheme.`;
   } else if (prior > 0) {
     warning =
-      `This sample MIXES seasons: ${current} game(s) from the current ${thisSeason} season and ${prior} from prior season(s) (${seasonsRepresented.join(", ")}). ` +
+      `This sample MIXES seasons: ${current} game(s) from the current ${thisSeason} season and ${prior} from prior season(s) (${priorNames}). ` +
       `Either report only the current-season count, or state the split explicitly. Do not present the blended number as current form.`;
   }
 

@@ -39,7 +39,7 @@ const SplitsInputSchema = z
     teamName: z
       .string()
       .describe(
-        "Team's display name, for output labeling AND for matching against BALLDONTLIE standings (which key on team name, not SGO teamID)."
+        "Team's display name, for output labeling AND for matching against ESPN standings (which key on team name, not SGO teamID)."
       ),
     splitType: z
       .enum(["home", "road", "opponent"])
@@ -64,7 +64,7 @@ const SplitsInputSchema = z
       .boolean()
       .optional()
       .describe(
-        "Skip the BALLDONTLIE standings path and compute from SGO events instead. Only needed for cross-checking a suspicious standings result - costs significantly more API quota."
+        "Skip the ESPN standings path and compute from SGO events instead. Only needed for cross-checking a suspicious standings result - costs SGO quota."
       ),
   })
   .strict();
@@ -83,8 +83,9 @@ export function registerSplitsTool(
       title: "Get Team Split Record",
       description: `Get a team's home record, road record, or record against a specific opponent.
 
-Home/road splits come from BALLDONTLIE standings in a single request, and also return
-point differential, win streak, and division/conference record. Head-to-head splits are
+Home/road splits come from ESPN standings (v2.20.0; BALLDONTLIE is cancelled) for NBA,
+NFL, NHL, MLB and WNBA in a single request, and also return point differential, streak,
+last 10 and division/conference record. Other sports tally finalized SGO events. Head-to-head splits are
 computed from real finalized game results.
 
 Args:

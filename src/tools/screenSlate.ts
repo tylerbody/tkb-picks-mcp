@@ -138,7 +138,7 @@ TIME LIMIT: games run three at a time; a game not started within 40 seconds is l
           eventID: string;
           matchup: string;
           startsAt: string | null;
-          status: "screened" | "no_props_posted" | "error";
+          status: "screened" | "no_props_posted" | "no_props_priced" | "error";
           screened?: number;
           qualified?: number;
           dropReasons?: unknown;
@@ -172,11 +172,15 @@ TIME LIMIT: games run three at a time; a game not started within 40 seconds is l
                 continue;
               }
               const matchup = String(sc.matchup ?? ev.matchup);
+              const screenedCount = Number(sc.pricedMarketsScreened ?? 0);
               results.push({
                 eventID: ev.eventID,
                 matchup,
                 startsAt: ev.startsAt,
-                status: "screened",
+                /* v2.20.1: zero priced markets is NOT a screen that found nothing. Measured
+                 * 2026-10-28: three games read "screened, 0 of 0 qualified" when their
+                 * players were attached but no house book had priced a prop yet. */
+                status: screenedCount === 0 ? "no_props_priced" : "screened",
                 screened: Number(sc.pricedMarketsScreened ?? 0),
                 qualified: Number(sc.qualified ?? 0),
                 dropReasons: sc.dropReasons,
@@ -207,7 +211,9 @@ TIME LIMIT: games run three at a time; a game not started within 40 seconds is l
           .map((r) =>
             r.status === "screened"
               ? `- ${r.matchup}: ${r.qualified} of ${r.screened} qualified, ${r.props.length} kept`
-              : `- ${r.matchup}: ${r.status === "no_props_posted" ? "NO PROPS POSTED YET" : `ERROR: ${r.note}`}`
+              : r.status === "no_props_priced"
+                ? `- ${r.matchup}: NO PROPS PRICED AT YOUR BOOKS YET (players are attached; re-run closer to tip)`
+                : `- ${r.matchup}: ${r.status === "no_props_posted" ? "NO PROPS POSTED YET" : `ERROR: ${r.note}`}`
           )
           .join("\n");
 

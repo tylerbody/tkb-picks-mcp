@@ -47,7 +47,7 @@ const StandingsInputSchema = z
       .string()
       .optional()
       .describe(
-        "REQUIRED for cfb, e.g. 'ACC', 'Big Ten', 'SEC', 'Big 12', 'Mountain West'. Ignored for league-wide sports. Matched case-insensitively against name and abbreviation."
+        "For cfb pass a conference ('ACC', 'Big Ten', 'SEC', 'Big 12', 'Mountain West') OR a teamName; with neither, the answer lists the conferences. For pro leagues it optionally filters to a conference ('Eastern', 'AFC'). Matched case-insensitively."
       ),
     season: z
       .number()
