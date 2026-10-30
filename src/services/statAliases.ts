@@ -32,9 +32,9 @@ export function resolveStatID(sport: SportKey, input: string): StatResolution {
     return { statID: input, aliasedFrom: null, suggestions: [] };
   }
   const want = norm(input);
-  const steps: ((m: { statID: string; label: string }) => boolean)[] = [
+  const steps: ((m: { statID: string; label: string; aliases?: string[] }) => boolean)[] = [
     (m) => norm(m.statID) === want,
-    (m) => norm(m.label) === want,
+    (m) => norm(m.label) === want || (m.aliases ?? []).some((a) => norm(a) === want),
     (m) => {
       const tail = m.statID.includes("_") ? m.statID.split("_").slice(1).join("_") : null;
       return tail !== null && norm(tail) === want;

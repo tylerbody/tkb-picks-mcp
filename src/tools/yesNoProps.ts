@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
-import { YES_NO_MARKETS, yesNoGradingFor } from "../services/marketCatalog.js";
+import { YES_NO_MARKETS, yesNoGradingFor, findMarketByLabel } from "../services/marketCatalog.js";
 import { extractPricedLine } from "../services/oddsPricing.js";
 import { SUPPORTED_SPORTS, supportsCapability, unsupportedMessage, DEFAULT_BOOKMAKERS, type SportKey } from "../constants.js";
 
@@ -92,9 +92,7 @@ Error Handling:
         }
 
         const catalog = YES_NO_MARKETS[params.sport];
-        const market = catalog.find(
-          (m) => m.label.toLowerCase() === params.marketLabel.toLowerCase()
-        );
+        const market = findMarketByLabel(catalog, params.marketLabel);
 
         if (!market) {
           return {

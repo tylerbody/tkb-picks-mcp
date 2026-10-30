@@ -65,13 +65,12 @@ describe("v2.14.0 NBA is reachable", () => {
     }
   });
 
-  test("points is labelled Score, never a bare Points, across all three", () => {
+  test("points is labelled Points across all three (v2.20.3), Score kept as an alias", () => {
     for (const sport of ["nba", "cbb", "wnba"] as const) {
-      assert.equal(
-        OU_PROP_MARKETS[sport].find((m) => m.statID === "points")?.label,
-        "Score"
-      );
-      assert.ok(!OU_PROP_MARKETS[sport].some((m) => m.label === "Points"));
+      const m = OU_PROP_MARKETS[sport].find((x) => x.statID === "points");
+      assert.equal(m?.label, "Points");
+      assert.ok(m?.aliases?.includes("Score"));
+      assert.equal(OU_PROP_MARKETS[sport].filter((x) => x.label === "Points").length, 1);
     }
   });
 

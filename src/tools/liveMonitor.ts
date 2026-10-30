@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { narrowingOddID, buildOddID } from "../services/oddIdBuilder.js";
-import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
+import { OU_PROP_MARKETS, findMarketByLabel } from "../services/marketCatalog.js";
 import { gameTotalStatFor, SUPPORTED_SPORTS, matchLinePeriodFor, type SportKey } from "../constants.js";
 import { readMatchTeams } from "../services/eventShape.js";
 
@@ -330,9 +330,7 @@ export function readLiveStat(
   }
 
   if (!pick.playerID || !pick.marketLabel) return null;
-  const market = OU_PROP_MARKETS[sport].find(
-    (m) => m.label.toLowerCase() === pick.marketLabel!.toLowerCase()
-  );
+  const market = findMarketByLabel(OU_PROP_MARKETS[sport], pick.marketLabel);
   if (!market) return null;
 
   const periodResults = event.results?.[PERIOD_FULL_GAME];
@@ -355,9 +353,7 @@ export function livePickOddID(sport: SportKey, pick: LiveMonitorInput["picks"][n
     });
   }
   if (!pick.playerID || !pick.marketLabel) return null;
-  const market = OU_PROP_MARKETS[sport].find(
-    (m) => m.label.toLowerCase() === pick.marketLabel!.toLowerCase()
-  );
+  const market = findMarketByLabel(OU_PROP_MARKETS[sport], pick.marketLabel);
   if (!market) return null;
   return buildOddID({
     statID: market.statID,

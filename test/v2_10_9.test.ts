@@ -57,9 +57,9 @@ describe("v2.10.9 the shared basketball namespace is actually shared", () => {
   test("the added labels do not collide with a label already in the block", () => {
     const labels = OU_PROP_MARKETS.wnba.map((m) => m.label);
     assert.equal(new Set(labels).size, labels.length, "duplicate label in wnba block");
-    // `points` is deliberately labelled "Score", not "Points", across the basketball
-    // blocks. An addition that reintroduced "Points" would be gradeable-ambiguous.
-    assert.ok(!labels.includes("Points"), "wnba must not carry a bare Points label");
+    // v2.20.3: `points` is now labelled "Points" (was "Score", kept as an alias).
+    // Exactly one market may carry it.
+    assert.equal(labels.filter((l) => l === "Points").length, 1, "wnba carries exactly one Points label");
   });
 
   test("wnba count is 20, matching cbb", () => {

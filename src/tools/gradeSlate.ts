@@ -4,7 +4,7 @@ import type { SGOClient } from "../services/sgoClient.js";
 import type { BDLClient } from "../services/bdlClient.js";
 import type { NHLStatsClient } from "../services/nhlStatsClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
-import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
+import { OU_PROP_MARKETS, findMarketByLabel } from "../services/marketCatalog.js";
 import { gameTotalStatFor, SUPPORTED_SPORTS, hasDrawOutcome, matchLinePeriodFor, type SportKey } from "../constants.js";
 import type { SGOEvent } from "../types.js";
 import {
@@ -375,9 +375,7 @@ function resolveStatID(sport: SportKey, p: BatchGradeInput["picks"][number]): st
   if (p.marketType === "total") return gameTotalStatFor(sport);
   if (p.marketType !== "player_prop") return "points";
   if (!p.marketLabel) return null;
-  const market = OU_PROP_MARKETS[sport].find(
-    (m) => m.label.toLowerCase() === p.marketLabel!.toLowerCase()
-  );
+  const market = findMarketByLabel(OU_PROP_MARKETS[sport], p.marketLabel);
   return market?.statID ?? null;
 }
 

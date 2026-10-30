@@ -56,7 +56,40 @@ import type { SportKey } from "../constants.js";
    * certainly understated rather than genuinely absent. A market no book posts simply
    * returns nothing, which is the correct outcome and costs nothing.
    */
-export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }[]> = {
+/**
+ * A catalogued market. `aliases` ADDED v2.20.3: older labels that must keep resolving
+ * (pick registries and scheduled-run briefs written before a rename still say them).
+ */
+export interface CatalogMarket {
+  statID: string;
+  label: string;
+  aliases?: string[];
+}
+
+/**
+ * Label lookup used by every tool that takes a `marketLabel`. Matches the label or
+ * any alias, case-insensitive. ADDED v2.20.3 so a rename never breaks old picks.
+ */
+export function findMarketByLabel<T extends CatalogMarket>(catalog: readonly T[], label: string | undefined | null): T | undefined {
+  if (!label) return undefined;
+  const want = label.trim().toLowerCase();
+  return (
+    catalog.find((m) => m.label.toLowerCase() === want) ??
+    catalog.find((m) => (m.aliases ?? []).some((a) => a.toLowerCase() === want))
+  );
+}
+
+/*
+ * v2.20.3 LABEL FIX: `points` IS "Points" (basketball, football) AND "Runs" (MLB).
+ *
+ * SGO's stats page: "The statID `points` is special. It's used in every sport to define
+ * the stat which determines the winner." SGO's own markets table calls the player
+ * market "Score", and this catalog copied that. Result, measured: tkb_get_odds REFUSED
+ * marketLabel="Points" for NBA, and output lines read "OVER 26.5 Score". In MLB the
+ * same "Score" meant runs scored. Labels are per sport, so "Points" in NBA and
+ * "Points" (goals+assists) in NHL never meet in one lookup. "Score" stays as an alias.
+ */
+export const OU_PROP_MARKETS: Record<SportKey, CatalogMarket[]> = {
   mlb: [
     { statID: "batting_doubles", label: "Doubles" },
     { statID: "pitching_earnedRuns", label: "Earned Runs" },
@@ -69,7 +102,7 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
     { statID: "pitching_pitchesThrown", label: "Pitches Thrown" },
     { statID: "batting_runs+rbi", label: "Runs + RBIs" },
     { statID: "batting_RBI", label: "Runs Batted In" },
-    { statID: "points", label: "Score" },
+    { statID: "points", label: "Runs", aliases: ["Score", "Runs Scored"] },
     { statID: "batting_singles", label: "Singles" },
     { statID: "batting_stolenBases", label: "Stolen Bases" },
     { statID: "batting_strikeouts", label: "Strikeouts (batter)" },
@@ -106,7 +139,7 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
     { statID: "points+rebounds+assists", label: "Points + Rebounds + Assists" },
     { statID: "rebounds", label: "Rebounds" },
     { statID: "rebounds+assists", label: "Rebounds + Assists" },
-    { statID: "points", label: "Score" },
+    { statID: "points", label: "Points", aliases: ["Score"] },
     { statID: "steals", label: "Steals" },
     { statID: "threePointersAttempted", label: "Three Pointers Attempted" },
     { statID: "threePointersMade", label: "Three Pointers Made" },
@@ -136,7 +169,7 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
     { statID: "rushing_touchdowns", label: "Rushing Touchdowns" },
     { statID: "rushing_yards", label: "Rushing Yards" },
     { statID: "defense_sacks", label: "Sacks" },
-    { statID: "points", label: "Score" },
+    { statID: "points", label: "Points", aliases: ["Score"] },
     { statID: "defense_soloTackles", label: "Solo Tackles" },
     { statID: "touchdowns", label: "Touchdowns" },
     { statID: "turnovers", label: "Turnovers" },
@@ -171,7 +204,7 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
     { statID: "rushing_touchdowns", label: "Rushing Touchdowns" },
     { statID: "rushing_yards", label: "Rushing Yards" },
     { statID: "defense_sacks", label: "Sacks" },
-    { statID: "points", label: "Score" },
+    { statID: "points", label: "Points", aliases: ["Score"] },
     { statID: "touchdowns", label: "Touchdowns" },
     // ---- ADDED v2.10.8, shared football namespace. See the block comment above. ----
     { statID: "receiving_targets", label: "Receiving Targets" },
@@ -222,9 +255,8 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
    * free throws, field goals, the PRA combinations, double-double, triple-double and
    * first basket, which is this list.
    *
-   * `points` IS LABELLED "Score" here, exactly as in the other two basketball blocks,
-   * so one label means one thing across the connector and tkb_grade_pick cannot be
-   * handed an ambiguous "Points".
+   * `points` WAS LABELLED "Score" here until v2.20.3; it is now "Points" with "Score"
+   * kept as an alias (see the note above OU_PROP_MARKETS).
    *
    * NOT ADDED: the "two pointers" market SGO's NBA page mentions in prose. Its statID
    * spelling is not given anywhere measured, and a guessed statID matches nothing
@@ -247,7 +279,7 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
     { statID: "points+rebounds+assists", label: "Points + Rebounds + Assists" },
     { statID: "rebounds", label: "Rebounds" },
     { statID: "rebounds+assists", label: "Rebounds + Assists" },
-    { statID: "points", label: "Score" },
+    { statID: "points", label: "Points", aliases: ["Score"] },
     { statID: "steals", label: "Steals" },
     { statID: "threePointersAttempted", label: "Three Pointers Attempted" },
     { statID: "threePointersMade", label: "Three Pointers Made" },
@@ -269,7 +301,7 @@ export const OU_PROP_MARKETS: Record<SportKey, { statID: string; label: string }
     { statID: "points+rebounds+assists", label: "Points + Rebounds + Assists" },
     { statID: "rebounds", label: "Rebounds" },
     { statID: "rebounds+assists", label: "Rebounds + Assists" },
-    { statID: "points", label: "Score" },
+    { statID: "points", label: "Points", aliases: ["Score"] },
     { statID: "steals", label: "Steals" },
     { statID: "threePointersAttempted", label: "Three Pointers Attempted" },
     { statID: "threePointersMade", label: "Three Pointers Made" },

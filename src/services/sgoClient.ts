@@ -36,6 +36,7 @@ export class SGOClient {
       // real starts) were timing out at 15s under real use.
       timeout: 30000,
     });
+    installRetryAfter(this.http);
   }
 
   /**
@@ -505,6 +506,44 @@ export class SGOClient {
   }
 }
 
+/**
+ * RETRY-AFTER. ADDED v2.20.3.
+ *
+ * SGO's FAQ: a 429 "includes a Retry-After header indicating when to retry", and its
+ * retry rule is: 429 wait and retry, other 4xx never retry. Before this the connector
+ * threw on the first 429 and the run lost the call. Now a 429 whose wait is short
+ * (<= RETRY_AFTER_MAX_MS) is waited out and retried ONCE. A longer wait, a missing
+ * header, or a second 429 is thrown with the wait SGO asked for in the message.
+ * Nothing else is retried here.
+ */
+export const RETRY_AFTER_MAX_MS = 15_000;
+
+/** Seconds ("5") or an HTTP date. Returns ms to wait, or null if unreadable. */
+export function parseRetryAfter(value: unknown, now = Date.now()): number | null {
+  if (value === undefined || value === null) return null;
+  const raw = String(Array.isArray(value) ? value[0] : value).trim();
+  if (raw === "") return null;
+  if (/^\d+(\.\d+)?$/.test(raw)) return Math.round(Number(raw) * 1000);
+  const at = Date.parse(raw);
+  if (Number.isNaN(at)) return null;
+  return Math.max(0, at - now);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+export function installRetryAfter(http: AxiosInstance, sleepFn: (ms: number) => Promise<unknown> = sleep): void {
+  http.interceptors.response.use(undefined, async (err: unknown) => {
+    if (!(err instanceof AxiosError) || err.response?.status !== 429 || !err.config) throw err;
+    const cfg = err.config as typeof err.config & { _tkbRetried?: boolean };
+    const waitMs = parseRetryAfter(err.response.headers?.["retry-after"]);
+    (err as AxiosError & { retryAfterMs?: number | null }).retryAfterMs = waitMs;
+    if (cfg._tkbRetried || waitMs === null || waitMs > RETRY_AFTER_MAX_MS) throw err;
+    cfg._tkbRetried = true;
+    await sleepFn(waitMs);
+    return http.request(cfg);
+  });
+}
+
 function formatSGOError(err: unknown, context: string): Error {
   if (err instanceof AxiosError) {
     const status = err.response?.status;
@@ -515,8 +554,13 @@ function formatSGOError(err: unknown, context: string): Error {
       );
     }
     if (status === 429) {
+      const waitMs = (err as AxiosError & { retryAfterMs?: number | null }).retryAfterMs;
+      const wait =
+        typeof waitMs === "number"
+          ? ` SGO asked for a ${Math.ceil(waitMs / 1000)}s wait (Retry-After).`
+          : " SGO sent no Retry-After; its docs say to wait up to a minute.";
       return new Error(
-        `SportsGameOdds API rate limit hit while fetching ${context}. Wait a moment and retry, or reduce request frequency.`
+        `SportsGameOdds API rate limit hit while fetching ${context}.${wait} Short waits are retried once automatically; this one was not recoverable in-call.`
       );
     }
     return new Error(

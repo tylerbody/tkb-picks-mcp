@@ -8,8 +8,7 @@ import { flexNumberOptional, asNumber } from "../services/flexibleInput.js";
 import {
   OU_PROP_MARKETS,
   YES_NO_MARKETS,
-  yesNoGradingFor,
-} from "../services/marketCatalog.js";
+  yesNoGradingFor, findMarketByLabel } from "../services/marketCatalog.js";
 import { gameTotalStatFor, SUPPORTED_SPORTS, hasDrawOutcome, matchLinePeriodFor, type SportKey } from "../constants.js";
 import {
   gradeSpread,
@@ -357,9 +356,7 @@ Error Handling:
         let statID = params.marketType === "total" ? gameTotalStatFor(params.sport) : "points";
         if (params.marketType === "player_prop") {
           const catalog = OU_PROP_MARKETS[params.sport];
-          const market = catalog.find(
-            (m) => m.label.toLowerCase() === params.marketLabel!.toLowerCase()
-          );
+          const market = findMarketByLabel(catalog, params.marketLabel);
           if (!market) {
             return {
               content: [
@@ -376,9 +373,7 @@ Error Handling:
 
         if (params.marketType === "player_yes_no") {
           const catalog = YES_NO_MARKETS[params.sport];
-          const market = catalog.find(
-            (m) => m.label.toLowerCase() === params.marketLabel!.toLowerCase()
-          );
+          const market = findMarketByLabel(catalog, params.marketLabel);
           if (!market) {
             return {
               content: [

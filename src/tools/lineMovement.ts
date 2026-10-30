@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { SGOClient } from "../services/sgoClient.js";
 import { buildOddID } from "../services/oddIdBuilder.js";
-import { OU_PROP_MARKETS } from "../services/marketCatalog.js";
+import { OU_PROP_MARKETS, findMarketByLabel } from "../services/marketCatalog.js";
 import { extractOpeningFromBook, extractPricedLine, roundToNearestTen } from "../services/oddsPricing.js";
 import { readMatchTeams } from "../services/eventShape.js";
 import { gameTotalStatFor, SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, matchLinePeriodFor, type SportKey } from "../constants.js";
@@ -175,9 +175,7 @@ Error Handling:
         // stat. See GAME_TOTAL_STAT in constants.ts for the measurement.
         let statID = params.marketType === "total" ? gameTotalStatFor(params.sport) : "points";
         if (params.marketType === "player_prop") {
-          const market = OU_PROP_MARKETS[params.sport].find(
-            (m) => m.label.toLowerCase() === params.marketLabel!.toLowerCase()
-          );
+          const market = findMarketByLabel(OU_PROP_MARKETS[params.sport], params.marketLabel);
           if (!market) {
             return {
               content: [
