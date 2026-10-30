@@ -7,6 +7,7 @@ import { gameTotalStatFor, SUPPORTED_SPORTS, DEFAULT_BOOKMAKERS, matchLinePeriod
 import { readMatchTeams } from "../services/eventShape.js";
 import type { SGOEvent } from "../types.js";
 import { slateDayBounds } from "../services/slateDay.js";
+import { enumerateSlate } from "../services/slateEvents.js";
 
 /**
  * SLATE-WIDE TEAM LINES - moneyline, spread and total for many games at once.
@@ -398,16 +399,16 @@ Error Handling:
            * window goes from about 12 entities to about 24, against a 3,000,000/day
            * allowance measured at ~1,200 used. Correctness is worth twice nothing.
            */
-          const slate = await sgo.getAllEvents({
+          // v2.20.2: enumerate with AND without the odd filter (see services/slateEvents.ts).
+          const enumerated = await enumerateSlate(sgo, {
             leagueID,
             startsAfter,
             startsBefore,
             oddIDs: narrowingOddID(input.sport as SportKey),
-            limit: 100,
           });
-          requestCount = 1;
+          requestCount = 2;
 
-          const slateIDs = slate.map((e) => e.eventID).filter((id): id is string => Boolean(id));
+          const slateIDs = enumerated.events.map((e) => e.eventID).filter((id): id is string => Boolean(id));
 
           if (!slateIDs.length) {
             return {

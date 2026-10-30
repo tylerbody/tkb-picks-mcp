@@ -297,9 +297,11 @@ describe("v2.10.4 C: a date range reports the whole slate, priced or not", () =>
     assert.equal(oddsCalls[0]!.bookmakerID, "draftkings,fanduel,betmgm,caesars,hardrockbet");
   });
 
-  test("requestCount is reported honestly as 2, not 1", async () => {
+  test("requestCount is reported honestly: 3 since v2.20.2 (filtered + unfiltered slate pass + odds)", async () => {
+    /* v2.20.2 added an unfiltered enumeration pass so a game with no posted
+     * moneyline can no longer be hidden by the odd filter (NCAAB, 2026-10-30). */
     const { res } = await callRange();
-    assert.equal(res.structuredContent?.requestCount, 2);
+    assert.equal(res.structuredContent?.requestCount, 3);
   });
 
   test("REGRESSION: the explicit eventIDs path is unchanged and still one request", async () => {

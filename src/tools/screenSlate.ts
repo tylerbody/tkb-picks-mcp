@@ -8,6 +8,7 @@ import type { EspnClient } from "../services/espnClient.js";
 import { registerScreenPropsTool } from "./screenProps.js";
 import { slateDayBounds } from "../services/slateDay.js";
 import { narrowingOddID } from "../services/oddIdBuilder.js";
+import { enumerateSlate } from "../services/slateEvents.js";
 import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
 
 /**
@@ -110,13 +111,15 @@ TIME LIMIT: games run three at a time; a game not started within 40 seconds is l
           events = input.eventIDs.map((id) => ({ eventID: id, matchup: id, startsAt: null, started: false }));
         } else if (input.date) {
           const w = slateDayBounds(input.date);
-          const raw = await sgo.getAllEvents({
-            leagueID: sgo.leagueIDFor(sport),
-            startsAfter: w.startsAfter,
-            startsBefore: w.startsBefore,
-            limit: 100,
-            oddIDs: narrowingOddID(sport),
-          });
+          // v2.20.2: enumerate with AND without the odd filter (see services/slateEvents.ts).
+          const raw = (
+            await enumerateSlate(sgo, {
+              leagueID: sgo.leagueIDFor(sport),
+              startsAfter: w.startsAfter,
+              startsBefore: w.startsBefore,
+              oddIDs: narrowingOddID(sport),
+            })
+          ).events;
           events = raw.map((e) => ({
             eventID: e.eventID,
             matchup: `${e.teams?.away?.names?.long ?? "?"} @ ${e.teams?.home?.names?.long ?? "?"}`,

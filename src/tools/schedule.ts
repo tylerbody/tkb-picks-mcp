@@ -6,6 +6,7 @@ import { SUPPORTED_SPORTS, type SportKey } from "../constants.js";
 import { emptyResultExplanation } from "../services/leagueAccess.js";
 import type { NormalizedGame } from "../types.js";
 import { slateDayBounds } from "../services/slateDay.js";
+import { enumerateSlate } from "../services/slateEvents.js";
 import {
   normalizeTeamKey,
   POWER_4,
@@ -167,20 +168,21 @@ Error Handling:
         // first response never mentioned. `count: 25` read like an answer.
         //
         // A trivial oddID also stops the entire odds map being serialised for
-        // every game, which a schedule never reads. The same trick is used by
-        // tkb_probe_event_fields for the same reason. Per SGO's docs the oddID
-        // filter shapes odds, bookmakers and players only - it does not decide
-        // WHICH EVENTS come back - so no game can be hidden by it.
-        const events = await sgo.getAllEvents({
+        // every game, which a schedule never reads.
+        //
+        // v2.20.2: THE CLAIM THAT THE FILTER CANNOT HIDE A GAME WAS NEVER MEASURED, and
+        // NCAAB contradicted it (24 events returned; ESPN lists Division I games on
+        // Nov 2 that SGO never returned). The slate is now enumerated with AND without
+        // the filter and unioned, and the response reports how many games only the
+        // unfiltered pass found. See services/slateEvents.ts.
+        const slate = await enumerateSlate(sgo, {
           leagueID,
           startsAfter,
           startsBefore,
-          limit: 100,
           oddIDs: narrowingOddID(params.sport),
         });
-
-        // Recorded immediately: the next getAllEvents call overwrites it.
-        const fetchTruncated = sgo.lastFetchTruncated;
+        const events = slate.events;
+        const fetchTruncated = slate.truncated;
 
         let filtered = events;
         let filterNote = "";
@@ -387,6 +389,13 @@ Error Handling:
           // The raw fetch size, so "the filter cut it" and "the cap cut it" are
           // distinguishable from the response alone rather than by re-running.
           eventsFetchedBeforeFilters: events.length,
+          // v2.20.2 measurement: games the odd-filtered fetch did NOT return.
+          enumeration: {
+            withOddFilter: slate.filteredCount,
+            withoutOddFilter: slate.unfilteredCount,
+            foundOnlyWithoutFilter: slate.onlyUnfiltered.length,
+            ...(slate.unfilteredError ? { unfilteredError: slate.unfilteredError } : {}),
+          },
           // The exact UTC window asked of SGO, so a "missing" game can be checked
           // against the bounds from the response alone.
           window: {
@@ -401,7 +410,13 @@ Error Handling:
           content: [
             {
               type: "text" as const,
-              text: `Found ${games.length} ${params.sport.toUpperCase()} game(s).${filterNote}${truncationNote}\n\n${JSON.stringify(output, null, 2)}`,
+              text:
+                `Found ${games.length} ${params.sport.toUpperCase()} game(s).${filterNote}${truncationNote}` +
+                (slate.onlyUnfiltered.length
+                  ? ` NOTE: ${slate.onlyUnfiltered.length} of these were returned ONLY by the unfiltered pass (the old odd-filtered query would have hidden them). They may have no lines posted yet.`
+                  : "") +
+                (slate.unfilteredError ? ` WARNING: the unfiltered pass failed (${slate.unfilteredError}), so games without a posted moneyline may be missing.` : "") +
+                `\n\n${JSON.stringify(output, null, 2)}`,
             },
           ],
           structuredContent: output,

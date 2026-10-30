@@ -87,6 +87,10 @@ export class SGOClient {
       const response = await this.http.get<SGOEventsResponse>("/events", {
         params: apiParams,
       });
+      // v2.20.2: clean team and player names at the source. Measured 2026-10-30:
+      // SGO sent "Notre Dame of Maryland\tGators" with a literal TAB, which would
+      // land verbatim in a published opener and break name matching downstream.
+      for (const e of response.data?.data ?? []) sanitizeEventNames(e);
       return response.data;
     } catch (err) {
       throw formatSGOError(err, "events");
@@ -549,7 +553,26 @@ function formatSGOError(err: unknown, context: string): Error {
  * correct" is exactly what a silent stop looks like from the outside, and the cost
  * of being wrong is a partial slate presented as a complete one.
  */
-function nextCursorOfEvents(page: unknown): string | undefined {
+/** Collapse tabs, newlines and repeated spaces in a display string. PURE. */
+export function cleanName(v: unknown): unknown {
+  return typeof v === "string" ? v.replace(/[\t\r\n\u00a0]+/g, " ").replace(/ {2,}/g, " ").trim() : v;
+}
+
+/** In place: every team name variant and every player name on one event. */
+export function sanitizeEventNames(e: unknown): void {
+  const ev = e as { teams?: Record<string, { names?: Record<string, unknown> } | undefined>; players?: Record<string, Record<string, unknown>> };
+  for (const side of ["home", "away"]) {
+    const names = ev?.teams?.[side]?.names;
+    if (names) for (const k of Object.keys(names)) names[k] = cleanName(names[k]);
+  }
+  if (ev?.players && typeof ev.players === "object") {
+    for (const p of Object.values(ev.players)) {
+      if (p && typeof p === "object") for (const k of ["name", "firstName", "lastName"]) if (k in p) p[k] = cleanName(p[k]);
+    }
+  }
+}
+
+export function nextCursorOfEvents(page: unknown): string | undefined {
   if (!page || typeof page !== "object") return undefined;
   const p = page as Record<string, unknown>;
   const meta = p.meta as Record<string, unknown> | undefined;
